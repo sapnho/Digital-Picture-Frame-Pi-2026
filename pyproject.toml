@@ -70,4 +70,7 @@ ignore = ["E501", "B008"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Pinned explicitly: pytest-asyncio warns on every run while this is unset, and
+# will change the default in a future release.
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["ignore::DeprecationWarning"]

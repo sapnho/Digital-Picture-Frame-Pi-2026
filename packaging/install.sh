@@ -7,10 +7,12 @@
 # Or, from an unpacked source tree:   bash packaging/install.sh
 #
 # Safe to re-run: it upgrades in place, never overwrites your configuration,
-# and asks nothing it can work out for itself. Re-running is also how you
-# update.
+# and asks nothing it can work out for itself. Re-running IS the update: it
+# notices an existing install, keeps your answers, upgrades the code and
+# restarts the frame if it was running.
 #
-# Unattended:  PICFRAME_YES=1 bash install.sh    (takes every default)
+#   PICFRAME_YES=1    take every default; never ask (unattended installs)
+#   PICFRAME_SETUP=1  on an update, ask the setup questions again anyway
 
 set -euo pipefail
 
@@ -75,12 +77,31 @@ WORKDIR=""
 cleanup() { [ -n "$WORKDIR" ] && rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
-bold "picframe3 installer"
-echo "   installing $SOURCE_DESC"
+# Is this an update?  An existing venv with a working picframe3 in it is the
+# honest test -- not the config file, which survives an uninstall.
+UPDATE=0
+OLD_VERSION=""
+WAS_RUNNING=0
+if [ -x "$VENV/bin/picframe3" ] && OLD_VERSION="$("$VENV/bin/picframe3" --version 2>/dev/null)"; then
+  UPDATE=1
+  if command -v systemctl >/dev/null && \
+     systemctl is-active --quiet "picframe3@$RUN_USER" 2>/dev/null; then
+    WAS_RUNNING=1
+  fi
+fi
+
+if [ "$UPDATE" -eq 1 ]; then
+  bold "picframe3 updater"
+  echo "   installed  $OLD_VERSION"
+  echo "   updating from $SOURCE_DESC"
+else
+  bold "picframe3 installer"
+  echo "   installing $SOURCE_DESC"
+fi
 echo "   for user   $RUN_USER"
 
 # ---------------------------------------------------------------- 1. packages
-step "1/5  System packages"
+step "1/6  System packages"
 # Deliberately short. There is no compositor, no X server and no SDL here:
 # the frame renders through EGL onto DRM/KMS by itself.
 PACKAGES=(
@@ -117,14 +138,14 @@ else
 fi
 
 # ------------------------------------------------------------------ 2. groups
-step "2/5  Permissions"
+step "2/6  Permissions"
 # video + render: the DRM device.  input: keyboard and touchscreen, which are
 # read straight from evdev because there is no display server to do it for us.
 $SUDO usermod -aG video,render,input "$RUN_USER" 2>/dev/null || true
 ok "$RUN_USER is in video, render and input"
 
 # -------------------------------------------------------------------- 3. venv
-step "3/5  picframe3"
+step "3/6  picframe3"
 if [ "$MODE" = "download" ]; then
   WORKDIR="$(mktemp -d)"
   echo "   fetching $REPO…"
@@ -157,24 +178,57 @@ $SUDO ln -sfn "$VENV/bin/picframe3" "$SHIM"
 ok "$("$VENV/bin/picframe3" --version) installed, 'picframe3' on your PATH"
 
 # ------------------------------------------------------------------- 4. setup
-step "4/5  Setting it up"
-if [ -n "${PICFRAME_YES:-}" ]; then
+if [ "$UPDATE" -eq 1 ] && [ -z "${PICFRAME_SETUP:-}" ]; then
+  step "4/6  Keeping your settings"
+  # An update must not re-interrogate someone who already answered. --yes
+  # here reads the existing config, writes it straight back, and refreshes the
+  # systemd unit so a renamed option or a moved venv takes effect.
+  "$SHIM" --config "$CONFIG" setup --yes --venv-bin "$VENV/bin" >/dev/null
+  ok "$CONFIG untouched; service unit refreshed"
+  echo "   Run 'picframe3 setup' to change any of your answers."
+elif [ -n "${PICFRAME_YES:-}" ]; then
+  step "4/6  Setting it up"
   "$SHIM" --config "$CONFIG" setup --yes --venv-bin "$VENV/bin"
 elif [ -r /dev/tty ]; then
+  step "4/6  Setting it up"
   # Piped from the web, stdin is this script — so hand the wizard the
   # terminal explicitly, or it would see no tty and silently take every
   # default, which is not an install anyone asked for.
   "$SHIM" --config "$CONFIG" setup --venv-bin "$VENV/bin" < /dev/tty
 else
+  step "4/6  Setting it up"
   "$SHIM" --config "$CONFIG" setup --yes --venv-bin "$VENV/bin"
 fi
 
-# ------------------------------------------------------------------- 5. check
-step "5/5  Checking"
+# ----------------------------------------------------------------- 5. restart
+step "5/6  The running frame"
+if [ "$WAS_RUNNING" -eq 1 ]; then
+  # It was running the old code a moment ago, and nothing picks up new Python
+  # without a restart -- otherwise the owner upgrades and sees no change.
+  $SUDO systemctl restart "picframe3@$RUN_USER"
+  sleep 2
+  if systemctl is-active --quiet "picframe3@$RUN_USER"; then
+    ok "restarted picframe3@$RUN_USER"
+  else
+    warn "it did not come back up — journalctl -u picframe3@$RUN_USER -n 40"
+  fi
+elif [ "$UPDATE" -eq 1 ]; then
+  ok "not running; start it with: sudo systemctl start picframe3@$RUN_USER"
+else
+  ok "nothing to restart yet"
+fi
+
+# ------------------------------------------------------------------- 6. check
+step "6/6  Checking"
 "$SHIM" --config "$CONFIG" doctor || true
 
 echo
-bold "Installed."
+NEW_VERSION="$("$VENV/bin/picframe3" --version 2>/dev/null || echo picframe3)"
+if [ "$UPDATE" -eq 1 ]; then
+  bold "Updated: $OLD_VERSION → $NEW_VERSION"
+else
+  bold "Installed: $NEW_VERSION"
+fi
 cat <<NEXT
 
    picframe3 scan                    index your pictures

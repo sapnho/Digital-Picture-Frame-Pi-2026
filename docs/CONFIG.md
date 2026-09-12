@@ -34,7 +34,7 @@ Pacing and sequencing: how long each picture stays, how it changes, what comes n
 | `interval` | number | `180.0` |  |
 | `transition` | string | `'fade'` | Any name from `picframe3 transitions`, or `random`. |
 | `transition_time` | number | `2.5` |  |
-| `order` | string | `'shuffle'` | shuffle · random · date_desc · date_asc · name · folder · recent · least_played. `shuffle` gives every picture exactly one turn per round, in a fresh random order each round, and keeps the round in the index so reboots, rescans and newly copied photographs do not rob the pictures still waiting. `random` has no memory and can repeat. |
+| `order` | string | `'shuffle'` | shuffle · random · date_desc · date_asc · name · folder · recent · least_played. `shuffle` gives every picture exactly one turn per round in a fresh random order, and keeps the round in the index, so reboots, rescans and newly copied photographs cannot rob the pictures still waiting. `random` has no memory and may repeat. |
 | `recent_days` | integer | `7` | Pictures newer than this are shown first in each shuffle round. |
 | `reshuffle_after` | integer | `1` |  |
 | `portrait_pairs` | boolean | `False` |  |
@@ -57,7 +57,7 @@ How a picture is composed on screen, and what is written over it.
 | `blur_zoom` | number | `1.06` |  |
 | `blur_dim` | number | `0.55` |  |
 | `upscale_limit` | number | `2.5` | Beyond this the frame blur-fills rather than enlarging a small picture. |
-| `mat_style` | string | `'single'` | single · double · bevel · float · float_shadow · polaroid · random · `""` for any |
+| `mat_style` | string | `'single'` | single · single_bevel · double · double_bevel · float · float_shadow · float_wrap · polaroid · random · `""` for any. Several names separated by spaces means "choose from these". Note that `polaroid` deliberately sits the print high with a deep lower margin; if pictures look badly centred, this style is usually why. |
 | `mat_tolerance` | number | `0.01` | How different the picture and screen shapes must be before `auto` mats. `-1` always mats. |
 | `mat_outer_color` | list[int] | None | `None` | `null` derives the colour from the photograph. |
 | `mat_inner_color` | list[int] | None | `None` |  |
@@ -68,8 +68,7 @@ How a picture is composed on screen, and what is written over it.
 | `mat_auto_inner_color` | boolean | `True` |  |
 | `mat_bevel_width` | integer | `5` |  |
 | `font` | str | None | `None` |  |
-| `show_text` | list of strings | `['title', 'caption', 'date', 'location']` | Any of: title, caption, name, date, location, folder, camera, exposure. The order is the order they are written; the Settings tab edits this list. |
-| `text_separator` | string | `'  ·  '` | Written between the elements above. `"\n"` puts each on its own line. |
+| `show_text` | list of strings | `['title', 'caption', 'date', 'location']` | Any of: title, caption, name, date, location, folder, camera, exposure. The order is the order they are written, and the Settings tab edits this list. |
 | `text_size` | integer | `34` |  |
 | `text_seconds` | number | `16.0` |  |
 | `text_justify` | string | `'L'` |  |
@@ -77,6 +76,7 @@ How a picture is composed on screen, and what is written over it.
 | `text_margin_x` | integer | `64` |  |
 | `text_margin_y` | integer | `36` |  |
 | `text_scrim` | number | `0.5` |  |
+| `text_separator` | string | `'  ·  '` | Written between the elements above. `"\n"` puts each on its own line. |
 | `date_format` | string | `'%-d %B %Y'` |  |
 | `show_clock` | boolean | `False` |  |
 | `clock_format` | string | `'%H:%M'` |  |
