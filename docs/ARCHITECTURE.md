@@ -115,6 +115,18 @@ Video frames arrive top-down while GL textures are bottom-up. Rather than
 flipping several megabytes per frame on the CPU, the slide's sampling transform
 is inverted (`Slide.flip_v`).
 
+Playback starts only once the crossfade has finished: the poster frame fades in
+as a still picture and the film begins on a fully opaque screen, so nothing is
+half-transparent while it moves and the opening second is not thrown away.
+
+**The player ends a video slide, not the clock.** While a video runs the next
+change is pushed half a second ahead on every tick, so it plays for its own
+length however short the picture interval is; when the player stops — end of
+stream, `video_max_seconds` reached, or the `video_loop` window used up — the
+slide ends at once. The cap and the loop window are enforced inside
+`VideoPlayer`, which pauses itself and leaves the last frame on screen to be
+faded out, because only the player knows when it has really finished.
+
 ## Index
 
 SQLite in WAL mode, so a background scan writing never blocks the render loop's

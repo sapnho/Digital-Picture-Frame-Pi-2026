@@ -177,13 +177,20 @@ class VideoPlayer:
     """
 
     def __init__(self, size: tuple[int, int], *, mute: bool = False,
-                 loop: bool = False, fit: str = "contain"):
+                 loop: bool = False, fit: str = "contain",
+                 max_seconds: float = 0.0):
         if not available():
             raise RuntimeError("GStreamer is not available")
         self.size = size
         self.mute = mute
         self.loop = loop
         self.fit = fit
+        #: Wall-clock seconds of playback after which the player stops itself;
+        #: 0 means "play to the end".  The player enforces this, rather than the
+        #: slideshow timer, because only the player knows when it has really
+        #: finished -- the frame waits for that signal.  With ``loop`` on, this
+        #: is the window the video repeats inside.
+        self.max_seconds = float(max_seconds)
         self._pipeline = None
         self._sink = None
         self._path: str | None = None
@@ -191,6 +198,8 @@ class VideoPlayer:
         self._error: str | None = None
         self._lock = threading.Lock()
         self._started = 0.0
+        self._paused = False
+        self._paused_at = 0.0
         self.frame_size: tuple[int, int] = size
 
     # -- control -----------------------------------------------------------
@@ -238,12 +247,21 @@ class VideoPlayer:
         self._error = None
         pipeline.set_state(Gst.State.PLAYING)
         self._started = time.monotonic()
+        self._paused = False
         _log.info("playing video %s", os.path.basename(path))
         return True
 
     def pause(self, paused: bool = True) -> None:
-        if self._pipeline is not None:
-            self._pipeline.set_state(Gst.State.PAUSED if paused else Gst.State.PLAYING)
+        if self._pipeline is None:
+            return
+        # A paused frame is not playing, so the time it spends paused must not
+        # count against ``max_seconds``.
+        if paused and not self._paused:
+            self._paused_at = time.monotonic()
+        elif not paused and self._paused:
+            self._started += time.monotonic() - self._paused_at
+        self._paused = paused
+        self._pipeline.set_state(Gst.State.PAUSED if paused else Gst.State.PLAYING)
 
     def stop(self) -> None:
         with self._lock:
@@ -253,6 +271,7 @@ class VideoPlayer:
                 self._sink = None
             self._path = None
             self._eos = False
+            self._paused = False
 
     def close(self) -> None:
         self.stop()
@@ -261,6 +280,29 @@ class VideoPlayer:
     @property
     def playing(self) -> bool:
         return self._pipeline is not None and not self._eos
+
+    @property
+    def elapsed(self) -> float:
+        """Seconds since playback started, across repeats."""
+        if self._pipeline is None:
+            return 0.0
+        if self._paused:
+            return self._paused_at - self._started
+        return time.monotonic() - self._started
+
+    def expired(self) -> bool:
+        return self.max_seconds > 0 and self.elapsed >= self.max_seconds
+
+    def _finish(self) -> None:
+        """Stop feeding frames, leaving the last one on screen.
+
+        The pipeline is paused rather than torn down: the slide is still up and
+        about to be crossfaded away, and a frozen last frame is what should fade
+        out.  ``stop()`` releases it when the next slide arrives.
+        """
+        self._eos = True
+        if self._pipeline is not None:
+            self._pipeline.set_state(Gst.State.PAUSED)
 
     @property
     def error(self) -> str | None:
@@ -290,6 +332,8 @@ class VideoPlayer:
         if self._pipeline is None:
             return None
         self._pump_bus()
+        if not self._eos and self.expired():
+            self._finish()
         if self._eos or self._sink is None:
             return None
         sample = self._sink.emit("try-pull-sample", 0)
@@ -321,12 +365,14 @@ class VideoPlayer:
             if msg is None:
                 return
             if msg.type == Gst.MessageType.EOS:
-                if self.loop and self._path:
+                # Looping only repeats while there is time left in the window;
+                # without that check the frame would sit on one video forever.
+                if self.loop and self._path and not self.expired():
                     self._pipeline.seek_simple(
                         Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, 0
                     )
                 else:
-                    self._eos = True
+                    self._finish()
                     _log.debug("video reached end of stream")
             elif msg.type == Gst.MessageType.ERROR:
                 err, debug = msg.parse_error()

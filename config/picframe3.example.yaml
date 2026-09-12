@@ -42,7 +42,8 @@ slideshow:
   transition_choices: []  # which transitions "random" may use;
                           # [] means the standard pool. e.g. [fade, dissolve, blur]
   video_mute: true
-  video_loop: false
+  video_loop: false       # repeat a short clip until `interval` is up
+  # A video always runs for its own length, whatever `interval` says.
   video_max_seconds: 0    # 0 = play each video to the end
 
 viewer:

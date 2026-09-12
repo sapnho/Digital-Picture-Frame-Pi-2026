@@ -237,7 +237,7 @@ class PicFrame:
             self._tick_overlays(now)
 
             if (not self.paused and self.display_on
-                    and now >= self._next_change_at and not self._video_playing()):
+                    and now >= self._next_change_at):
                 await self._advance()
                 now = time.monotonic()
 
@@ -295,7 +295,7 @@ class PicFrame:
             return False
         if r.in_transition:
             return True
-        if self._video_playing():
+        if self._video_playing() or self._video_pending():
             return True
         if self.config.slideshow.kenburns and r.current is not None and r.current.kenburns:
             return now - r.current.started < r.current.duration
@@ -445,14 +445,43 @@ class PicFrame:
             self._dirty = True
 
     def _slide_duration(self, group: list[Record]) -> float:
+        """How long this slide is expected to stay up.
+
+        For a photograph this is the interval and that is the whole story.  For
+        a video it is only an estimate -- the fade in, then the film -- used for
+        the first deadline and for what the API reports.  What actually ends a
+        video slide is the player saying it has finished, so a video runs for as
+        long as it plays, however long the interval for a still picture is.
+        """
         base = float(self.config.slideshow.interval)
         record = group[0]
-        if record.is_video and record.duration:
-            limit = self.config.slideshow.video_max_seconds
-            length = record.duration if limit <= 0 else min(record.duration, limit)
-            return max(base if self.config.slideshow.video_loop else 0.0,
-                       length + self.config.slideshow.transition_time)
-        return base
+        if not record.is_video:
+            return base
+        cfg = self.config.slideshow
+        window = self._video_window()
+        if cfg.video_loop:
+            length = window
+        else:
+            length = float(record.duration or 0.0)
+            if window > 0:
+                length = min(length, window) if length else window
+        if length <= 0:                      # duration unknown: the EOS decides
+            return base
+        return length + cfg.transition_time
+
+    def _video_window(self) -> float:
+        """The cap handed to the player: seconds of playback, 0 = to the end.
+
+        ``video_loop`` repeats a short clip, so it needs a window to repeat
+        inside -- ``video_max_seconds`` when set, otherwise the still-picture
+        interval.  Without looping the window is just the cap, and 0 means the
+        film plays out in full.
+        """
+        cfg = self.config.slideshow
+        limit = float(cfg.video_max_seconds)
+        if cfg.video_loop and limit <= 0:
+            return float(cfg.interval)
+        return max(0.0, limit)
 
     def _show_placeholder(self) -> None:
         if self._placeholder_shown or self.renderer is None:
@@ -474,6 +503,21 @@ class PicFrame:
     def _video_playing(self) -> bool:
         return self.video is not None and self.video.playing
 
+    def _video_pending(self) -> bool:
+        """A video is on screen but has not been set going yet."""
+        r = self.renderer
+        if r is None or r.current is None or self._video_started:
+            return False
+        prepared = getattr(r.current, "meta", None)
+        return bool(prepared is not None and getattr(prepared, "is_video", False))
+
+    def _hold_slide(self) -> None:
+        """Keep the slide up: the video decides when it is over, not the clock."""
+        self._next_change_at = time.monotonic() + 0.5
+
+    def _end_slide(self) -> None:
+        self._next_change_at = min(self._next_change_at, time.monotonic())
+
     def _tick_video(self) -> None:
         renderer = self.renderer
         if renderer is None or renderer.current is None:
@@ -482,19 +526,27 @@ class PicFrame:
         if prepared is None or not getattr(prepared, "is_video", False):
             return
         if not self._video_started:
+            # The poster frame fades in first and the film starts on a fully
+            # opaque picture -- a video running underneath a crossfade both
+            # looks wrong and throws away its opening second.
+            self._hold_slide()
             if renderer.in_transition:
-                return                       # let the poster frame fade in first
+                return
             self._start_video(prepared.video_path)
             return
-        if self.video is None:
+        if self.video is None:               # poster only: no player available
             return
         frame = self.video.poll()
         if frame is not None:
             renderer.current.flip_v = True
             renderer.current.texture.update(frame.data, frame.width, frame.height)
             self._dirty = True
-        elif not self.video.playing:
-            self._next_change_at = min(self._next_change_at, time.monotonic())
+        if self.video.playing:
+            # However long a still picture is given, a video gets its own
+            # length: the deadline is pushed ahead for as long as it runs.
+            self._hold_slide()
+        else:
+            self._end_slide()
 
     def _start_video(self, path: str | None) -> None:
         if not path:
@@ -505,18 +557,30 @@ class PicFrame:
             if not available():
                 _log.info("GStreamer missing; showing the poster frame only")
                 self._video_started = True
+                # Nothing will move, so the poster is a still picture and gets
+                # a still picture's time.
+                self._next_change_at = (time.monotonic()
+                                        + float(self.config.slideshow.interval))
                 return
             if self.video is None:
                 self.video = VideoPlayer(
                     (self.backend.width, self.backend.height),
                     mute=self.config.slideshow.video_mute,
                     loop=self.config.slideshow.video_loop,
+                    max_seconds=self._video_window(),
                 )
+            else:
+                # The player outlives a slide, so re-read the settings: they can
+                # change under it from the web UI or MQTT.
+                self.video.mute = self.config.slideshow.video_mute
+                self.video.loop = self.config.slideshow.video_loop
+                self.video.max_seconds = self._video_window()
             self.video.play(path)
             self._video_started = True
         except Exception as exc:
             _log.warning("cannot play %s: %s", path, exc)
             self._video_started = True
+            self._end_slide()
 
     def _stop_video(self) -> None:
         if self.video is not None:
@@ -996,7 +1060,7 @@ class PicFrame:
             can_restart=True,
             library=self.library.stats() if self.library else {},
             current=self._current_payload(record),
-            next_change_in=round(max(0.0, self._next_change_at - now), 1),
+            next_change_in=self._next_change_in(now),
             video=self._video_payload(),
             display={
                 "backend": self.backend.info.backend if self.backend else "",
@@ -1009,6 +1073,24 @@ class PicFrame:
             uptime=round(now - self.started, 1),
             fps=round(self._fps, 2),
         )
+
+    def _next_change_in(self, now: float) -> float:
+        """Seconds until the next slide.
+
+        While a video runs the deadline is only ever half a second ahead -- it
+        is pushed on every tick -- so reporting it verbatim would show a
+        countdown stuck at 0.5.  What is left of the film is the honest answer.
+        """
+        if self._video_playing():
+            left = []
+            rest_of_film = self.video.duration - self.video.position
+            if rest_of_film > 0 and not self.video.loop:
+                left.append(rest_of_film)    # looping starts it over instead
+            if self.video.max_seconds > 0:
+                left.append(max(0.0, self.video.max_seconds - self.video.elapsed))
+            if left:
+                return round(min(left), 1)
+        return round(max(0.0, self._next_change_at - now), 1)
 
     def _current_payload(self, record: Record | None) -> dict[str, Any]:
         if record is None:

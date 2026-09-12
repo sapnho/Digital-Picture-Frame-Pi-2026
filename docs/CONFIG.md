@@ -43,9 +43,9 @@ Pacing and sequencing: how long each picture stays, how it changes, what comes n
 | `portrait_pairs` | boolean | `False` | Two upright photographs side by side on a landscape screen, each with its own caption. |
 | `shuffle` | boolean | `True` | Kept only so a migrated picframe configuration still loads. `order` is what decides. *(advanced)* |
 | `paused` | boolean | `False` | Whether the frame starts paused. *(advanced)* |
-| `video_loop` | boolean | `False` | Repeat a video until the interval is up, instead of moving on when it ends. |
+| `video_loop` | boolean | `False` | Repeat a short video until the picture interval is up, instead of moving on when it ends. |
 | `video_mute` | boolean | `True` | Videos are silent by default; a frame on a shelf that suddenly talks is startling. |
-| `video_max_seconds` | number | `0.0` | 0 plays each video to the end. |
+| `video_max_seconds` | number | `0.0` | Cut every video off after this many seconds. 0 plays each one to the end, however long it is — a video is never cut short by the picture interval. |
 | `kenburns` | boolean | `False` | Slow pan and zoom across each picture. |
 | `kenburns_zoom` | number | `1.12` | How far in the pan starts, e.g. 1.12 = 12% larger than the screen. |
 | `transition_choices` | list of strings | `[]` | Which transitions `transition: random` may draw from. None ticked means the standard pool. |
