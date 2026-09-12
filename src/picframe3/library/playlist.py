@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import random
 import re
+import sqlite3
 import time
 import uuid
 from collections import deque
@@ -28,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .db import Library, Record
+from .db import Library, Record, fts_query, like_escape
 
 _log = logging.getLogger(__name__)
 
@@ -44,6 +45,57 @@ ORDER_MODES = ("shuffle", "random", "date_desc", "date_asc", "name", "folder",
 #: else to something that is not in its list.
 ANYTHING = "(all)"
 ANY_OTHER = "(other)"
+
+#: The date filters the frame offers, as *rules* rather than as dates.
+#:
+#: This is the whole point of them.  Picking "the last 7 days" and storing the
+#: two dates it resolved to means that a week later the frame is still showing
+#: that same week -- the filter freezes on the day the button was pressed, and
+#: on a device that runs for months it drifts silently out of date.  What is
+#: stored is the rule; the dates are worked out afresh every time the query
+#: runs, and the maintenance loop refreshes the selection when the day turns.
+#:
+#: The value is the number of days the window covers, counting today as one.
+#: ``on_this_day`` is not a range at all -- it is the same calendar day in every
+#: year, the "what were we doing a year ago today" view -- and ``all`` is the
+#: absence of a date filter.
+DATE_WINDOWS: dict[str, str] = {
+    "all": "All dates",
+    "today": "Today",
+    "7d": "Last 7 days",
+    "30d": "Last 30 days",
+    "90d": "Last 90 days",
+    "1y": "Last year",
+    "3y": "Last 3 years",
+    "on_this_day": "On this day",
+}
+
+_WINDOW_DAYS = {"today": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365, "3y": 1095}
+
+
+def window_clause(name: str, now: float | None = None) -> tuple[str, list[Any]]:
+    """SQL for a rolling date window, resolved against *now*.
+
+    Returns an empty clause for "all" and for anything unrecognised, so a
+    filter written by an older frame -- or by a typo in an MQTT payload --
+    shows everything rather than nothing.
+    """
+    key = str(name or "").strip().lower().replace("-", "_")
+    if key in ("", "all"):
+        return "", []
+    if key == "on_this_day":
+        # Resolved by SQLite itself, so it stays true across midnight without
+        # anybody having to re-run anything.
+        return ("strftime('%m-%d', f.taken_at, 'unixepoch', 'localtime') "
+                "= strftime('%m-%d', 'now', 'localtime')"), []
+    days = _WINDOW_DAYS.get(key)
+    if days is None:
+        _log.warning("unknown date window %r; showing every date", name)
+        return "", []
+    moment = datetime.fromtimestamp(now if now is not None else time.time())
+    midnight = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = midnight.timestamp() - (days - 1) * 86400
+    return "f.taken_at >= ?", [start]
 
 
 def parse_date(value: Any, *, end_of_day: bool = False) -> float | None:
@@ -62,7 +114,11 @@ def parse_date(value: Any, *, end_of_day: bool = False) -> float | None:
     text = str(value).strip()
     if not text:
         return None
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y/%m/%d"):
+    # %Y:%m:%d is the EXIF spelling, and it is what the picframe MQTT
+    # automations people already have publish -- dropping it silently sent
+    # "2026:09:12" through as "no limit" and quietly widened the filter.
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y/%m/%d",
+                "%Y:%m:%d %H:%M:%S", "%Y:%m:%d"):
         try:
             stamp = datetime.strptime(text, fmt)
         except ValueError:
@@ -130,6 +186,9 @@ class Filters:
     tags_match_all: bool = False
     date_from: float | None = None
     date_to: float | None = None
+    #: A rolling window such as "7d" or "on_this_day", re-resolved every time
+    #: the query runs.  Set, it replaces date_from/date_to; see DATE_WINDOWS.
+    date_window: str = ""
     min_rating: int | None = None
     location_contains: str = ""
     search: str = ""
@@ -146,6 +205,9 @@ class Filters:
         "place": "location_contains",
         "from": "date_from",
         "to": "date_to",
+        "window": "date_window",
+        "date_preset": "date_window",
+        "dates": "date_window",
         "rating": "min_rating",
     }
 
@@ -164,6 +226,7 @@ class Filters:
             "tags_match_all": self.tags_match_all,
             "date_from": self.date_from,
             "date_to": self.date_to,
+            "date_window": self.date_window,
             "min_rating": self.min_rating,
             "location_contains": self.location_contains,
             "search": self.search,
@@ -176,6 +239,7 @@ class Filters:
             "tags_text": ", ".join(self.tags),
             "date_from_text": date_text(self.date_from),
             "date_to_text": date_text(self.date_to),
+            "date_window_text": DATE_WINDOWS.get(self.date_window or "all", ""),
             "active": self.active,
         }
 
@@ -227,10 +291,22 @@ class Filters:
             out.location_contains = _plain(data["location_contains"])
         if "search" in data:
             out.search = _plain(data["search"])
+        if "date_window" in data:
+            window = str(data["date_window"] or "").strip().lower().replace("-", "_")
+            out.date_window = "" if window in ("", "all", ANYTHING) else window
+            # A window and a pair of dates are two answers to the same
+            # question, and a frame showing one while the panel says the other
+            # is the kind of thing nobody can debug from the sofa.
+            if out.date_window:
+                out.date_from = out.date_to = None
         if "date_from" in data:
             out.date_from = parse_date(data["date_from"])
+            if out.date_from is not None:
+                out.date_window = ""
         if "date_to" in data:
             out.date_to = parse_date(data["date_to"], end_of_day=True)
+            if out.date_to is not None:
+                out.date_window = ""
         if "min_rating" in data:
             value = data["min_rating"]
             try:
@@ -241,13 +317,22 @@ class Filters:
         for key in ("include_videos", "include_images"):
             if key in data:
                 setattr(out, key, _truth(data[key]))
+        if not out.include_videos and not out.include_images:
+            # "Neither pictures nor videos" is not a filter anybody means: it
+            # selects nothing at all and the frame goes to the empty-library
+            # placeholder.  It happens when two control surfaces each switch
+            # one of them off, so take it as "both" rather than as an order to
+            # show nothing.
+            _log.warning("filter excluded both images and videos; showing both")
+            out.include_videos = out.include_images = True
         return out
 
     @property
     def active(self) -> bool:
         return bool(
             self.subfolder or self.tags_any or self.tags_all or self.tags_none
-            or self.date_from or self.date_to or self.min_rating
+            or self.date_from or self.date_to or self.date_window
+            or self.min_rating
             or self.location_contains or self.search
             or not self.include_videos or not self.include_images
         )
@@ -263,7 +348,9 @@ class Filters:
             bits.append("not " + ", ".join(self.tags_none))
         if self.location_contains:
             bits.append(f"place ~ {self.location_contains}")
-        if self.date_from or self.date_to:
+        if self.date_window:
+            bits.append(DATE_WINDOWS.get(self.date_window, self.date_window).lower())
+        elif self.date_from or self.date_to:
             bits.append(f"{date_text(self.date_from) or '…'} to "
                         f"{date_text(self.date_to) or '…'}")
         if self.min_rating:
@@ -324,24 +411,32 @@ class Playlist:
         params: list[Any] = []
         f = filters if filters is not None else self.filters
         if f.subfolder:
-            clauses.append("f.folder LIKE ?")
-            params.append(f"%{f.subfolder.rstrip('/')}%")
+            clauses.append("f.folder LIKE ? ESCAPE '\\'")
+            params.append(f"%{like_escape(f.subfolder.rstrip('/'))}%")
         if not f.include_videos:
             clauses.append("f.is_video = 0")
         if not f.include_images:
             clauses.append("f.is_video = 1")
-        if f.date_from is not None:
-            clauses.append("f.taken_at >= ?")
-            params.append(f.date_from)
-        if f.date_to is not None:
-            clauses.append("f.taken_at <= ?")
-            params.append(f.date_to)
+        if f.date_window:
+            # Re-resolved here, on every query, which is what makes "the last
+            # 7 days" still mean the last 7 days a month later.
+            clause, window_params = window_clause(f.date_window)
+            if clause:
+                clauses.append(clause)
+                params.extend(window_params)
+        else:
+            if f.date_from is not None:
+                clauses.append("f.taken_at >= ?")
+                params.append(f.date_from)
+            if f.date_to is not None:
+                clauses.append("f.taken_at <= ?")
+                params.append(f.date_to)
         if f.min_rating is not None:
             clauses.append("COALESCE(f.rating, 0) >= ?")
             params.append(f.min_rating)
         if f.location_contains:
-            clauses.append("f.location LIKE ?")
-            params.append(f"%{f.location_contains}%")
+            clauses.append("f.location LIKE ? ESCAPE '\\'")
+            params.append(f"%{like_escape(f.location_contains)}%")
         for tag in f.tags_all:
             clauses.append(
                 "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id=ft.tag_id "
@@ -362,11 +457,34 @@ class Playlist:
                 f"WHERE ft.file_id=f.id AND t.name IN ({placeholders}) COLLATE NOCASE)"
             )
             params.extend(f.tags_none)
-        if f.search:
-            query = " ".join(f'"{t}"*' for t in f.search.split())
+        query = self._search_query(f.search)
+        if query:
             clauses.append("f.id IN (SELECT rowid FROM search WHERE search MATCH ?)")
             params.append(query)
         return " AND ".join(clauses), params
+
+    def _search_query(self, text: str) -> str:
+        """The MATCH expression for the search box, or "" if it cannot be used.
+
+        FTS5 parses the expression itself, so a search term can still be
+        rejected after quoting -- and an unusable search term must never be
+        allowed to take the frame down with it.  The filter is persisted, so an
+        exception here came back on every start: the frame was bricked by a
+        stray double quote until somebody edited the database by hand.  Trying
+        the expression once, on a query that touches at most one row, turns
+        that into "this search matches nothing" and a line in the log.
+        """
+        query = fts_query(text)
+        if not query:
+            return ""
+        try:
+            self.library.connect().execute(
+                "SELECT rowid FROM search WHERE search MATCH ? LIMIT 1", (query,)
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            _log.warning("search term %r cannot be used (%s); ignoring it", text, exc)
+            return ""
+        return query
 
     def _order_sql(self) -> str:
         return {
@@ -502,6 +620,13 @@ class Playlist:
 
     def _advance_group(self) -> list[int]:
         """Take the next one or two ids, honouring portrait pairing."""
+        if not self._ids:
+            # Nothing selected: there is no round to end.  Going through
+            # _end_of_round() anyway bumped the round number, wrote it to the
+            # database and re-ran the whole query every time the slideshow
+            # ticked -- some 8600 pointless writes a day onto an SD card, for a
+            # filter that matches nothing.
+            return []
         if self._pos + 1 >= len(self._ids):
             self._end_of_round()
             if not self._ids:
@@ -548,14 +673,27 @@ class Playlist:
         return [r for r in (self.library.get(i) for i in ids) if r is not None]
 
     def previous(self) -> list[Record]:
-        if not self._history:
-            return self.next()
-        ids = self._history.pop()
-        if self.current_ids:
-            self._future.appendleft(list(self.current_ids))
-        self.current_ids = ids
-        self._save_position()
-        return [r for r in (self.library.get(i) for i in ids) if r is not None]
+        """The group before this one, skipping any that no longer resolve.
+
+        A picture removed or deleted while it was in the history leaves an id
+        that resolves to nothing.  Returning the empty list for it -- which is
+        what happened -- is indistinguishable to the caller from "the library is
+        empty", so pressing back onto a deleted photograph put the empty-library
+        placeholder on the wall.  Walk back until a group actually resolves, and
+        if none does, go forward instead.
+        """
+        while self._history:
+            ids = self._history.pop()
+            records = [r for r in (self.library.get(i) for i in ids) if r is not None]
+            if not records:
+                _log.debug("skipping %d removed picture(s) in the history", len(ids))
+                continue
+            if self.current_ids:
+                self._future.appendleft(list(self.current_ids))
+            self.current_ids = [r.id for r in records]
+            self._save_position()
+            return records
+        return self.next()
 
     def jump_to(self, file_id: int) -> list[Record]:
         try:
@@ -569,12 +707,34 @@ class Playlist:
         return self.next()
 
     def peek(self) -> list[Record]:
-        """The group that ``next()`` would return, without consuming it."""
-        saved = (self._pos, self._passes, self._round, list(self._ids))
-        try:
-            ids = self._advance_group()
-        finally:
-            self._pos, self._passes, self._round, self._ids = saved
+        """The group that ``next()`` would return, without consuming it.
+
+        Purely a look ahead in the list as it stands.  Replaying
+        ``_advance_group()`` and putting the fields back afterwards was not
+        enough: at the end of a round it went through ``_end_of_round()``, which
+        persists the next round number, throws away the redo queue that
+        ``previous()`` had filled, and logs a round as complete that nobody has
+        watched yet.  The one thing peeking must not do is change anything.
+        """
+        if self._future:
+            ids = list(self._future[0])
+        elif self._pos + 1 < len(self._ids):
+            ids = [self._ids[self._pos + 1]]
+            if self.portrait_pairs and self._pos + 2 < len(self._ids):
+                rec_a = self.library.get(ids[0])
+                rec_b = self.library.get(self._ids[self._pos + 2])
+                if (rec_a is not None and rec_b is not None
+                        and rec_a.is_portrait and rec_b.is_portrait
+                        and not rec_a.is_video and not rec_b.is_video):
+                    ids.append(rec_b.id)
+        elif self._ids:
+            # The round is exhausted; what comes next is the first picture of
+            # the next round.  Which one that is depends on a reshuffle that has
+            # not happened yet, so the best honest answer is the head of the
+            # list as it stands now.
+            ids = [self._ids[0]]
+        else:
+            ids = []
         return [r for r in (self.library.get(i) for i in ids) if r is not None]
 
     # -- persistence -------------------------------------------------------
@@ -604,7 +764,24 @@ class Playlist:
         self.refresh()
 
     def set_filters(self, filters: Filters) -> None:
+        """Apply a filter, and only remember it once it has actually worked.
+
+        The order is the point.  Persisting first and refreshing afterwards
+        meant a filter that makes the query fail was already in the database by
+        the time it blew up -- and ``__init__`` restores it and refreshes, so
+        the frame then failed to start, for good.  Refreshing first keeps the
+        blast radius to the one call that asked for it.
+        """
+        previous = self.filters
         self.filters = filters
+        try:
+            self.refresh()
+        except Exception:
+            self.filters = previous
+            try:
+                self.refresh()
+            except Exception:       # pragma: no cover - the index itself is ill
+                _log.exception("could not restore the previous filter")
+            raise
         if self.persist:
             self.library.set_state("playlist_filters", filters.as_dict())
-        self.refresh()

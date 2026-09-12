@@ -10,9 +10,16 @@ import ctypes
 import logging
 from collections.abc import Sequence
 
+from .egl import _load
+
 _log = logging.getLogger(__name__)
 
-lib = ctypes.CDLL("libGLESv2.so.2")
+# Importing this module loads the GLES library, and it used to insist on one
+# exact soname.  Anything that merely imports the graphics package -- the
+# overlay layout tests, the settings page, ``picframe3 doctor`` -- then failed
+# on a system whose Mesa ships only ``libGLESv2.so``.  The same fallback chain
+# EGL uses covers all of them.
+lib = _load("libGLESv2.so.2", "libGLESv2.so")
 
 # --- enums ---------------------------------------------------------------
 FALSE = 0

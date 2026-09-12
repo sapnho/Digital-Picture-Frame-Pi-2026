@@ -22,12 +22,41 @@ from typing import Any
 
 from ..config import MqttConfig
 from ..events import Action, Command
-from ..library.playlist import ANY_OTHER, ANYTHING
+from ..install import install_hint
+from ..library.playlist import ANY_OTHER, ANYTHING, DATE_WINDOWS
 
 _log = logging.getLogger(__name__)
 
+#: An icon per rolling date window, so the buttons are distinguishable at a
+#: glance on a dashboard rather than being six identical calendars.
+DATE_WINDOW_ICONS = {
+    "all": "mdi:calendar-blank",
+    "today": "mdi:calendar-today",
+    "7d": "mdi:calendar-week",
+    "30d": "mdi:calendar-month",
+    "90d": "mdi:calendar-range",
+    "1y": "mdi:calendar-clock",
+    "3y": "mdi:calendar-multiple",
+    "on_this_day": "mdi:calendar-star",
+}
+
 ONLINE = "online"
 OFFLINE = "offline"
+
+#: Actions the broker may not give, whatever the payload says.  ``Command.parse``
+#: accepts every action there is, and a bridge subscribed to a broker that most
+#: houses run without per-client ACLs should not be a way to stop the frame --
+#: `restart` is announced and does the job anyone actually wants.
+MQTT_REFUSED = frozenset({Action.QUIT})
+
+
+def _as_brightness(payload: str) -> float | None:
+    """Home Assistant's 0-255 brightness as a fraction, or None if not a number."""
+    try:
+        value = float(payload.strip())
+    except (AttributeError, ValueError):
+        return None
+    return max(0.0, min(1.0, value / 255.0))
 
 
 class MqttBridge:
@@ -38,7 +67,7 @@ class MqttBridge:
             import aiomqtt  # noqa: F401
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError(
-                "MQTT support needs aiomqtt (pip install 'picframe3[mqtt]')"
+                f"MQTT support needs aiomqtt ({install_hint('mqtt')})"
             ) from exc
         self.prefix = f"{config.topic_prefix}/{config.device_id}"
         self._client = None
@@ -67,6 +96,18 @@ class MqttBridge:
 
     def entity_topic(self, name: str) -> str:
         return f"{self.prefix}/{name}/set"
+
+    def subscriptions(self) -> list[str]:
+        """The only topics the frame listens on.
+
+        Two narrow filters rather than one ``<prefix>/#``.  The wildcard meant
+        the bridge acted on anything published anywhere under its own prefix --
+        including the topics it publishes itself -- so any client on the broker
+        could reconfigure or stop the frame simply by inventing a topic name.
+        These two are exactly what the announced entities publish to, and a
+        test holds them against the discovery payloads.
+        """
+        return [self.command_topic, f"{self.prefix}/+/set"]
 
     # -- lifecycle ---------------------------------------------------------
     async def run(self) -> None:
@@ -100,7 +141,8 @@ class MqttBridge:
                     delay = 2.0
                     await client.publish(self.availability_topic, ONLINE, qos=1, retain=True)
                     await self._announce(client)
-                    await client.subscribe(f"{self.prefix}/#")
+                    for topic in self.subscriptions():
+                        await client.subscribe(topic, qos=1)
                     unsubscribe = self.app.bus.subscribe(self._on_state)
                     try:
                         await asyncio.gather(
@@ -200,6 +242,34 @@ class MqttBridge:
             except Exception:
                 _log.exception("failed to handle MQTT message on %s", topic)
 
+    def _submit(self, command: Command | None) -> bool:
+        """Hand a command to the frame, unless the broker may not give it.
+
+        Anything that can reach the broker can reach this, and a broker is not
+        an authenticated channel in most houses -- so the two commands that are
+        not about showing photographs are checked here rather than trusted.
+        """
+        if command is None:
+            return False
+        if command.action in MQTT_REFUSED:
+            _log.warning("refusing %s over MQTT: it is not a command this "
+                         "surface accepts", command.action.value)
+            return False
+        if command.action is Action.DELETE and not self.app.config.http.allow_delete:
+            _log.warning("refusing a delete over MQTT: http.allow_delete is off. "
+                         "The frame's own buttons can still remove a picture.")
+            return False
+        if command.action is Action.SET_CONFIG:
+            from ..uischema import check_path_setting
+
+            problem = check_path_setting(str(command.payload.get("key") or ""),
+                                         command.payload.get("value"),
+                                         self.app.config)
+            if problem:
+                _log.warning("refusing a setting over MQTT: %s", problem)
+                return False
+        return self.app.bus.submit(command)
+
     async def _dispatch(self, topic: str, payload: str) -> None:
         leaf = topic[len(self.prefix):].strip("/")
         if leaf in ("cmd", ""):
@@ -207,40 +277,64 @@ class MqttBridge:
             if command is None:
                 _log.warning("ignoring unknown MQTT command %r", payload[:60])
                 return
-            self.app.bus.submit(command)
+            self._submit(command)
             return
         name = leaf.rsplit("/", 1)[0] if leaf.endswith("/set") else leaf
         low = payload.lower()
 
         if name == "display":
-            self.app.bus.submit(Command(
-                Action.DISPLAY_ON if low in ("on", "true", "1") else Action.DISPLAY_OFF,
-                source="mqtt"))
+            # Home Assistant's template light sends the *rendered*
+            # `command_on_template` here, which for a slider drag is the
+            # brightness and nothing else.  Treating a number as "not the word
+            # on, therefore off" is what made the slider turn the screen off.
+            #
+            # `0` and `1` are the exception: they are what a hand-written
+            # automation has always published here to mean off and on, and
+            # reading `0` as "brightness zero, screen on" left the frame black
+            # while Home Assistant showed the light as lit -- and, because the
+            # brightness is a saved setting, wrote that zero into the config.
+            if low in ("on", "off", "true", "false", "0", "1"):
+                self._submit(Command(
+                    Action.DISPLAY_ON if low in ("on", "true", "1")
+                    else Action.DISPLAY_OFF, source="mqtt"))
+                return
+            level = _as_brightness(payload)
+            if level is not None:
+                self._submit(Command(Action.DISPLAY_ON, source="mqtt"))
+                self._submit(Command(Action.BRIGHTNESS, {"value": level}, source="mqtt"))
+            else:
+                self._submit(Command(
+                    Action.DISPLAY_ON if low in ("on", "true") else Action.DISPLAY_OFF,
+                    source="mqtt"))
         elif name == "brightness":
-            try:
-                self.app.bus.submit(Command(
-                    Action.BRIGHTNESS, {"value": float(payload) / 255.0}, source="mqtt"))
-            except ValueError:
-                pass
+            # Kept for anyone publishing by hand; the light entity itself now
+            # sends its brightness on the display topic, as its schema says.
+            level = _as_brightness(payload)
+            if level is not None:
+                self._submit(Command(Action.BRIGHTNESS, {"value": level}, source="mqtt"))
         elif name == "pause":
-            self.app.bus.submit(Command(
-                Action.PAUSE if low in ("on", "true", "1") else Action.RESUME, source="mqtt"))
-        elif name in ("next", "previous", "rescan", "delete"):
-            self.app.bus.submit(Command(Action(name), source="mqtt"))
+            self._submit(Command(
+                Action.PAUSE if low in ("on", "true", "1") else Action.RESUME,
+                source="mqtt"))
+        elif name in ("next", "previous", "rescan", "delete", "restart"):
+            # Every one of these is an announced button.  `restart` was missing
+            # here while being announced, so Home Assistant showed a Restart
+            # button that did nothing at all and logged "unhandled topic".
+            self._submit(Command(Action(name), source="mqtt"))
         elif name == "interval":
-            self.app.bus.submit(Command(
+            self._submit(Command(
                 Action.SET_CONFIG, {"key": "slideshow.interval", "value": payload},
                 source="mqtt"))
         elif name == "transition":
-            self.app.bus.submit(Command(
+            self._submit(Command(
                 Action.SET_CONFIG, {"key": "slideshow.transition", "value": payload},
                 source="mqtt"))
         elif name == "order":
-            self.app.bus.submit(Command(
+            self._submit(Command(
                 Action.SET_CONFIG, {"key": "slideshow.order", "value": payload},
                 source="mqtt"))
         elif name == "subfolder":
-            self.app.bus.submit(Command(
+            self._submit(Command(
                 Action.SET_CONFIG, {"key": "library.subfolder", "value": payload},
                 source="mqtt"))
         elif name in self.FILTER_TOPICS:
@@ -251,11 +345,17 @@ class MqttBridge:
             value: Any = payload
             if field == "tags_match_all":
                 value = low in ("on", "true", "1")
-            self.app.bus.submit(Command(
-                Action.SET_FILTERS, {field: value}, source="mqtt"))
+            self._submit(Command(Action.SET_FILTERS, {field: value}, source="mqtt"))
         elif name == "clear_filters":
-            self.app.bus.submit(Command(
-                Action.SET_FILTERS, {"reset": True}, source="mqtt"))
+            self._submit(Command(Action.SET_FILTERS, {"reset": True}, source="mqtt"))
+        elif name.startswith("dates_"):
+            # One button per rolling window.  A button rather than a select
+            # because that is how these get used -- one tap on a dashboard --
+            # and what it sends is the rule ("the last 7 days"), never the two
+            # dates it happens to resolve to today.
+            window = name[len("dates_"):]
+            self._submit(Command(Action.SET_FILTERS, {"date_window": window},
+                                 source="mqtt"))
         else:
             _log.debug("unhandled MQTT topic %s", topic)
 
@@ -509,7 +609,14 @@ class MqttBridge:
                 "command_topic": self.entity_topic("display"),
                 "state_template": "{{ 'on' if value_json.display_on else 'off' }}",
                 "brightness_template": "{{ (value_json.brightness * 255) | round(0) }}",
-                "command_on_template": "on",
+                # Home Assistant renders this and publishes the result.  The
+                # constant "on" it used to be threw the brightness away on
+                # every slider drag, so the slider in the dashboard moved and
+                # the frame did not: `brightness` is only defined when the
+                # slider is what was touched, hence the guard.
+                "command_on_template":
+                    "{% if brightness is defined %}{{ brightness }}"
+                    "{% else %}on{% endif %}",
                 "command_off_template": "off",
                 "icon": "mdi:image-frame",
             }),
@@ -849,6 +956,13 @@ class MqttBridge:
             ("restart", "Restart the frame", "mdi:restart"),
             ("delete", "Remove current picture", "mdi:delete"),
             ("clear_filters", "Show everything again", "mdi:filter-remove"),
+        ) + tuple(
+            # The date windows, as buttons.  A select entity would have to hold
+            # a state, and this filter has no state worth holding: it is a rule
+            # the frame re-resolves every day, so "press it again" is the whole
+            # interaction.
+            (f"dates_{name}", label, DATE_WINDOW_ICONS.get(name, "mdi:calendar"))
+            for name, label in DATE_WINDOWS.items()
         ):
             entities.append(("button", action, {
                 "device": device,

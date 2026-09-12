@@ -15,6 +15,8 @@ reference and the settings page can never disagree.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Sequence
 from dataclasses import MISSING, fields, is_dataclass
 from typing import Any, get_args, get_origin
 
@@ -128,6 +130,7 @@ NOTES = {
     "library.scan_on_start": "Index at startup. Off is faster to start but new files wait for the watch.",
     "library.deleted_folder": "Where “Remove” moves a picture. Nothing is ever unlinked, and every removal is written to removals.jsonl in this folder — when it went, where it came from, and what it was. The Removed tab reads that file and can put a picture back.",
     "library.subfolder": "Show only pictures whose path contains this. Pick one of your folders, or type any part of a path. Empty shows everything.",
+    "library.prune_max_fraction": "How much of the index one scan may drop, as a fraction. A picture folder on a stick or a share is briefly absent now and then, and every file under it then looks deleted — this is what stops that from throwing away the play history and the place names. 0 removes the safeguard.",
     "geo.enabled": "Reverse-geocode GPS coordinates into place names.",
     "geo.contact": "**Required when enabled.** Nominatim's usage policy needs a way to reach you.",
     "geo.language": "Two-letter code: the language place names come back in.",
@@ -155,8 +158,9 @@ NOTES = {
     "http.port": "The port this page is served on.",
     "http.auth_user": "Set this and the password to require a login.",
     "http.auth_password": "Only used when a user name is set.",
-    "http.allow_delete": "Let the Remove button move pictures out of the library.",
-    "http.cors_origins": "Only needed if another site embeds this API.",
+    "http.allow_delete": "Let the Remove button — and Home Assistant's *Remove current picture* — move pictures out of the library. Off refuses both, and a picture can then only be removed at the frame itself, with a button or a key. Nothing is ever unlinked either way: “remove” means moved to the deleted folder, and the Removed tab can put it back.",
+    "http.allowed_hosts": "Extra names this frame answers to. It already answers to `localhost`, to its own hostname and to any address on your own network; add a name here only if you reach it through a reverse proxy or an unusual local domain. A request arriving under some other name is refused, which is what stops a web page from using your browser as a way in.",
+    "http.cors_origins": "Named sites that may call this API from a browser, e.g. `https://ha.example.com`. Anything listed here can do everything this page can do — skip pictures, change settings, remove photographs — on behalf of anyone who visits it while on your network. Leave it empty unless you are embedding the API somewhere. `*` is refused: it would grant that to every site on the web.",
     "input.keyboard": "A keyboard plugged into the Pi, read straight from evdev.",
     "input.touch": "A touchscreen: tap right half for next, left for previous.",
     "input.mouse": "Off by default; a stray mouse should not skip pictures.",
@@ -209,6 +213,10 @@ LABELS = {
     "mqtt.device_id": "Device ID",
     "http.auth_user": "User name",
     "http.auth_password": "Password",
+    "http.allow_delete": "Remove pictures from the network",
+    "http.cors_origins": "Sites allowed to call this API",
+    "http.allowed_hosts": "Extra names the frame answers to",
+    "library.prune_max_fraction": "Most of the index one scan may drop",
     "gpio_pull_up": "GPIO pull-up",
     "gpio_buttons": "GPIO buttons",
     "journald": "Log to the journal",
@@ -233,6 +241,138 @@ LABELS = {
     "mqtt.image_width": "Picture width sent (px)",
     "mqtt.image_quality": "Picture quality sent",
 }
+
+# --------------------------------------------------------------------------
+# Settings that name a file, and where a file is allowed to be
+# --------------------------------------------------------------------------
+# The web interface is deliberately open on the LAN, and several settings take
+# a free path.  Without a check, anyone who can reach the frame can point
+# ``logging.file`` at ``~/.bashrc`` or ``~/.config/systemd/user/*.service`` and
+# have the frame itself write to it -- turning "can change a setting" into "can
+# run code at the next login".  So the paths are confined to the places a
+# picture frame legitimately keeps things.
+
+#: Settings whose value is a filesystem path (or a list of them).
+PATH_KEYS = {
+    "logging.file",
+    "library.database",
+    "library.deleted_folder",
+    "library.picture_folders",
+    "viewer.overlay_image",
+    "viewer.font",
+    "viewer.clock_extra_file",
+    "viewer.no_files_img",
+    "geo.cache",
+    "mqtt.tls_ca",
+    "health.disk_path",
+}
+
+#: Where those paths may point.  The home directory covers the photographs, the
+#: index and the logs as the frame ships them; the mount points cover a USB
+#: stick or a NAS; ``/var/lib/picframe3`` is the system-wide install's own
+#: state; ``/tmp`` is scratch.  ``/dev/shm`` is here because two settings (the
+#: overlay image and the second clock line) default into it -- it is a tmpfs
+#: that evaporates on reboot, so nothing durable can be planted there.  The two
+#: font directories are read-only to the frame's own user and are where a
+#: system font actually lives, which ``viewer.font`` has always been able to
+#: name.
+ALLOWED_PATH_ROOTS = ("/media", "/mnt", "/srv", "/var/lib/picframe3",
+                      "/tmp", "/dev/shm",
+                      "/usr/share/fonts", "/usr/local/share/fonts")
+
+#: The frame's own dot-directories under the home directory.  Hidden paths are
+#: otherwise refused (see below) and these three are where the index, the
+#: geocache and the config actually live, so they are named rather than
+#: excepted by a rule.
+STATE_DIRS = (".local/share/picframe3", ".config/picframe3", ".cache/picframe3")
+
+
+def allowed_path_roots() -> tuple[str, ...]:
+    """The roots, with the current user's home resolved in."""
+    home = os.path.realpath(os.path.expanduser("~"))
+    return (home, *(os.path.join(home, d) for d in STATE_DIRS), *ALLOWED_PATH_ROOTS)
+
+
+def _within(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip("/") + os.sep)
+
+
+def path_is_allowed(value: str, extra_roots: Sequence[str] = ()) -> bool:
+    """Whether a single path may be written into a setting.
+
+    ``realpath`` first, so neither ``..`` nor a symlink the caller planted
+    earlier can walk out of an allowed root.  An empty value is allowed: that
+    is how these settings are switched off.
+
+    Being inside the home directory is not on its own enough, because the
+    interesting targets are all *in* it: ``~/.bashrc``, ``~/.profile``,
+    ``~/.config/systemd/user/anything.service``.  Every one of them is hidden,
+    and nothing a picture frame legitimately reads or writes is -- except its
+    own three state directories, which are listed above.  So a hidden
+    component anywhere below a general root is refused.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return True
+    resolved = os.path.realpath(os.path.expanduser(text))
+    home = os.path.realpath(os.path.expanduser("~"))
+    for state in STATE_DIRS:
+        if _within(resolved, os.path.join(home, state)):
+            return True
+    # Wherever the frame's own pictures already live counts as one of its
+    # places.  A library at /photos or /data/bilder loads from the config file
+    # perfectly well, and without this the owner could not re-save that same
+    # value from the settings page: the page would refuse a path the frame is
+    # already using, which reads as the page being broken.
+    for root in extra_roots:
+        if root and _within(resolved, os.path.realpath(os.path.expanduser(root))):
+            return True
+    for root in (home, *ALLOWED_PATH_ROOTS):
+        if not _within(resolved, root):
+            continue
+        below = os.path.relpath(resolved, root)
+        return not any(part.startswith(".") and part not in (".", "..")
+                       for part in below.split(os.sep))
+    return False
+
+
+def config_roots(config: Any) -> tuple[str, ...]:
+    """The places a particular configuration already points at.
+
+    Passed to :func:`check_path_setting` so that a frame whose pictures live
+    somewhere unusual can still have its own settings written back.
+    """
+    if config is None:
+        return ()
+    out: list[str] = []
+    try:
+        out.extend(config.library.picture_folders)
+        out.append(os.path.dirname(os.path.expanduser(config.library.database)))
+        out.append(config.library.deleted_folder)
+    except AttributeError:                     # pragma: no cover - defensive
+        return ()
+    return tuple(p for p in out if p)
+
+
+def check_path_setting(key: str, value: Any, config: Any = None) -> str | None:
+    """``None`` when the setting may be written, else why it may not.
+
+    One helper for every surface -- the HTTP API, and MQTT through the app --
+    so a path the web interface refuses cannot be smuggled in over the broker.
+    """
+    if key not in PATH_KEYS:
+        return None
+    extra = config_roots(config)
+    values = value if isinstance(value, (list, tuple)) else [value]
+    for item in values:
+        if isinstance(item, (dict, list, tuple)):
+            return f"{key} takes a path, not {type(item).__name__}"
+        if not path_is_allowed(item, extra):
+            roots = ", ".join((*allowed_path_roots(), *extra))
+            return (f"{key} may not point at {item!r}: the frame only reads "
+                    f"and writes visible files under {roots}")
+    return None
+
 
 #: Free-text fields whose value is a secret and must never be echoed back.
 #: The web interface is usually open on a home network, so ``GET /api/config``
@@ -278,6 +418,48 @@ def needs_restart(key: str) -> bool:
     return not (section in LIVE_SECTIONS or key in LIVE_KEYS)
 
 
+#: What a number may be, where the type alone cannot say: (minimum, maximum),
+#: either end None for "no bound".  These are not taste, they are the range in
+#: which the frame still works -- an interval of zero is a busy loop, a Ken
+#: Burns zoom below 1 is a division by zero, a negative transition time runs
+#: the fade backwards.  ``Config.set`` clamps to them, so a value out of range
+#: arrives as a log line rather than as a crash in the render loop.
+LIMITS: dict[str, tuple[float | None, float | None]] = {
+    "slideshow.interval": (1.0, 86400.0),
+    "slideshow.transition_time": (0.0, 30.0),
+    "slideshow.kenburns_zoom": (1.0, 3.0),
+    "slideshow.recent_days": (1, None),
+    "slideshow.reshuffle_after": (1, None),
+    "slideshow.video_max_seconds": (0.0, None),
+    "display.fps_limit": (1.0, 240.0),
+    "display.brightness": (0.0, 1.0),
+    "display.rotate": (0, 359),
+    "viewer.text_size": (6, 512),
+    "viewer.text_opacity": (0.0, 1.0),
+    "viewer.text_scrim": (0.0, 1.0),
+    "viewer.text_seconds": (0.0, None),
+    "viewer.clock_size": (6, 512),
+    "viewer.clock_opacity": (0.0, 1.0),
+    "viewer.blur_amount": (0.0, None),
+    "viewer.blur_zoom": (1.0, 3.0),
+    "viewer.blur_dim": (0.0, 1.0),
+    "viewer.upscale_limit": (1.0, 10.0),
+    "library.rescan_interval": (0.0, None),
+    "library.prune_max_fraction": (0.0, 1.0),
+    "http.port": (1, 65535),
+    "mqtt.port": (1, 65535),
+    "mqtt.publish_interval": (1.0, None),
+    "mqtt.image_width": (64, 4096),
+    "mqtt.image_quality": (1, 100),
+    "health.interval": (5.0, None),
+    "network.interval": (10.0, None),
+    "network.failures": (1, None),
+    "network.attempts": (1, None),
+    "network.timeout": (1.0, None),
+    "network.cooldown": (0.0, None),
+    "network.settle": (0.0, None),
+}
+
 #: Explicit control choices, where the type alone cannot say.
 CHOICES: dict[str, list[str]] = {
     "display.backend": ["auto", "kms", "headless"],
@@ -309,11 +491,12 @@ ADVANCED = {
     "viewer.text_margin_x", "viewer.text_margin_y", "viewer.text_opacity",
     "viewer.overlay_image", "viewer.clock_extra_file", "viewer.blur_zoom",
     "library.database", "library.deleted_folder", "library.follow_links",
+    "library.prune_max_fraction",
     "geo.cache",
     "mqtt.discovery_prefix", "mqtt.topic_prefix", "mqtt.tls_ca",
     "mqtt.tls_insecure", "mqtt.publish_interval",
     "mqtt.image_width", "mqtt.image_quality",
-    "http.host", "http.cors_origins",
+    "http.host", "http.cors_origins", "http.allowed_hosts",
     "input.gpio_pull_up", "input.keymap",
     "logging.file", "logging.journald",
     "health.interval", "health.disk_path",

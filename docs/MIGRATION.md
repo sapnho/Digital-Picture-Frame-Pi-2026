@@ -6,9 +6,15 @@
 picframe3 migrate ~/picframe_data/config/configuration.yaml
 picframe3 scan
 picframe3 doctor
-sudo systemctl disable --now picframe          # stop the old one
+systemctl --user disable --now picframe        # stop the old one
 sudo systemctl enable  --now picframe3@$USER
 ```
+
+`--user`, because picframe is installed as a **user** unit
+(`~/.config/systemd/user/picframe.service`). Run with `sudo` it fails with
+"Unit picframe.service does not exist" — which is easy to read as "it was
+already gone", and it was not: the old frame returns at the next login and the
+two then fight over DRM master.
 
 `migrate` prints exactly what it carried over and what it dropped, and why.
 Your pictures are never touched — picframe3 builds its own index in a new

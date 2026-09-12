@@ -18,6 +18,58 @@ stack that matches the operating system as it is today rather than as it was in
 
 ## Why a rebuild
 
+### In plain words
+
+**It fits today's Raspberry Pi OS.** The old version needs a desktop session
+running underneath it — a whole graphical environment, just so one photo can be
+shown. Current install guides therefore ask for a compositor, autologin, a
+handful of hand-written files and a pasted Samba config. picframe3 talks to the
+screen directly: Raspberry Pi OS **Lite**, one command to install, nothing else
+on the machine that can break.
+
+**It does almost nothing most of the time.** While a photo is on screen,
+picframe3 draws exactly zero frames — the picture simply stays on the panel.
+pi3d redraws the same unchanged image dozens of times a second, around the
+clock. The frame runs cooler and quieter.
+
+**Videos behave like photographs.** Before, a video opened a separate player
+window on top of everything: no fade, no caption over it. Here a video is just
+another slide — it crossfades in, the overlay composites on top, and it plays
+through once.
+
+**Fades look right.** Crossfades blended the old way dip muddy and dark in the
+middle. picframe3 blends in linear light, the way image editors do. The mat
+board is drawn fresh for whatever panel you have instead of being stretched from
+four fixed images, and its colour comes from the photograph's dominant colours
+rather than an average that turns a sunset into mud.
+
+**Fewer things that can break.** picframe depends on ten outside packages,
+including two that are effectively unmaintained for this purpose; when one of
+them stops working with a new Raspberry Pi OS, the frame stops working.
+picframe3 needs three — Pillow, numpy, PyYAML — all mainstream and actively
+maintained. Everything else is optional. This is the single biggest reason it
+should still run in five years.
+
+**It tells you what is wrong.** `picframe3 doctor` checks hardware, drivers and
+permissions and prints the fix in plain words instead of failing with a
+traceback.
+
+**New photos appear within seconds**, not at the next timed walk, and what is
+shown can be filtered by folder, tag, place and date from the web UI or from
+Home Assistant. Deletions are journalled, so you can see what was removed and
+put it back.
+
+**And it is tested.** 1 540 lines of tests across 14 files, against three small
+test files in the original — the unglamorous part that decides whether a change
+next year quietly breaks something you notice three weeks later.
+
+The honest caveat: picframe is proven by years of people running it in their
+living rooms. picframe3 is new. Everything above is true of its design and most
+of it is verified on hardware, but "more robust" is a claim that only months of
+running can settle.
+
+### The technical version
+
 `picframe` is built on [pi3d](https://github.com/pi3d/pi3d), a general-purpose
 3D engine that predates the Pi's move to the open `vc4`/`v3d` graphics stack.
 Everything below follows from that one dependency:

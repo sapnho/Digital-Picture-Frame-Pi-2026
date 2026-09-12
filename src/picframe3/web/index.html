@@ -125,12 +125,13 @@
           <input id="f-to" type="date" data-filter="date_to">
         </div>
       </div>
+      <!-- Dates as rules rather than as dates.  "Last 7 days" used to fill
+           the two boxes above with the dates it meant today, which froze the
+           filter on the day it was pressed; what is stored now is the rule,
+           and the frame works the dates out again every day. -->
       <div class="filter-quick">
-        <span class="muted">Recent:</span>
-        <button class="btn" data-days="7" type="button">7 days</button>
-        <button class="btn" data-days="30" type="button">30 days</button>
-        <button class="btn" data-days="365" type="button">A year</button>
-        <button class="btn" data-days="1095" type="button">3 years</button>
+        <span class="muted">Dates:</span>
+        <span id="f-windows" class="filter-windows"></span>
         <button class="btn" id="f-reset" type="button">Show everything</button>
       </div>
     </section>

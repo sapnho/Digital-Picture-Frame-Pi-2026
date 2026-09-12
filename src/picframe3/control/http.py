@@ -4,20 +4,33 @@ Everything the frame can do is reachable here, which makes the web UI, the
 phone on the sofa and Home Assistant all first-class clients of the same
 surface.  Server-sent events push state changes instead of the browser polling,
 so an open tab costs nothing while the frame is idle.
+
+The interface is open on the LAN by design -- a picture frame that asks for a
+password before it will skip a photograph is a picture frame nobody uses.  Open
+on the LAN is not the same as open to the web, though, and everything in
+:class:`_LocalNetworkGuard` exists to keep that distinction true: a page on the
+internet must not be able to reach in through the owner's own browser, and no
+unauthenticated request may be allowed to cost the frame more than it costs the
+caller.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
+import ipaddress
 import json
 import logging
 import os
 import secrets
+import socket
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..config import HttpConfig
 from ..events import Action, Command
+from ..install import install_hint
 
 _log = logging.getLogger(__name__)
 
@@ -39,6 +52,7 @@ try:
     from fastapi.responses import FileResponse, StreamingResponse  # noqa: F401
     from fastapi.security import HTTPBasic, HTTPBasicCredentials  # noqa: F401
     from fastapi.staticfiles import StaticFiles  # noqa: F401
+    from pydantic import BaseModel, ConfigDict  # noqa: F401
 
     HAVE_FASTAPI = True
 except ImportError:  # pragma: no cover - optional dependency
@@ -47,6 +61,245 @@ except ImportError:  # pragma: no cover - optional dependency
 WEB_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 THUMB_SIZE = (480, 480)
 
+#: The largest request body this interface will read.  Starlette buffers a body
+#: in memory before a handler ever sees it, so without a limit an unauthenticated
+#: ``POST`` of a gigabyte is enough to get the frame killed by the OOM killer --
+#: and with ``Restart=always`` in the unit file that is a restart loop rather
+#: than a single crash.  Nothing this API accepts is remotely near a megabyte.
+MAX_BODY_BYTES = 1024 * 1024
+
+#: How many requests uvicorn will have in flight at once.  Past this it answers
+#: 503 rather than opening another connection, so a burst costs a rejection
+#: instead of the memory of a thousand half-read requests -- on a machine whose
+#: real job is drawing a picture on time.
+LIMIT_CONCURRENCY = 32
+
+#: Screenshots are expensive on both sides of the fence: the render loop has to
+#: read the framebuffer back, and the result then has to be PNG-encoded.  Within
+#: this window every caller is handed the capture that was just taken.
+SCREENSHOT_MIN_INTERVAL = 2.0
+
+#: The shortest gap between two pushes on the event stream.  State is published
+#: whenever anything at all changes, which during a transition is several times
+#: a second; a browser cannot draw that fast and the frame should not be
+#: serialising it.  Updates inside the window are coalesced -- the newest state
+#: replaces the one waiting, so nothing is stale and nothing is a backlog.
+SSE_MIN_INTERVAL = 0.25
+
+#: Refuse to decode an image larger than this over HTTP.  ``draft()`` makes a
+#: huge JPEG cheap, but a PNG or a TIFF has no such shortcut: a 500-megapixel
+#: PNG dropped into the guest share is 1.5 GB of RGB the moment anything asks
+#: for its thumbnail.  The limit is on the *decode*, so serving the original
+#: file is unaffected -- that is a byte-for-byte copy and costs nothing.
+MAX_DECODE_PIXELS = 64_000_000
+
+
+if HAVE_FASTAPI:
+
+    class CommandBody(BaseModel):
+        """``{"action": "next"}``, plus whatever that action's payload needs.
+
+        Typed rather than a bare ``dict`` so a body with no ``action`` is a 422
+        from the framework instead of a ``KeyError`` inside the handler.
+        """
+
+        model_config = ConfigDict(extra="allow")
+
+        action: str
+
+    class GeoPreviewBody(BaseModel):
+        """The tiers editor's live preview.
+
+        Every field is destructured by :mod:`~picframe3.media.geocode`, which
+        expects strings inside lists inside a list.  ``{"key_order": [[[]]]}``
+        used to reach it and come back as a 500; declared this way it is a 422
+        naming the field, which is both honest and free.
+        """
+
+        model_config = ConfigDict(extra="ignore")
+
+        detail: str | None = None
+        key_order: list[list[str]] | None = None
+        suppress: list[str] | None = None
+
+
+# --------------------------------------------------------------------------
+# Keeping an open interface local
+# --------------------------------------------------------------------------
+
+#: Methods that change something.  ``GET`` and ``HEAD`` are not on the list
+#: because the ``Host`` check below is what protects them.
+UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+#: Name endings that can only ever mean a machine on this network.  A dotted
+#: name is otherwise refused, which would lock out anyone whose router hands
+#: out a domain of its own -- and the commonest router in the houses this frame
+#: is built for hands out ``fritz.box``.  None of these can be registered on
+#: the public internet, so none of them can be rebound at the frame.
+LAN_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal",
+                ".localdomain", ".localhost", ".fritz.box")
+
+#: An escape hatch for the frame that is reached under a name this cannot
+#: guess -- behind a reverse proxy, say.  Colon- or comma-separated.  It exists
+#: because being locked out of your own picture frame by a hostname rule is a
+#: worse outcome than the rule itself prevents.
+ALLOWED_HOSTS_ENV = "PICFRAME3_ALLOWED_HOSTS"
+
+#: 100.64.0.0/10, the carrier-grade NAT range.  Not `is_private` to Python, but
+#: it is what Tailscale uses for every node on a tailnet, and a frame reached
+#: over the VPN is being reached by its owner.
+CGNAT_V4 = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _header(scope: dict, name: str) -> str:
+    """One request header from a raw ASGI scope, lowercased name, "" if absent."""
+    wanted = name.encode("latin-1")
+    for key, value in scope.get("headers", ()):
+        if key == wanted:
+            return value.decode("latin-1")
+    return ""
+
+
+def _split_host(value: str) -> tuple[str, str]:
+    """``"192.168.1.4:9000"`` -> ``("192.168.1.4", "9000")``; IPv6 brackets kept."""
+    text = value.strip().lower()
+    if text.startswith("["):                      # [::1]:9000
+        host, _, rest = text.partition("]")
+        return host.lstrip("["), rest.lstrip(":")
+    host, _, port = text.partition(":")
+    return host, port
+
+
+def host_is_local(host: str, allowed: set[str]) -> bool:
+    """Whether a ``Host`` header may be the frame's own address.
+
+    This is the DNS-rebinding check.  An attacker's page cannot read a reply
+    from ``http://192.168.1.4:9000/api/config`` -- the same-origin policy stops
+    it -- so instead they publish ``frame.evil.example`` with a one-second TTL,
+    point it at their own server, then re-point it at the frame's LAN address.
+    The browser now believes the two are the same origin and hands over every
+    reply.  The one thing that does not change through all of that is the
+    ``Host`` header, which still says ``frame.evil.example``.
+
+    So: a literal loopback, private or link-local address is fine (that is what
+    the owner types, and what a rebinding attack cannot make the browser send);
+    an ``.local`` mDNS name is fine; a name with no dot in it is fine, because a
+    public resolver cannot answer one; anything else -- which is to say every
+    name that can be registered on the internet -- is refused.
+    """
+    name, _ = _split_host(host)
+    if not name:
+        # HTTP/1.0 and some scripted clients send none.  A browser always does,
+        # so an absent header is never the attack this guards against.
+        return True
+    if name in allowed:
+        return True
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return name.endswith(LAN_SUFFIXES) or "." not in name
+    if address.is_loopback or address.is_private or address.is_link_local:
+        return True
+    # Python does not count the carrier-grade NAT range as private, but
+    # Tailscale hands every machine on a tailnet an address in it -- so without
+    # this the owner reaching his own frame over the VPN is refused every
+    # request, including the page itself, with no obvious way back in.
+    return address in CGNAT_V4
+
+
+def origin_matches_host(origin: str, host: str) -> bool:
+    """Whether a browser's ``Origin``/``Referer`` is this same interface."""
+    parts = urlsplit(origin if "//" in origin else f"//{origin}")
+    if not parts.netloc:
+        return False
+    origin_host, origin_port = _split_host(parts.netloc)
+    request_host, request_port = _split_host(host)
+    # A missing port means the scheme's default, and this interface is plain
+    # HTTP on a port the owner chose, so comparing what was written is both
+    # sufficient and impossible to get subtly wrong.
+    return (origin_host, origin_port) == (request_host, request_port)
+
+
+class _LocalNetworkGuard:
+    """One piece of ASGI middleware holding three unrelated doors shut.
+
+    Written as raw ASGI rather than ``BaseHTTPMiddleware`` because the event
+    stream is a long-lived ``StreamingResponse`` that asks the request whether
+    the client has gone; the http-middleware wrapper interposes its own
+    plumbing there and the stream stops noticing a closed tab.
+
+    What it enforces, in order:
+
+    1. **A body limit.**  ``Content-Length`` over :data:`MAX_BODY_BYTES` is
+       refused before a byte is read.
+    2. **The ``Host`` header.**  See :func:`host_is_local` -- this is what stops
+       a page on the internet from reading ``/api/config`` through the owner's
+       own browser.
+    3. **``Origin``/``Referer`` on anything that changes state.**  A ``POST``
+       with no body and no content type is a "simple request": no preflight, so
+       CORS never gets a say, so any site the owner visits could quietly fire
+       ``/api/delete`` or ``/api/restart``.  A browser always labels such a
+       request with its ``Origin``, and one that does not match this host is
+       refused.  A request with neither header is left alone: that is curl,
+       Home Assistant or a shell script, none of which a website can forge.
+    """
+
+    def __init__(self, app, *, max_body: int = MAX_BODY_BYTES,
+                 allowed_hosts: set[str] | None = None,
+                 allowed_origins: list[str] | None = None):
+        self.app = app
+        self.max_body = max_body
+        self.allowed_hosts = allowed_hosts or set()
+        #: Sites named in `http.cors_origins`.  Without this the CORS policy
+        #: was a setting that did nothing for anything that changes state: the
+        #: preflight said yes and the request itself was then refused here.
+        self.allowed_origins = {
+            o.strip().rstrip("/").lower() for o in (allowed_origins or []) if o.strip()
+        }
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+
+        refusal = self._refuse(scope)
+        if refusal is not None:
+            status_code, message = refusal
+            response = Response(message, status_code=status_code,
+                                media_type="text/plain; charset=utf-8")
+            return await response(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+    def _refuse(self, scope: dict) -> tuple[int, str] | None:
+        length = _header(scope, "content-length")
+        if length.isdigit() and int(length) > self.max_body:
+            return (413, f"the request body may not exceed {self.max_body} bytes")
+        if not length and "chunked" in _header(scope, "transfer-encoding").lower():
+            # A chunked body announces no length, so the check above cannot see
+            # it -- and Starlette buffers the whole thing before a handler runs.
+            # Nothing this API accepts needs chunked encoding.
+            return (411, "this interface needs a Content-Length; "
+                         "chunked request bodies are not accepted")
+
+        host = _header(scope, "host")
+        if not host_is_local(host, self.allowed_hosts):
+            return (403, "this interface only answers on the frame's own "
+                         "address on your network; the Host header "
+                         f"{host!r} is not one of them")
+
+        if scope.get("method", "").upper() in UNSAFE_METHODS:
+            source = _header(scope, "origin") or _header(scope, "referer")
+            if source and not self._origin_allowed(source, host):
+                return (403, f"refusing a request from {source!r}: this "
+                             "interface only accepts changes from its own page")
+        return None
+
+    def _origin_allowed(self, source: str, host: str) -> bool:
+        if origin_matches_host(source, host):
+            return True
+        parts = urlsplit(source if "//" in source else f"//{source}")
+        origin = f"{parts.scheme}://{parts.netloc}".lower() if parts.scheme else ""
+        return bool(origin) and origin.rstrip("/") in self.allowed_origins
+
 
 class HttpServer:
     def __init__(self, app, config: HttpConfig):
@@ -54,34 +307,102 @@ class HttpServer:
         self.config = config
         if not HAVE_FASTAPI:
             raise RuntimeError(
-                "the web interface needs fastapi and uvicorn "
-                "(pip install 'picframe3[web]')"
+                f"the web interface needs fastapi and uvicorn ({install_hint('web')})"
             )
         try:
             import uvicorn  # noqa: F401
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError(
-                "the web interface needs uvicorn (pip install 'picframe3[web]')"
+                f"the web interface needs uvicorn ({install_hint('web')})"
             ) from exc
+        #: The capture every concurrent ``/api/screenshot`` waits on, and the
+        #: last PNG it produced.  See :meth:`_screenshot`.
+        self._shot_task: asyncio.Task | None = None
+        self._shot_data: bytes | None = None
+        self._shot_at = 0.0
         self.api = self._build()
 
     # ------------------------------------------------------------------
+    def allowed_hosts(self) -> set[str]:
+        """Names that count as "this frame", besides the addresses it has.
+
+        The frame's own hostname, because ``http://picture-frame.local:9000/``
+        is how the owner reaches it, and whatever ``http.host`` was set to when
+        that is a name rather than an address.
+        """
+        names = {"localhost"}
+        try:
+            hostname = socket.gethostname().lower()
+        except OSError:                            # pragma: no cover
+            hostname = ""
+        if hostname:
+            names |= {hostname, hostname.split(".")[0], f"{hostname.split('.')[0]}.local"}
+        configured = str(self.config.host or "").strip().lower()
+        if configured and configured not in ("0.0.0.0", "::", ""):
+            names.add(configured)
+        for extra in getattr(self.config, "allowed_hosts", None) or ():
+            if str(extra).strip():
+                names.add(str(extra).strip().lower())
+        for extra in os.environ.get(ALLOWED_HOSTS_ENV, "").replace(",", ":").split(":"):
+            if extra.strip():
+                names.add(extra.strip().lower())
+        return names
+
+    def cors_origins(self) -> list[str]:
+        """The CORS origins actually honoured, with ``*`` thrown out.
+
+        ``allow_origins=["*"]`` on an interface with no password means every
+        page on the web may drive the whole API -- change the settings, remove
+        photographs -- on behalf of anyone who visits it from the house.  That
+        is never what someone means by "let my dashboard embed this", so the
+        wildcard is refused out loud rather than honoured quietly.
+        """
+        origins = []
+        for entry in self.config.cors_origins or []:
+            text = str(entry).strip()
+            if text in ("*", "null"):
+                _log.warning(
+                    "ignoring cors_origins entry %r: a wildcard would let any "
+                    "website on the internet drive this frame. List the sites "
+                    "you mean, e.g. https://homeassistant.local:8123", text)
+                continue
+            if text:
+                origins.append(text)
+        return origins
+
     def _build(self):
         api = FastAPI(
             title="picframe3",
             version=getattr(self.app, "version", "3"),
-            docs_url="/api/docs",
-            openapi_url="/api/openapi.json",
+            # The interactive documentation is off, deliberately and always.
+            # Swagger UI loads its JavaScript and CSS from a CDN, and a frame
+            # on a home network -- the one machine here with no browser and
+            # possibly no route to the internet -- renders it as a blank page.
+            # The schema itself is still served, behind the same guard as
+            # everything else, at /api/openapi.json.
+            docs_url=None,
+            redoc_url=None,
+            openapi_url=None,
         )
-        if self.config.cors_origins:
+        origins = self.cors_origins()
+        if origins:
             from fastapi.middleware.cors import CORSMiddleware
 
             api.add_middleware(
                 CORSMiddleware,
-                allow_origins=self.config.cors_origins,
-                allow_methods=["*"],
-                allow_headers=["*"],
+                allow_origins=origins,
+                # Named rather than "*": a wildcard here waves through methods
+                # and headers nothing in this API uses, and the browser's
+                # preflight is one of the few checks an open interface gets.
+                allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+                allow_headers=["Content-Type", "Authorization"],
             )
+        # Added last, so it wraps everything including CORS and the static
+        # files: a request that should not be answered is not answered by
+        # anything.
+        api.add_middleware(_LocalNetworkGuard, max_body=MAX_BODY_BYTES,
+                           allowed_hosts=self.allowed_hosts(),
+                           allowed_origins=origins)
 
         auth = self._auth_dependency()
         guard = [Depends(auth)] if auth else []
@@ -93,27 +414,41 @@ class HttpServer:
 
         @api.get("/api/events", dependencies=guard)
         async def events(request: Request):
-            queue: asyncio.Queue = asyncio.Queue(maxsize=8)
+            # One slot rather than a queue: what a browser wants is the newest
+            # state, not every state.  A listener that arrives while the last
+            # one is still being written simply replaces it, so a burst of
+            # updates during a transition costs one push instead of eight, and
+            # a slow client can never build a backlog to be dropped later.
+            latest: dict[str, Any] | None = None
+            wakeup = asyncio.Event()
 
             def listener(state):
-                try:
-                    queue.put_nowait(state.as_dict())
-                except asyncio.QueueFull:
-                    pass
+                nonlocal latest
+                latest = state.as_dict()
+                wakeup.set()
 
             unsubscribe = self.app.bus.subscribe(listener)
 
             async def stream():
+                nonlocal latest
                 try:
                     yield _sse(self.app.state().as_dict())
                     while True:
                         if await request.is_disconnected():
                             break
                         try:
-                            payload = await asyncio.wait_for(queue.get(), timeout=20.0)
-                            yield _sse(payload)
+                            await asyncio.wait_for(wakeup.wait(), timeout=20.0)
                         except TimeoutError:
                             yield ": keep-alive\n\n"
+                            continue
+                        # Let whatever else is about to change land in the same
+                        # push before sending: the frame publishes several
+                        # times a second while a picture is changing.
+                        await asyncio.sleep(SSE_MIN_INTERVAL)
+                        wakeup.clear()
+                        payload, latest = latest, None
+                        if payload is not None:
+                            yield _sse(payload)
                 finally:
                     unsubscribe()
 
@@ -122,23 +457,15 @@ class HttpServer:
                                               "X-Accel-Buffering": "no"})
 
         # -- which pictures are in the running -------------------------
-        # Declared before the /api/{action} shortcut below, which would
-        # otherwise swallow POST /api/filters and turn it into an unknown
-        # action.  FastAPI matches routes in the order they are added.
         @api.get("/api/filters", dependencies=guard)
         async def get_filters():
             """The filter now in force, and everything a filter panel offers."""
-            return {
-                "filters": self.app.playlist.filters.as_dict(),
-                "matching": self.app.playlist.size,
-                "total": self.app.library.stats().get("files", 0),
-                "folders": [{"name": name, "count": count}
-                            for name, count in self._folder_counts()],
-                "tags": [{"name": t, "count": n}
-                         for t, n in self.app.library.all_tags()],
-                "locations": [{"name": p, "count": n}
-                              for p, n in self.app.library.locations()[:200]],
-            }
+            # Counting the library, every folder and every tag is several full
+            # table scans.  On the event loop that is the renderer's loop, so a
+            # filter panel left open made the cross-fade stutter; in a worker
+            # thread it is somebody else's problem.  Each Library connection
+            # belongs to one thread, which is what makes this safe.
+            return await _in_thread(self._filters_payload)
 
         @api.post("/api/filters", dependencies=guard)
         async def set_filters(body: dict | None = None):
@@ -157,28 +484,20 @@ class HttpServer:
             """How many pictures a filter *would* select, without applying it.
 
             What lets the panel count down as you type instead of making you
-            apply a filter to find out it matches nothing.
+            apply a filter to find out it matches nothing.  Counted in a worker
+            thread: this runs on every keystroke.
             """
             trial = self.app.playlist.filters.merged(dict(body or {}))
-            return {"matching": self.app.playlist.count_for(trial),
-                    "filters": trial.as_dict()}
+            matching = await _in_thread(self.app.playlist.count_for, trial)
+            return {"matching": matching, "filters": trial.as_dict()}
 
         # -- commands --------------------------------------------------
         @api.post("/api/command", dependencies=guard)
-        async def post_command(body: dict):
-            command = Command.parse(body, source="http")
+        async def post_command(body: CommandBody):
+            command = Command.parse(body.model_dump(), source="http")
             if command is None:
-                raise HTTPException(400, f"unknown action {body.get('action')!r}")
-            self.app.bus.submit(command)
-            return {"ok": True, "action": command.action.value}
-
-        @api.post("/api/{action}", dependencies=guard)
-        async def shortcut(action: str, body: dict | None = None):
-            payload = dict(body or {})
-            payload["action"] = action
-            command = Command.parse(payload, source="http")
-            if command is None:
-                raise HTTPException(404, f"no such action {action!r}")
+                raise HTTPException(400, f"unknown action {body.action!r}")
+            self._vet(command)
             self.app.bus.submit(command)
             return {"ok": True, "action": command.action.value}
 
@@ -190,7 +509,7 @@ class HttpServer:
             return redact(self.app.config.as_dict())
 
         @api.post("/api/geo/preview", dependencies=guard)
-        async def geo_preview(body: dict):
+        async def geo_preview(body: GeoPreviewBody):
             """What a set of address tiers would write under a photograph.
 
             Previewed against a picture the frame has actually shown whenever
@@ -211,10 +530,10 @@ class HttpServer:
                 if found:
                     address, source = found, record.basename
 
-            detail = str(body.get("detail") or "full")
-            tiers = body.get("key_order") or self.app.config.geo.key_order
+            detail = body.detail or "full"
+            tiers = body.key_order or self.app.config.geo.key_order
             order = key_order_for(detail, tiers)
-            suppress = body.get("suppress")
+            suppress = body.suppress
             if suppress is None:
                 suppress = self.app.config.geo.suppress
             return {
@@ -236,13 +555,16 @@ class HttpServer:
             # Option lists that can only come from the running frame: the
             # folders that are actually in the library, and the address keys
             # this photograph's own reply happens to carry.
-            folders = [{"name": path, "label": f"{path}  ({count})"}
-                       for path, count in self.app.library.folders()]
-            return schema(self.app.config, extra_options={"folders": folders})
+            folders = await _in_thread(self.app.library.folders)
+            options = [{"name": path, "label": f"{path}  ({count})"}
+                       for path, count in folders]
+            return schema(self.app.config, extra_options={"folders": options})
 
         @api.patch("/api/config", dependencies=guard)
         async def patch_config(body: dict, persist: bool = Query(False)):
             applied: dict[str, Any] = {}
+            for key, value in body.items():
+                self._vet_setting(str(key), value)
             for key, value in body.items():
                 self.app.bus.submit(
                     Command(Action.SET_CONFIG, {"key": key, "value": value}, source="http")
@@ -271,74 +593,57 @@ class HttpServer:
                     "supervised": self.app.under_systemd()}
 
         # -- library ---------------------------------------------------
+        # Everything below reads SQLite, so everything below reads it in a
+        # worker thread: a library of forty thousand photographs is several
+        # hundred milliseconds of COUNT(*), and the event loop these handlers
+        # share is the one drawing the cross-fade.
         @api.get("/api/library", dependencies=guard)
         async def library_stats():
-            return self.app.library.stats()
+            return await _in_thread(self.app.library.stats)
 
         @api.get("/api/library/folders", dependencies=guard)
         async def folders():
-            return [{"path": p, "count": n} for p, n in self.app.library.folders()]
+            rows = await _in_thread(self.app.library.folders)
+            return [{"path": p, "count": n} for p, n in rows]
 
         @api.get("/api/library/tags", dependencies=guard)
         async def tags():
-            return [{"name": t, "count": n} for t, n in self.app.library.all_tags()]
+            rows = await _in_thread(self.app.library.all_tags)
+            return [{"name": t, "count": n} for t, n in rows]
 
         @api.get("/api/library/locations", dependencies=guard)
         async def locations():
-            return [{"name": p, "count": n} for p, n in self.app.library.locations()]
+            rows = await _in_thread(self.app.library.locations)
+            return [{"name": p, "count": n} for p, n in rows]
 
         @api.get("/api/library/photos", dependencies=guard)
         async def photos(q: str = "", limit: int = Query(60, le=500), offset: int = 0,
                          selected: bool = False):
-            if selected:
-                # Exactly what the slideshow is drawing from, in the same
-                # order the grid shows everything else: newest first.  A
-                # search inside the selection reads further down it before
-                # trimming, so searching does not silently look at one page.
-                reach = min(limit * 10, 2000) if q else limit
-                ids = self.app.playlist.selection(limit=reach, offset=offset)
-                records = [r for r in (self.app.library.get(i) for i in ids)
-                           if r is not None]
-                if q:
-                    needle = q.casefold()
-                    records = [r for r in records if needle in " ".join(
-                        str(x) for x in (r.basename, r.title, r.caption, r.location,
-                                         *(r.tags or ()))).casefold()][:limit]
-            elif q:
-                records = self.app.library.search(q, limit=limit)
-            else:
-                records = self.app.library.query(
-                    "SELECT * FROM files WHERE hidden=0 "
-                    "ORDER BY COALESCE(taken_at, mtime) DESC LIMIT ? OFFSET ?",
-                    (limit, offset),
-                )
+            records = await _in_thread(self._photos, q, limit, offset, selected)
             return [_summary(r) for r in records]
 
         @api.get("/api/library/photo/{file_id}", dependencies=guard)
         async def photo(file_id: int):
-            record = self.app.library.get(file_id)
+            record = await _in_thread(self.app.library.get, file_id)
             if record is None:
                 raise HTTPException(404, "not found")
             return record.as_dict()
 
         @api.get("/api/library/photo/{file_id}/thumb", dependencies=guard)
         async def thumb(file_id: int):
-            record = self.app.library.get(file_id)
+            record = await _in_thread(self.app.library.get, file_id)
             if record is None:
                 raise HTTPException(404, "not found")
-            data = await asyncio.get_running_loop().run_in_executor(
-                None, _thumbnail, record.path, record.is_video
-            )
-            if data is None:
-                raise HTTPException(415, "cannot render a thumbnail for this file")
-            return Response(data, media_type="image/jpeg",
-                            headers={"Cache-Control": "public, max-age=86400"})
+            return await _thumbnail_response(record.path, bool(record.is_video))
 
         @api.get("/api/library/photo/{file_id}/file", dependencies=guard)
         async def original(file_id: int):
-            record = self.app.library.get(file_id)
+            record = await _in_thread(self.app.library.get, file_id)
             if record is None or not os.path.exists(record.path):
                 raise HTTPException(404, "not found")
+            # No pixel budget here on purpose: this copies bytes off the disk
+            # and never decodes them, so a 500-megapixel TIFF costs the frame
+            # nothing but the read.
             return FileResponse(record.path)
 
         # -- removed pictures ------------------------------------------
@@ -365,13 +670,7 @@ class HttpServer:
             entry, path = _removed_file(self.app, stored_as)
             if entry is None or not os.path.exists(path):
                 raise HTTPException(404, "not found")
-            data = await asyncio.get_running_loop().run_in_executor(
-                None, _thumbnail, path, bool(entry.get("is_video"))
-            )
-            if data is None:
-                raise HTTPException(415, "cannot render a thumbnail for this file")
-            return Response(data, media_type="image/jpeg",
-                            headers={"Cache-Control": "public, max-age=86400"})
+            return await _thumbnail_response(path, bool(entry.get("is_video")))
 
         @api.get("/api/removed/{stored_as}/file", dependencies=guard)
         async def removed_file(stored_as: str):
@@ -412,10 +711,11 @@ class HttpServer:
             path = current.get("path")
             if not path or not os.path.exists(path):
                 raise HTTPException(404, "no picture is on the frame")
-            data = await asyncio.get_running_loop().run_in_executor(
-                None, render_preview, path, bool(current.get("is_video")),
-                (size, size), 82,
-            )
+            is_video = bool(current.get("is_video"))
+            too_big = await _in_thread(_too_many_pixels, path, is_video)
+            if too_big:
+                raise HTTPException(413, too_big)
+            data = await _in_thread(render_preview, path, is_video, (size, size), 82)
             if data is None:
                 raise HTTPException(415, "cannot render this file as a picture")
             return Response(data, media_type="image/jpeg", headers={
@@ -428,7 +728,7 @@ class HttpServer:
         async def screenshot():
             """A PNG of what is actually on the frame's screen."""
             try:
-                data = await self.app.screenshot()
+                data, age = await self._screenshot()
             except TimeoutError:
                 raise HTTPException(
                     503,
@@ -440,6 +740,9 @@ class HttpServer:
             return Response(data, media_type="image/png", headers={
                 "Cache-Control": "no-store",
                 "Content-Disposition": 'inline; filename="picframe.png"',
+                # So a caller can tell a fresh capture from the one it was
+                # handed because it asked again too soon.
+                "X-Capture-Age": f"{age:.1f}",
             })
 
         @api.get("/api/transitions", dependencies=guard)
@@ -476,6 +779,22 @@ class HttpServer:
 
             return [{"name": name, "label": labels[name]} for name in AUTO_FITS]
 
+        @api.get("/api/date-windows", dependencies=guard)
+        async def date_windows():
+            """The rolling date filters, in the order they should be offered.
+
+            A rule rather than a pair of dates: picking "Last 7 days" stores
+            the rule, and the frame works the dates out again every time it
+            asks the library, so the filter still means the last seven days
+            next month.
+            """
+            from ..library.playlist import DATE_WINDOWS
+
+            current = (self.app.playlist.filters.date_window
+                       if self.app.playlist else "") or "all"
+            return [{"name": name, "label": label, "selected": name == current}
+                    for name, label in DATE_WINDOWS.items()]
+
         @api.get("/api/geo-detail", dependencies=guard)
         async def geo_detail():
             """How much of an address a caption may show."""
@@ -484,15 +803,148 @@ class HttpServer:
             return [{"name": name, "label": label}
                     for name, label in DETAIL_LABELS.items()]
 
+        @api.get("/api/openapi.json", dependencies=guard)
+        async def openapi_schema():
+            """The machine-readable description, behind the same door as the rest."""
+            return api.openapi()
+
+        @api.get("/api/docs", dependencies=guard)
+        async def docs_notice():
+            """Why there is no Swagger UI here, and where the schema is."""
+            return Response(
+                "picframe3 does not serve interactive API documentation: "
+                "Swagger UI fetches its assets from a CDN, and the frame is "
+                "often on a network with no route to one.\n\n"
+                "The schema is at /api/openapi.json; point any OpenAPI client "
+                "at it.\n",
+                media_type="text/plain; charset=utf-8",
+            )
+
         @api.get("/api/health")
         async def health():
             return {"ok": True, "uptime": round(time.monotonic() - self.app.started, 1)}
+
+        # -- the catch-all, and it has to be last ----------------------
+        # Starlette matches routes in registration order, so this one swallows
+        # every single-segment /api/... POST declared after it.  It used to sit
+        # in the middle of the file, which is how POST /api/restart?save=true
+        # ended up here instead of in the restart handler: the query parameter
+        # was never read, and "Save & restart" silently threw away the very
+        # changes it was asked to apply.  Nothing may be registered below this
+        # line except the static files.
+        @api.post("/api/{action}", dependencies=guard)
+        async def shortcut(action: str, body: dict | None = None):
+            payload = dict(body or {})
+            payload["action"] = action
+            command = Command.parse(payload, source="http")
+            if command is None:
+                raise HTTPException(404, f"no such action {action!r}")
+            self._vet(command)
+            self.app.bus.submit(command)
+            return {"ok": True, "action": command.action.value}
 
         if os.path.isdir(WEB_ROOT):
             api.mount("/", StaticFiles(directory=WEB_ROOT, html=True), name="web")
         else:  # pragma: no cover
             _log.warning("web assets missing at %s", WEB_ROOT)
         return api
+
+    # ------------------------------------------------------------------
+    # What this surface is allowed to ask for
+    # ------------------------------------------------------------------
+    def _vet(self, command: Command) -> None:
+        """Refuse a command the network is not permitted to give.
+
+        The frame's own buttons are a different matter: somebody standing in
+        front of it has already proved more than any header can.
+        """
+        if command.action is Action.DELETE and not self.app.config.http.allow_delete:
+            raise HTTPException(
+                403,
+                "removing pictures over the network is switched off "
+                "(http.allow_delete). The frame's own buttons can still do it.",
+            )
+        if command.action is Action.SET_CONFIG:
+            self._vet_setting(str(command.payload.get("key") or ""),
+                              command.payload.get("value"))
+
+    def _vet_setting(self, key: str, value: Any) -> None:
+        """Refuse a setting that would make the frame write somewhere it should not."""
+        from ..uischema import check_path_setting
+
+        problem = check_path_setting(key, value, self.app.config)
+        if problem:
+            raise HTTPException(400, problem)
+
+    # ------------------------------------------------------------------
+    # Work that is too slow for the render loop
+    # ------------------------------------------------------------------
+    def _filters_payload(self) -> dict[str, Any]:
+        """Everything the filter panel draws itself from.  Called in a thread."""
+        return {
+            "filters": self.app.playlist.filters.as_dict(),
+            "matching": self.app.playlist.size,
+            "total": self.app.library.stats().get("files", 0),
+            "folders": [{"name": name, "count": count}
+                        for name, count in self._folder_counts()],
+            "tags": [{"name": t, "count": n}
+                     for t, n in self.app.library.all_tags()],
+            "locations": [{"name": p, "count": n}
+                          for p, n in self.app.library.locations()[:200]],
+        }
+
+    def _photos(self, q: str, limit: int, offset: int, selected: bool) -> list:
+        """The library grid's page of records.  Called in a thread."""
+        if selected:
+            # Exactly what the slideshow is drawing from, in the same order
+            # the grid shows everything else: newest first.  A search inside
+            # the selection reads further down it before trimming, so
+            # searching does not silently look at one page.
+            reach = min(limit * 10, 2000) if q else limit
+            ids = self.app.playlist.selection(limit=reach, offset=offset)
+            records = [r for r in (self.app.library.get(i) for i in ids)
+                       if r is not None]
+            if q:
+                needle = q.casefold()
+                records = [r for r in records if needle in " ".join(
+                    str(x) for x in (r.basename, r.title, r.caption, r.location,
+                                     *(r.tags or ()))).casefold()][:limit]
+            return records
+        if q:
+            return self.app.library.search(q, limit=limit)
+        return self.app.library.query(
+            "SELECT * FROM files WHERE hidden=0 "
+            "ORDER BY COALESCE(taken_at, mtime) DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+
+    async def _screenshot(self) -> tuple[bytes, float]:
+        """One capture, however many callers are asking for it.
+
+        There is a single capture slot in the render loop, so two requests
+        arriving together used to overwrite each other's future: the first
+        waited out its fifteen seconds and got a 503, the second got the
+        picture.  Here every caller in flight awaits the *same* task, and a
+        caller arriving within :data:`SCREENSHOT_MIN_INTERVAL` of the last one
+        is handed that result rather than costing the renderer another
+        framebuffer read-back and another PNG encode.
+
+        Returns the PNG and how old it is, in seconds.
+        """
+        now = time.monotonic()
+        if self._shot_data is not None and now - self._shot_at < SCREENSHOT_MIN_INTERVAL:
+            return self._shot_data, now - self._shot_at
+
+        task = self._shot_task
+        if task is None or task.done():
+            task = asyncio.ensure_future(self.app.screenshot())
+            self._shot_task = task
+        # Shielded, so a browser that closes the tab mid-capture cancels its own
+        # request and not the capture everybody else is waiting for.
+        data = await asyncio.shield(task)
+        self._shot_data = data
+        self._shot_at = time.monotonic()
+        return data, 0.0
 
     # ------------------------------------------------------------------
     def _folder_counts(self) -> list[tuple[str, int]]:
@@ -513,8 +965,13 @@ class HttpServer:
         password = self.config.auth_password
 
         def check(credentials: HTTPBasicCredentials = Depends(scheme)):
-            ok_user = secrets.compare_digest(credentials.username, user)
-            ok_pass = secrets.compare_digest(credentials.password, password)
+            # Encoded first: compare_digest raises TypeError on a str holding
+            # anything outside ASCII, so a user name with an umlaut in it used
+            # to come back as a 500 rather than as "wrong password".
+            ok_user = secrets.compare_digest(
+                credentials.username.encode("utf-8"), user.encode("utf-8"))
+            ok_pass = secrets.compare_digest(
+                credentials.password.encode("utf-8"), password.encode("utf-8"))
             if not (ok_user and ok_pass):
                 raise HTTPException(
                     status.HTTP_401_UNAUTHORIZED, "invalid credentials",
@@ -534,14 +991,36 @@ class HttpServer:
             log_level="warning",
             access_log=False,
             lifespan="off",
+            # Past this many requests in flight uvicorn answers 503 instead of
+            # accepting more work.  The frame has one job that must not miss a
+            # deadline, and being unable to say "busy" is how an open interface
+            # turns a burst of requests into a stutter on the wall.
+            limit_concurrency=LIMIT_CONCURRENCY,
         )
         server = uvicorn.Server(config)
         _log.info("web interface on http://%s:%d/", self.config.host, self.config.port)
+        if self.config.host in ("0.0.0.0", "::") and not self.config.auth_user:
+            # Deliberate, and the right default for a picture frame -- but it
+            # should be a thing the owner knows rather than a thing he finds
+            # out.  Anyone on the network can change every setting the page can.
+            _log.warning(
+                "the web interface answers on every network with no password: "
+                "anyone who can reach %s:%d can change any setting. Set "
+                "http.auth_user and http.auth_password to require a login, or "
+                "http.host to 127.0.0.1 to keep it on the frame itself",
+                self.config.host, self.config.port,
+            )
         try:
             await server.serve()
         except asyncio.CancelledError:
             server.should_exit = True
             raise
+
+
+async def _in_thread(func, *args):
+    """Run something blocking off the event loop the renderer shares."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, functools.partial(func, *args))
 
 
 def _sse(payload: dict) -> str:
@@ -565,10 +1044,50 @@ def _summary(record) -> dict:
     }
 
 
+def _too_many_pixels(path: str, is_video: bool = False) -> str | None:
+    """Why this file will not be decoded here, or ``None`` if it will.
+
+    Reads the header only -- Pillow does not touch the pixels until something
+    asks for them -- so the cost of saying no is a few hundred bytes off the
+    disk, against the 1.5 GB a 500-megapixel PNG would otherwise become.  A
+    video is left to the poster-frame code, which decodes one frame at the
+    size it was asked for.
+    """
+    if is_video:
+        return None
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            width, height = image.size
+    except Exception:
+        # Not an image, or one Pillow cannot even open: not this check's
+        # problem, and the renderer below says so more usefully.
+        return None
+    if width * height > MAX_DECODE_PIXELS:
+        return (f"{os.path.basename(path)} is {width}×{height} pixels, past the "
+                f"{MAX_DECODE_PIXELS // 1_000_000} megapixel limit this frame "
+                "will decode over the network. The original file is still "
+                "served unchanged.")
+    return None
+
+
 def _thumbnail(path: str, is_video: bool) -> bytes | None:
     from ..media.preview import render_preview
 
     return render_preview(path, is_video, THUMB_SIZE)
+
+
+async def _thumbnail_response(path: str, is_video: bool):
+    """One thumbnail, refused rather than decoded when it is absurdly large."""
+    too_big = await _in_thread(_too_many_pixels, path, is_video)
+    if too_big:
+        raise HTTPException(413, too_big)
+    data = await _in_thread(_thumbnail, path, is_video)
+    if data is None:
+        raise HTTPException(415, "cannot render a thumbnail for this file")
+    return Response(data, media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 def _removal(entry: dict, folder: str) -> dict:

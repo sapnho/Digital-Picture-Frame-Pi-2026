@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.24"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,15 +8,20 @@ version = "3.10.0"
 description = "A digital picture frame for current Raspberry Pi OS: OpenGL ES on DRM/KMS, no desktop required"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+# PEP 639: an SPDX expression plus the file itself, rather than the
+# deprecated `license = { text = ... }` table.
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "picframe3 contributors" }]
 keywords = ["raspberry-pi", "picture-frame", "photo-frame", "kms", "drm",
             "opengl-es", "gstreamer", "home-assistant", "slideshow"]
 classifiers = [
   "Development Status :: 4 - Beta",
-  "Environment :: X11 Applications",
+  # Console, not "X11 Applications": there is no X server anywhere near this
+  # project -- it renders through EGL onto DRM/KMS and is driven from a CLI.
+  # (No license classifier: PEP 639 deprecates it alongside `license = "MIT"`.)
+  "Environment :: Console",
   "Intended Audience :: End Users/Desktop",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -27,24 +32,47 @@ classifiers = [
 # The core runtime needs remarkably little: EGL, GLES, libdrm and libgbm are
 # reached through ctypes, so there is no compiled Python extension to build on
 # the Pi and nothing to rebuild when Mesa is updated.
+#
+# Every requirement has an upper bound, and that is a deliberate choice about
+# what an update means.  Updating picframe3 is `curl … | bash` re-run by
+# someone who is not a programmer and has no way back: with open-ended ranges
+# that command was free to pull the next major Pillow, FastAPI or numpy on a
+# Tuesday evening and leave the frame in the hall showing a traceback.  The
+# bounds are the next major version of each, so patch and minor releases --
+# where the security fixes are -- still arrive by themselves, and a major one
+# waits for a release of picframe3 that has been run against it.
+#
+# The alternative, a constraints.txt handed to pip with -c, was rejected: it
+# only protects installs that go through install.sh, while `pip install
+# picframe3` and every downstream packager see nothing.  Bounds travel with
+# the package.
 dependencies = [
-  "Pillow>=10.3",
-  "numpy>=1.26",
-  "PyYAML>=6.0",
+  "Pillow>=10.3,<13",
+  "numpy>=1.26,<3",
+  "PyYAML>=6.0,<7",
 ]
 
 [project.optional-dependencies]
-web   = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
-mqtt  = ["aiomqtt>=2.0"]
-input = ["evdev>=1.7"]
-gpio  = ["gpiozero>=2.0", "lgpio>=0.2"]
-heif  = ["pillow-heif>=0.16"]
-video = ["PyGObject>=3.46"]
+web   = ["fastapi>=0.110,<1", "uvicorn[standard]>=0.29,<1"]
+mqtt  = ["aiomqtt>=2.0,<3"]
+input = ["evdev>=1.7,<3"]
+gpio  = ["gpiozero>=2.0,<3", "lgpio>=0.2,<1"]
+heif  = ["pillow-heif>=0.16,<2"]
+video = ["PyGObject>=3.46,<4"]
+# `all` is what install.sh installs, so it is everything the frame can use
+# that pip can actually deliver on a Pi.  GPIO buttons are in it: they are
+# documented in docs/CONFIG.md and offered in the example configuration, and
+# leaving them out of the one extra anybody installs made a documented feature
+# uninstallable.  Both wheels are aarch64-native and tiny.
+# PyGObject is deliberately *not* here: GStreamer comes from apt through
+# --system-site-packages, and building PyGObject in a venv needs a toolchain
+# and several minutes on a Pi.
 all   = [
-  "fastapi>=0.110", "uvicorn[standard]>=0.29",
-  "aiomqtt>=2.0", "evdev>=1.7", "pillow-heif>=0.16",
+  "fastapi>=0.110,<1", "uvicorn[standard]>=0.29,<1",
+  "aiomqtt>=2.0,<3", "evdev>=1.7,<3", "pillow-heif>=0.16,<2",
+  "gpiozero>=2.0,<3", "lgpio>=0.2,<1",
 ]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5", "httpx>=0.27"]
 
 [project.scripts]
 picframe3 = "picframe3.cli:main"
@@ -56,8 +84,18 @@ Issues = "https://github.com/sapnho/Digital-Picture-Frame-Pi-2026/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/picframe3"]
 
+# packaging/ holds the one definition of the systemd unit, the polkit rule and
+# the udev rule; `picframe3 setup` reads them and substitutes the placeholders.
+# They are mapped into the package rather than copied into src/, so there is
+# still exactly one copy of each in the repository.
+[tool.hatch.build.targets.wheel.force-include]
+"packaging/picframe3.service" = "picframe3/data/picframe3.service"
+"packaging/50-picframe3-network.rules" = "picframe3/data/50-picframe3-network.rules"
+"packaging/99-picframe3.rules" = "picframe3/data/99-picframe3.rules"
+
 [tool.hatch.build.targets.sdist]
-include = ["src", "packaging", "config", "docs", "tests", "tools", "README.md"]
+include = ["src", "packaging", "config", "docs", "tests", "tools", "README.md",
+           "LICENSE"]
 
 [tool.ruff]
 line-length = 100

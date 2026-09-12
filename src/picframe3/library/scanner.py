@@ -9,6 +9,7 @@ import os
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..media import metadata
 from ..media.geocode import Geocoder
@@ -16,6 +17,13 @@ from .db import Library
 from .watch import InotifyWatcher
 
 _log = logging.getLogger(__name__)
+
+
+#: How many files one transaction covers while scanning.  Large enough that a
+#: full scan is not thousands of fsyncs on an SD card, small enough that a power
+#: cut loses only the last few files and that the write lock is released often
+#: enough for the render loop to get its reads in.
+BATCH_SIZE = 100
 
 
 @dataclass
@@ -28,10 +36,17 @@ class ScanResult:
     geocoded: int = 0
     seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
+    #: Configured picture folders that were not there during this scan.  A
+    #: missing folder is almost always an unmounted share, and the caller has
+    #: to be able to tell that apart from an empty one.
+    missing_roots: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        return (f"{self.scanned} files in {self.seconds:.1f}s "
-                f"(+{self.added} new, ~{self.updated} changed, -{self.removed} gone)")
+        out = (f"{self.scanned} files in {self.seconds:.1f}s "
+               f"(+{self.added} new, ~{self.updated} changed, -{self.removed} gone)")
+        if self.missing_roots:
+            out += f"; {len(self.missing_roots)} folder(s) missing"
+        return out
 
 
 class Scanner:
@@ -46,6 +61,7 @@ class Scanner:
         ignore_hidden: bool = True,
         exclude: Sequence[str] = (),
         workers: int = 2,
+        prune_max_fraction: float = 0.2,
     ):
         self.library = library
         self.roots = [os.path.abspath(os.path.expanduser(r)) for r in roots]
@@ -54,30 +70,87 @@ class Scanner:
         self.include_videos = include_videos
         self.ignore_hidden = ignore_hidden
         self.exclude = [e for e in exclude if e]
+        #: The largest share of the indexed files under the scanned roots that
+        #: a single scan is allowed to delete.  Anything above it is treated as
+        #: a mount that has gone away rather than as a deletion; 0 disables the
+        #: check for somebody who really does empty folders that way.
+        self.prune_max_fraction = prune_max_fraction
         self._pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, workers), thread_name_prefix="scan"
         )
         self._watcher: InotifyWatcher | None = None
         self._scanning = False
+        #: Filled in by iter_files(); see its docstring.
+        self.missing_roots: list[str] = []
+        #: Files whose metadata could not be read, with the mtime and size they
+        #: had when it failed.  A HEIC on a frame without pillow-heif, or a
+        #: truncated download, fails identically on every pass, and a periodic
+        #: rescan would otherwise open and fail on all of them every hour.  The
+        #: file is retried as soon as it changes on disk -- and after a restart,
+        #: which is when the missing plugin may well have been installed.
+        self._unreadable: dict[str, tuple[float, int]] = {}
 
     # -- walking -----------------------------------------------------------
+    def wanted(self, path: str) -> bool:
+        """Whether this file belongs in the index, by the configured rules.
+
+        The one place that answers it.  ``rescan_paths()`` used to decide for
+        itself and applied none of them, so every inotify event put back the
+        videos and the dot-files that the settings exclude -- until the next
+        full scan took them out again.
+        """
+        name = os.path.basename(path)
+        if self.ignore_hidden and name.startswith("."):
+            return False
+        try:
+            # A filename that is not valid UTF-8 reaches Python with surrogate
+            # escapes, and SQLite stores TEXT as UTF-8: binding such a path
+            # raises UnicodeEncodeError and, before this check, took the whole
+            # scan down with it.  The index cannot hold the name, so the file is
+            # skipped -- loudly, because renaming it is the fix.
+            path.encode("utf-8")
+        except UnicodeEncodeError:
+            _log.warning("skipping %r: the name is not valid UTF-8 and cannot be "
+                         "indexed; rename it to include it", path)
+            return False
+        if any(x in path for x in self.exclude):
+            return False
+        if not metadata.is_supported(path):
+            return False
+        return not (not self.include_videos and metadata.is_video(path))
+
+    def _wanted_dir(self, dirpath: str, name: str) -> bool:
+        if self.ignore_hidden and name.startswith("."):
+            return False
+        return not any(x in os.path.join(dirpath, name) for x in self.exclude)
+
     def iter_files(self) -> Iterable[tuple[str, os.stat_result]]:
+        """Walk the picture folders, recording any root that is not there.
+
+        The missing roots are collected in :attr:`missing_roots` rather than
+        only logged: "the share is not mounted" and "the share is empty" look
+        identical from here, and pruning the index on the strength of the wrong
+        one is how a library loses everything it knows about its pictures.
+        """
+        self.missing_roots = []
         for root in self.roots:
             if not os.path.isdir(root):
                 _log.warning("picture folder does not exist: %s", root)
+                self.missing_roots.append(root)
                 continue
+            # A symlink pointing at one of its own parents is a loop that
+            # os.walk(followlinks=True) will happily follow for ever, building
+            # ever longer paths.  Remembering the directories already visited by
+            # identity, not by name, is what ends it.
+            seen: set[tuple[int, int]] = set()
             for dirpath, dirnames, filenames in os.walk(root, followlinks=self.follow_links):
-                if self.ignore_hidden:
-                    dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-                dirnames[:] = [d for d in dirnames
-                               if not any(x in os.path.join(dirpath, d) for x in self.exclude)]
+                if self.follow_links and not self._first_visit(dirpath, seen):
+                    dirnames[:] = []
+                    continue
+                dirnames[:] = [d for d in dirnames if self._wanted_dir(dirpath, d)]
                 for name in filenames:
-                    if self.ignore_hidden and name.startswith("."):
-                        continue
                     path = os.path.join(dirpath, name)
-                    if not metadata.is_supported(path):
-                        continue
-                    if not self.include_videos and metadata.is_video(path):
+                    if not self.wanted(path):
                         continue
                     try:
                         st = os.stat(path)
@@ -87,27 +160,45 @@ class Scanner:
                         continue
                     yield path, st
 
+    @staticmethod
+    def _first_visit(path: str, seen: set[tuple[int, int]]) -> bool:
+        """True the first time a directory is reached, by device and inode."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False
+        key = (st.st_dev, st.st_ino)
+        if key in seen:
+            _log.warning("skipping %s: already visited (symlink loop?)", path)
+            return False
+        seen.add(key)
+        return True
+
     # -- scanning ----------------------------------------------------------
     def scan(self, *, prune: bool = True,
              progress: Callable[[int, str], None] | None = None) -> ScanResult:
         result = ScanResult()
         t0 = time.monotonic()
         self._scanning = True
+        batch: list[tuple[Any, os.stat_result, str | None, bool]] = []
         try:
             for path, st in self.iter_files():
                 result.scanned += 1
                 if progress and result.scanned % 200 == 0:
                     progress(result.scanned, path)
-                existing = self.library.by_path(path)
-                if existing is not None and not self.library.needs_reindex(
-                    path, st.st_mtime, st.st_size
-                ):
+                state = self.library.file_state(path)
+                if self.library.is_current(state, st.st_mtime, st.st_size):
+                    result.skipped += 1
+                    continue
+                if self._unreadable.get(path) == (st.st_mtime, st.st_size):
                     result.skipped += 1
                     continue
                 meta = metadata.read(path)
                 if meta is None:
+                    self._unreadable[path] = (st.st_mtime, st.st_size)
                     result.errors.append(path)
                     continue
+                self._unreadable.pop(path, None)
                 location = None
                 if self.geocoder is not None and meta.latitude is not None:
                     # Only if it is already cached -- a cold lookup waits for
@@ -116,25 +207,64 @@ class Scanner:
                                                     cached_only=True)
                     if location:
                         result.geocoded += 1
-                try:
-                    self.library.upsert(meta, mtime=st.st_mtime, size=st.st_size,
-                                        location=location)
-                except Exception as exc:  # pragma: no cover - db level
-                    _log.warning("could not index %s: %s", path, exc)
-                    result.errors.append(path)
-                    continue
-                if existing is None:
-                    result.added += 1
-                else:
-                    result.updated += 1
+                batch.append((meta, st, location, state is None))
+                if len(batch) >= BATCH_SIZE:
+                    self._write_batch(batch, result)
+            self._write_batch(batch, result)
             if prune:
-                result.removed = self.library.prune_missing(self.roots)
+                result.missing_roots = list(self.missing_roots)
+                if self.missing_roots:
+                    # Every row under a folder that is not mounted looks
+                    # deleted.  Skip the prune entirely rather than let one
+                    # missing share take the play counts, rounds, hidden flags
+                    # and place names of a whole library with it.
+                    _log.warning(
+                        "not pruning the index: %d picture folder(s) are missing "
+                        "(%s) -- that looks like a mount problem, not a deletion",
+                        len(self.missing_roots), ", ".join(self.missing_roots),
+                    )
+                else:
+                    result.removed = self.library.prune_missing(
+                        self.roots, max_fraction=self.prune_max_fraction)
         finally:
             self._scanning = False
         result.seconds = time.monotonic() - t0
         self.library.set_state("last_scan", time.time())
         _log.info("scan complete: %s", result.summary())
         return result
+
+    def _write_batch(self, batch: list[tuple[Any, os.stat_result, str | None, bool]],
+                     result: ScanResult) -> None:
+        """Index a batch of files in one transaction, then empty it.
+
+        One transaction per file means one fsync per file, which on an SD card
+        is what makes a first scan of a holiday folder take minutes.  One
+        transaction per batch also means a crash mid-scan leaves the index
+        consistent: the files in the unfinished batch are simply not indexed
+        yet, and the next scan picks them up.
+        """
+        if not batch:
+            return
+        added = updated = 0
+        try:
+            with self.library.transaction():
+                for meta, st, location, is_new in batch:
+                    self.library.upsert(meta, mtime=st.st_mtime, size=st.st_size,
+                                        location=location)
+                    if is_new:
+                        added += 1
+                    else:
+                        updated += 1
+        except Exception as exc:  # pragma: no cover - db level
+            # The transaction rolled back, so none of these were indexed --
+            # counting them as written would make the result a lie.
+            _log.warning("could not index a batch of %d files: %s", len(batch), exc)
+            result.errors.extend(meta.path for meta, _, _, _ in batch)
+        else:
+            result.added += added
+            result.updated += updated
+        finally:
+            batch.clear()
 
     async def scan_async(self, **kwargs) -> ScanResult:
         loop = asyncio.get_running_loop()
@@ -144,38 +274,42 @@ class Scanner:
         """Reindex a specific set of paths, e.g. after an inotify batch."""
         result = ScanResult()
         t0 = time.monotonic()
+        batch: list[tuple[Any, os.stat_result, str | None, bool]] = []
         for path in paths:
             if os.path.isdir(path):
                 continue
-            if not metadata.is_supported(path):
-                continue
             if not os.path.exists(path):
+                # The path has gone, and what it was is no longer knowable from
+                # the filesystem.  If it was a directory, every picture that was
+                # inside it is still in the index and would be shown as a
+                # missing file until the next full scan, so drop the subtree as
+                # well as the path itself.
                 result.removed += self.library.forget([path])
+                result.removed += self.library.forget_under(path)
+                continue
+            if not self.wanted(path):
                 continue
             try:
                 st = os.stat(path)
             except OSError:
                 continue
             result.scanned += 1
-            existing = self.library.by_path(path)
-            if existing is not None and not self.library.needs_reindex(
-                path, st.st_mtime, st.st_size
-            ):
+            state = self.library.file_state(path)
+            if self.library.is_current(state, st.st_mtime, st.st_size):
                 result.skipped += 1
                 continue
             meta = metadata.read(path)
             if meta is None:
+                self._unreadable[path] = (st.st_mtime, st.st_size)
                 result.errors.append(path)
                 continue
+            self._unreadable.pop(path, None)
             location = None
             if self.geocoder is not None and meta.latitude is not None:
                 location = self.geocoder.lookup(meta.latitude, meta.longitude,
                                                 cached_only=True)
-            self.library.upsert(meta, mtime=st.st_mtime, size=st.st_size, location=location)
-            if existing is None:
-                result.added += 1
-            else:
-                result.updated += 1
+            batch.append((meta, st, location, state is None))
+        self._write_batch(batch, result)
         result.seconds = time.monotonic() - t0
         return result
 
@@ -224,14 +358,22 @@ class Scanner:
     # -- watching ----------------------------------------------------------
     def start_watching(self, on_change: Callable[[ScanResult], None]) -> bool:
         def handle(paths: set[str]) -> None:
-            extra: set[str] = set()
-            for p in list(paths):
-                if os.path.isdir(p):
-                    try:
-                        extra.update(os.path.join(p, n) for n in os.listdir(p))
-                    except OSError:
-                        pass
-            result = self.rescan_paths(paths | extra)
+            if InotifyWatcher.RESCAN_ALL in paths:
+                # The kernel dropped events (a Syncthing or rsync burst filled
+                # the inotify queue), so what changed is no longer knowable from
+                # the events: anything less than a full scan silently loses
+                # files until the next scheduled one.
+                _log.info("inotify lost events; running a full scan instead")
+                result = self.scan()
+            else:
+                extra: set[str] = set()
+                for p in list(paths):
+                    if os.path.isdir(p):
+                        try:
+                            extra.update(os.path.join(p, n) for n in os.listdir(p))
+                        except OSError:
+                            pass
+                result = self.rescan_paths(paths | extra)
             if result.added or result.updated or result.removed:
                 _log.info("library changed: %s", result.summary())
                 on_change(result)

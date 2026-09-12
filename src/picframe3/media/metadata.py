@@ -22,7 +22,10 @@ from PIL import ExifTags, Image, IptcImagePlugin
 
 _log = logging.getLogger(__name__)
 
-Image.MAX_IMAGE_PIXELS = 500_000_000          # allow big panoramas, still bounded
+# Big enough for any panorama a camera or a phone produces (a 120 MP image is
+# 30 m of 4K screen), small enough that a decompression bomb dropped into the
+# guest share cannot claim 1.5 GB on a Pi and take the frame down with it.
+Image.MAX_IMAGE_PIXELS = 120_000_000
 
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".jpe", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff",
@@ -157,7 +160,15 @@ def _format_exposure(value) -> str | None:
 
 
 def read(path: str, *, load_iptc: bool = True, load_xmp: bool = True) -> PhotoMeta | None:
-    """Extract metadata without decoding the full image."""
+    """Extract metadata without decoding the full image.
+
+    Returns ``None`` only when the file cannot be opened as an image at all --
+    it is missing, or the plugin for its format is not installed.  Anything
+    that goes wrong after that is per-container and costs only what that
+    container held: a malformed APP1 segment used to discard the size, the
+    date, the tags and the caption together and make the whole file
+    unindexable, so it was read again, and failed again, on every single scan.
+    """
     ext = os.path.splitext(path)[1].lower()
     if ext in VIDEO_EXTENSIONS:
         return _read_video(path)
@@ -165,11 +176,17 @@ def read(path: str, *, load_iptc: bool = True, load_xmp: bool = True) -> PhotoMe
     try:
         with Image.open(path) as img:
             meta.width, meta.height = img.size
-            _read_exif(img, meta)
-            if load_iptc:
-                _read_iptc(img, meta)
-            if load_xmp:
-                _read_xmp(img, meta)
+            for stage, reader in (("EXIF", _read_exif),
+                                  ("IPTC", _read_iptc if load_iptc else None),
+                                  ("XMP", _read_xmp if load_xmp else None)):
+                if reader is None:
+                    continue
+                try:
+                    reader(img, meta)
+                except Exception as exc:
+                    # Absent, not fatal: what the other containers gave is
+                    # still worth indexing.
+                    _log.debug("%s unreadable in %s: %s", stage, path, exc)
     except Exception as exc:
         _log.debug("metadata read failed for %s: %s", path, exc)
         return None

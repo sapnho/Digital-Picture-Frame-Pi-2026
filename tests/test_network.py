@@ -15,6 +15,7 @@ import pytest
 
 from picframe3 import network
 from picframe3.network import NetworkWatch
+from picframe3.network import ping as real_ping
 
 # -- finding something to ping ---------------------------------------------
 
@@ -89,12 +90,14 @@ async def test_one_failed_check_repairs_nothing(watch):
 async def test_three_failed_checks_reconnect_the_device_first(watch):
     """The gentle rung: one second of downtime on one interface, rather than
     taking every connection on the machine down with NetworkManager."""
+    await _checks(watch, [True])                     # the link was up once
     await _checks(watch, [False, False, False])
     assert watch.commands == [("nmcli", "device", "reconnect", "wlan0")]
 
 
 async def test_the_second_round_restarts_networkmanager(watch):
     watch.cooldown = 0
+    await _checks(watch, [True])
     await _checks(watch, [False, False, False, False, False, False])
     assert watch.commands[-1] == ("systemctl", "restart", "NetworkManager")
 
@@ -102,11 +105,13 @@ async def test_the_second_round_restarts_networkmanager(watch):
 async def test_the_cooldown_is_the_safety_catch(watch):
     """The failure mode that cost a night: repair, fail, repair, fail.  Within
     the cooldown the watcher counts and complains, but keeps its hands off."""
+    await _checks(watch, [True])
     await _checks(watch, [False] * 12)
     assert len(watch.commands) == 1
 
 
 async def test_recovery_resets_the_ladder(watch):
+    await _checks(watch, [True])
     await _checks(watch, [False, False, False])      # reconnect
     await _checks(watch, [True])
     watch._last_action_at = 0.0                      # as if the cooldown passed
@@ -170,3 +175,66 @@ async def test_the_first_interval_is_not_checked(watch, monkeypatch):
         await watch.run()
     assert slept == [watch.interval]
     assert watch.commands == []
+
+
+# -- knowing what it cannot know -------------------------------------------
+# The three states the watchdog has to keep apart.  Collapsing them into one
+# boolean is what turned the previous watchdog into the outage it was meant to
+# prevent: a LAN that filters ICMP, and a machine without a `ping` binary, both
+# read as "offline for ever", and the ladder then reconnected the radio and
+# restarted NetworkManager every cooldown, all night, every night.
+
+async def test_nothing_is_repaired_before_the_link_has_ever_been_up(watch):
+    """The ICMP-filtered LAN.  Without a single successful check there is no
+    evidence the link is broken rather than merely unmeasurable, so the
+    watchdog reports and keeps its hands off -- however long it goes on."""
+    await _checks(watch, [False] * 12)
+    assert watch.commands == []
+    assert watch.online is False
+    assert watch.status == network.OFFLINE
+    assert watch.snapshot()["ever_online"] is False
+
+
+async def test_one_good_check_earns_the_right_to_repair(watch):
+    await _checks(watch, [True])
+    assert watch.status == network.ONLINE
+    await _checks(watch, [False, False, False])
+    assert watch.commands == [("nmcli", "device", "reconnect", "wlan0")]
+
+
+async def test_a_missing_ping_binary_is_cannot_check_not_an_outage(watch, monkeypatch):
+    """iputils is not installed.  That says nothing about the network, so the
+    frame must not count it as an outage and must never repair on it."""
+    async def no_ping(*a, **kw):
+        raise FileNotFoundError("ping")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", no_ping)
+    monkeypatch.setattr(network, "ping", real_ping)      # the real one, again
+    for _ in range(6):
+        await watch.check_once()
+    assert watch.commands == []
+    assert watch.status == network.UNMEASURABLE
+    assert watch.outages == 0, "a check that could not be made is not an outage"
+
+
+async def test_the_missing_ping_binary_is_said_once_not_every_minute(
+        watch, monkeypatch, caplog):
+    async def no_ping(*a, **kw):
+        raise FileNotFoundError("ping")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", no_ping)
+    monkeypatch.setattr(network, "ping", real_ping)
+    with caplog.at_level("WARNING"):
+        for _ in range(10):
+            await watch.check_once()
+    said = [r for r in caplog.records if "no 'ping' command" in r.getMessage()]
+    assert len(said) == 1, "one line, not one per check — this is the SD card"
+
+
+async def test_no_default_route_is_unmeasurable_and_never_repaired(watch, monkeypatch):
+    watch.target = ""
+    monkeypatch.setattr(network, "default_route", lambda: None)
+    for _ in range(6):
+        await watch.check_once()
+    assert watch.commands == []
+    assert watch.status == network.UNMEASURABLE

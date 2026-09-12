@@ -16,13 +16,14 @@ is new here:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -78,8 +79,6 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS files_folder  ON files(folder);
 CREATE INDEX IF NOT EXISTS files_taken   ON files(taken_at);
 CREATE INDEX IF NOT EXISTS files_played  ON files(last_played);
-CREATE INDEX IF NOT EXISTS files_hidden  ON files(hidden);
-CREATE INDEX IF NOT EXISTS files_portrait ON files(is_portrait);
 
 CREATE TABLE IF NOT EXISTS tags (
     id   INTEGER PRIMARY KEY,
@@ -101,6 +100,33 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 """
+
+def like_escape(text: str) -> str:
+    """Literal text as a LIKE pattern fragment.
+
+    ``%`` and ``_`` are wildcards to LIKE, and a folder called ``2024_Italien``
+    therefore matched ``2024xItalien`` as well -- rarely, confusingly, and only
+    for the people whose folders are named that way.  The backslash has to be
+    escaped first, and every query using this must say ``ESCAPE '\\'``.
+    """
+    return (str(text or "").replace("\\", "\\\\")
+            .replace("%", "\\%").replace("_", "\\_"))
+
+
+def fts_query(text: str) -> str:
+    """An FTS5 MATCH expression for whatever somebody typed into a search box.
+
+    Every word becomes a quoted prefix term, so "lis" still finds Lisbon.  The
+    quoting is the part that matters: a double quote in the typed text would
+    otherwise close the string literal FTS5 is parsing and leave it with an
+    unterminated one.  That is an ``OperationalError``, not an empty result --
+    and because the frame persists its filters, the error came back on every
+    single start afterwards.  Doubling the quote inside the term is the escape
+    FTS5 understands, so ``dog "`` is simply a search for a dog and a quote.
+    """
+    terms = [t.replace('"', '""') for t in str(text or "").split()]
+    return " ".join(f'"{t}"*' for t in terms if t.strip('"'))
+
 
 _COLUMNS = (
     "id", "path", "folder", "basename", "ext", "mtime", "size", "is_video",
@@ -191,12 +217,23 @@ class Library:
         self.path = os.path.expanduser(path)
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self._local = threading.local()
-        with self.connect() as conn:
-            conn.executescript(_SCHEMA)
-            conn.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
+        #: Every connection handed out, so that close() can close them all and
+        #: not just the one belonging to whichever thread happens to call it.
+        self._conns: list[sqlite3.Connection] = []
+        self._conns_lock = threading.Lock()
+        #: What the last refused prune looked like, so the same refusal twice
+        #: in a row is taken as a real deletion rather than a mount that keeps
+        #: failing.  See prune_missing().
+        self._prune_refused: tuple[int, int] | None = None
+        # Not wrapped in transaction(): the schema script sets journal_mode,
+        # which SQLite refuses inside a transaction, and executescript commits
+        # whatever is open before it runs anyway.
+        conn = self.connect()
+        conn.executescript(_SCHEMA)
+        conn.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
         self._migrate()
 
     # -- connections -------------------------------------------------------
@@ -204,14 +241,63 @@ class Library:
         """One connection per thread; SQLite objects are not thread-safe."""
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(self.path, timeout=15.0, isolation_level=None)
+            # check_same_thread=False is safe here *because* of the one
+            # connection per thread rule above -- no two threads ever touch the
+            # same object.  It is switched off only so that close() may close a
+            # connection that belongs to a thread which has already finished.
+            conn = sqlite3.connect(self.path, timeout=15.0, isolation_level=None,
+                                   check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA busy_timeout=15000")
             self._local.conn = conn
+            with self._conns_lock:
+                self._conns.append(conn)
         return conn
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """A real transaction -- which ``with conn:`` is not on this connection.
+
+        The connection is opened in autocommit mode (``isolation_level=None``),
+        and sqlite3's own connection context manager commits the implicit
+        transaction it manages, of which there is none in that mode.  Every
+        statement was therefore its own transaction: a crash between writing the
+        row and writing its tags and search entry left a file indexed with
+        neither, and ``needs_reindex()`` compares mtime and size only, so that
+        half-written row was never repaired.
+
+        ``BEGIN IMMEDIATE`` takes the write lock up front instead of upgrading
+        halfway through, so a scan and the render loop queue rather than one of
+        them failing with SQLITE_BUSY after having written half its work.
+
+        Nested uses join the transaction already open rather than starting a
+        second one -- that is what lets the scanner wrap a whole batch of
+        upserts, each of which opens one itself, into a single commit.
+        """
+        conn = self.connect()
+        depth = getattr(self._local, "depth", 0)
+        if depth:
+            self._local.depth = depth + 1
+            try:
+                yield conn
+            finally:
+                self._local.depth = depth
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        self._local.depth = 1
+        try:
+            yield conn
+        except BaseException:
+            self._local.depth = 0
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            raise
+        else:
+            self._local.depth = 0
+            conn.execute("COMMIT")
 
     def _migrate(self) -> None:
         conn = self.connect()
@@ -228,29 +314,57 @@ class Library:
         # exists, and the index on it would then fail on every old library.
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
         if "play_round" not in columns:
-            with conn:
+            with self.transaction():
                 conn.execute("ALTER TABLE files ADD COLUMN "
                              "play_round INTEGER NOT NULL DEFAULT 0")
             _log.info("index upgraded to schema v2 (added play_round)")
-        with conn:
+        with self.transaction():
             conn.execute("CREATE INDEX IF NOT EXISTS files_round ON files(play_round)")
+            # The indices below are the ones the playlist's ORDER BY clauses
+            # actually use.  files_hidden and files_portrait never were: both
+            # columns hold two values over the whole library, so SQLite reads
+            # the table anyway and the index is pure write cost on every scan.
+            # Every statement here is idempotent, so this runs on each start
+            # and repairs an index that was built by an older version.
+            conn.execute("DROP INDEX IF EXISTS files_hidden")
+            conn.execute("DROP INDEX IF EXISTS files_portrait")
+            conn.execute("CREATE INDEX IF NOT EXISTS files_play_count "
+                         "ON files(play_count, last_played)")
+            conn.execute("CREATE INDEX IF NOT EXISTS files_basename "
+                         "ON files(basename COLLATE NOCASE)")
+            conn.execute("CREATE INDEX IF NOT EXISTS files_recent "
+                         "ON files(COALESCE(taken_at, mtime))")
         if version < SCHEMA_VERSION:
-            with conn:
+            with self.transaction():
                 conn.execute("INSERT OR REPLACE INTO meta(key, value) "
                              "VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
 
     # -- writing -----------------------------------------------------------
-    def needs_reindex(self, path: str, mtime: float, size: int) -> bool:
+    def file_state(self, path: str) -> tuple[float, int] | None:
+        """``(mtime, size)`` of an indexed file, or None if it is not indexed.
+
+        The whole of what a scan needs to know about a file it has seen before.
+        Asking ``by_path()`` instead costs a full row plus a join over the tags
+        only to throw both away, and a scan asks this once per file -- on a
+        library of twenty thousand photographs that difference is minutes.
+        """
         row = self.connect().execute(
             "SELECT mtime, size FROM files WHERE path=?", (path,)
         ).fetchone()
-        if row is None:
-            return True
-        return abs(row["mtime"] - mtime) > 0.5 or row["size"] != size
+        return (row["mtime"], row["size"]) if row is not None else None
+
+    @staticmethod
+    def is_current(state: tuple[float, int] | None, mtime: float, size: int) -> bool:
+        """Whether an indexed file still matches what is on disk."""
+        if state is None:
+            return False
+        return abs(state[0] - mtime) <= 0.5 and state[1] == size
+
+    def needs_reindex(self, path: str, mtime: float, size: int) -> bool:
+        return not self.is_current(self.file_state(path), mtime, size)
 
     def upsert(self, meta: PhotoMeta, *, mtime: float, size: int,
                location: str | None = None) -> int:
-        conn = self.connect()
         folder = os.path.dirname(meta.path)
         basename = os.path.basename(meta.path)
         ext = os.path.splitext(basename)[1].lower()
@@ -263,7 +377,10 @@ class Library:
             meta.longitude, location, meta.title, meta.caption, meta.rating,
             meta.duration, time.time(),
         )
-        with conn:
+        # One transaction for the row, its tags and its search entry: a file
+        # that is in the index but in neither of the other two is invisible to
+        # every tag filter and every search, and nothing would ever notice.
+        with self.transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO files (
@@ -316,8 +433,7 @@ class Library:
         )
 
     def set_location(self, file_id: int, location: str | None) -> None:
-        conn = self.connect()
-        with conn:
+        with self.transaction() as conn:
             conn.execute("UPDATE files SET location=? WHERE id=?", (location, file_id))
             conn.execute("UPDATE search SET location=? WHERE rowid=?", (location or "", file_id))
 
@@ -329,8 +445,7 @@ class Library:
         the index rather than from an in-memory cursor that a reboot or a
         rescan would throw away.
         """
-        conn = self.connect()
-        with conn:
+        with self.transaction() as conn:
             if play_round is None:
                 conn.execute(
                     "UPDATE files SET play_count=play_count+1, last_played=? WHERE id=?",
@@ -353,8 +468,7 @@ class Library:
         ids = list(file_ids)
         if not ids:
             return
-        conn = self.connect()
-        with conn:
+        with self.transaction() as conn:
             conn.executemany("UPDATE files SET play_round=? WHERE id=?",
                              [(play_round, i) for i in ids])
 
@@ -374,13 +488,12 @@ class Library:
         }
 
     def set_hidden(self, file_id: int, hidden: bool = True) -> None:
-        with self.connect() as conn:
+        with self.transaction() as conn:
             conn.execute("UPDATE files SET hidden=? WHERE id=?", (int(hidden), file_id))
 
     def forget(self, paths: Iterable[str]) -> int:
-        conn = self.connect()
         removed = 0
-        with conn:
+        with self.transaction() as conn:
             for path in paths:
                 row = conn.execute("SELECT id FROM files WHERE path=?", (path,)).fetchone()
                 if row is None:
@@ -390,18 +503,70 @@ class Library:
                 removed += 1
         return removed
 
-    def prune_missing(self, roots: Sequence[str]) -> int:
-        """Drop rows whose file has gone, restricted to the scanned roots."""
+    def forget_under(self, folder: str) -> int:
+        """Forget everything below a directory that has gone.
+
+        A deleted directory arrives as one event about the directory itself,
+        and forgetting only that path leaves every photograph that was inside
+        it in the index -- shown as a missing file until the next full scan.
+        The pattern is escaped because a real folder may well contain ``_``.
+        """
+        prefix = folder.rstrip("/") + "/"
+        with self.transaction() as conn:
+            rows = conn.execute(
+                "SELECT id FROM files WHERE path LIKE ? ESCAPE '\\'",
+                (like_escape(prefix) + "%",),
+            ).fetchall()
+            for row in rows:
+                conn.execute("DELETE FROM search WHERE rowid=?", (row["id"],))
+                conn.execute("DELETE FROM files WHERE id=?", (row["id"],))
+        return len(rows)
+
+    def prune_missing(self, roots: Sequence[str], *,
+                      max_fraction: float = 0.2) -> int:
+        """Drop rows whose file has gone, restricted to the scanned roots.
+
+        ``max_fraction`` is the safety catch.  A Samba or NFS share that failed
+        to mount looks exactly like somebody having deleted every photograph on
+        it, and pruning takes the play counts, the rounds, the hidden flags and
+        the geocoded place names with the rows -- work of months, gone in one
+        pass over an empty mount point.  Nothing sane deletes a fifth of a
+        library between two scans, so above that share the first scan refuses
+        and says so.
+
+        The *second* consecutive scan that sees the same thing goes ahead.  A
+        mount problem is over by then -- the share is back and the files are
+        there again -- whereas somebody who really did delete a year of
+        photographs would otherwise be left with an index that refuses to
+        forget them for ever, and a slideshow walking into the gaps one
+        missing file at a time.
+        """
         conn = self.connect()
         gone: list[str] = []
+        indexed = 0
         for row in conn.execute("SELECT path FROM files"):
             path = row["path"]
             if roots and not any(path.startswith(r) for r in roots):
                 continue
+            indexed += 1
             if not os.path.exists(path):
                 gone.append(path)
-        if gone:
-            _log.info("removing %d indexed files that no longer exist", len(gone))
+        if not gone:
+            return 0
+        share = len(gone) / indexed if indexed else 1.0
+        signature = (len(gone), indexed)
+        if 0 < max_fraction < share and self._prune_refused != signature:
+            self._prune_refused = signature
+            _log.warning(
+                "refusing to prune: %d of %d indexed files under the scanned "
+                "folders (%.0f%%) have vanished at once -- that looks like a "
+                "mount problem, not a deletion; the index is left untouched. "
+                "If they really are gone, the next scan will remove them",
+                len(gone), indexed, share * 100,
+            )
+            return 0
+        self._prune_refused = None
+        _log.info("removing %d indexed files that no longer exist", len(gone))
         return self.forget(gone)
 
     # -- reading -----------------------------------------------------------
@@ -507,16 +672,18 @@ class Library:
 
     def clear_locations(self) -> int:
         """Forget every resolved place name, so they are looked up again."""
-        conn = self.connect()
-        with conn:
+        with self.transaction() as conn:
             cur = conn.execute("UPDATE files SET location = NULL WHERE location IS NOT NULL")
+            count = cur.rowcount
             conn.execute("UPDATE search SET location = ''")
-        return cur.rowcount
+        return count
 
     def search(self, text: str, limit: int = 200) -> list[Record]:
         if not text.strip():
             return []
-        query = " ".join(f'"{t}"*' for t in text.split())
+        query = fts_query(text)
+        if not query:
+            return []
         try:
             rows = self.connect().execute(
                 "SELECT f.* FROM search s JOIN files f ON f.id=s.rowid "
@@ -559,7 +726,7 @@ class Library:
 
     # -- key/value ---------------------------------------------------------
     def set_state(self, key: str, value: Any) -> None:
-        with self.connect() as conn:
+        with self.transaction() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)",
                 (key, json.dumps(value)),
@@ -575,7 +742,20 @@ class Library:
             return row["value"]
 
     def close(self) -> None:
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            conn.close()
-            self._local.conn = None
+        """Close every connection this library ever handed out.
+
+        Closing only the calling thread's connection -- which is what this did
+        -- leaves the scanner's and the web server's open, so the WAL file
+        stays behind and a test's temporary directory cannot be removed on
+        Windows.  The connections are closed from whichever thread calls this,
+        which is why they are opened with check_same_thread=False.
+        """
+        with self._conns_lock:
+            conns, self._conns = self._conns, []
+        for conn in conns:
+            try:
+                conn.close()
+            except sqlite3.Error as exc:  # pragma: no cover - defensive
+                _log.debug("could not close a library connection: %s", exc)
+        self._local.conn = None
+        self._local.depth = 0

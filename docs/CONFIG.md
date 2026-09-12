@@ -113,6 +113,7 @@ Where the photographs are and how they are indexed.
 | `scan_on_start` | boolean | `True` | Index at startup. Off is faster to start but new files wait for the watch. *(takes effect on restart)* |
 | `deleted_folder` | string | `'~/.local/share/picframe3/deleted'` | Where “Remove” moves a picture. Nothing is ever unlinked, and every removal is written to removals.jsonl in this folder — when it went, where it came from, and what it was. The Removed tab reads that file and can put a picture back. *(takes effect on restart)* *(advanced)* |
 | `subfolder` | string | *(empty)* | Show only pictures whose path contains this. Pick one of your folders, or type any part of a path. Empty shows everything. |
+| `prune_max_fraction` | number | `0.2` | How much of the index one scan may drop, as a fraction. A picture folder on a stick or a share is briefly absent now and then, and every file under it then looks deleted — this is what stops that from throwing away the play history and the place names. 0 removes the safeguard. *(takes effect on restart)* *(advanced)* |
 
 ## `geo`
 
@@ -161,8 +162,9 @@ The web interface and REST API.
 | `port` | integer | `9000` | The port this page is served on. *(takes effect on restart)* |
 | `auth_user` | string | *(empty)* | Set this and the password to require a login. *(takes effect on restart)* |
 | `auth_password` | string | *(empty)* | Only used when a user name is set. *(takes effect on restart)* |
-| `allow_delete` | boolean | `False` | Let the Remove button move pictures out of the library. *(takes effect on restart)* |
-| `cors_origins` | list of strings | `[]` | Only needed if another site embeds this API. *(takes effect on restart)* *(advanced)* |
+| `allow_delete` | boolean | `True` | Let the Remove button — and Home Assistant's *Remove current picture* — move pictures out of the library. Off refuses both, and a picture can then only be removed at the frame itself, with a button or a key. Nothing is ever unlinked either way: “remove” means moved to the deleted folder, and the Removed tab can put it back. *(takes effect on restart)* |
+| `cors_origins` | list of strings | `[]` | Named sites that may call this API from a browser, e.g. `https://ha.example.com`. Anything listed here can do everything this page can do — skip pictures, change settings, remove photographs — on behalf of anyone who visits it while on your network. Leave it empty unless you are embedding the API somewhere. `*` is refused: it would grant that to every site on the web. *(takes effect on restart)* *(advanced)* |
+| `allowed_hosts` | list of strings | `[]` | Extra names this frame answers to. It already answers to `localhost`, to its own hostname and to any address on your own network; add a name here only if you reach it through a reverse proxy or an unusual local domain. A request arriving under some other name is refused, which is what stops a web page from using your browser as a way in. *(takes effect on restart)* *(advanced)* |
 
 ## `input`
 

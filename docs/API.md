@@ -18,24 +18,31 @@ Every control surface produces the same command. The actions are:
 | `set_filters` | see below | narrow the playlist |
 | `rescan` | — | walk the picture folders now |
 | `reload` | — | re-read the config file |
-| `quit` | — | stop the process |
+| `restart` | — | stop and come back up with a fresh process |
+| `quit` | — | stop the process, and leave it stopped |
 
-Filter payload: `subfolder`, `tags_any`, `tags_all`, `tags_none`, `date_from`,
-`date_to`, `min_rating`, `location_contains`, `search`, `include_videos`,
-`include_images`.
+Filter payload: `subfolder`, `tags_any`, `tags_all`, `tags_none`, `date_window`,
+`date_from`, `date_to`, `min_rating`, `location_contains`, `search`,
+`include_videos`, `include_images`.
 
 ## HTTP
 
-Default `http://<frame>:9000`. Interactive documentation at `/api/docs`.
+Default `http://<frame>:9000`. There is **no** interactive documentation:
+Swagger UI fetches its assets from a CDN and the frame is often on a network
+with no route to one, so `/api/docs` is a plain-text notice saying so. The
+machine-readable schema is served at `/api/openapi.json`, behind the same
+authentication as everything else — point any OpenAPI client at it.
 
 | method | path | |
 |---|---|---|
 | GET | `/api/state` | the full state snapshot |
 | GET | `/api/events` | server-sent events; one message per state change |
 | POST | `/api/command` | `{"action": "...", ...}` |
-| POST | `/api/{action}` | shorthand, e.g. `POST /api/next` |
-| GET | `/api/config` | the whole configuration |
+| GET | `/api/config` | the whole configuration, passwords masked |
+| GET | `/api/config/schema` | every setting with type, label, explanation and default |
 | PATCH | `/api/config?persist=true` | `{"slideshow.interval": 90}` |
+| POST | `/api/geo/preview` | what a `detail` / `key_order` would write under the current picture |
+| POST | `/api/restart` | stop cleanly and come back up; `?save=false` to skip saving first |
 | GET | `/api/filters` | the filter in force, plus the folders, tags and places to choose from |
 | POST | `/api/filters` | change one or more filters; absent keys are left alone |
 | POST | `/api/filters/preview` | how many pictures a filter *would* select, applying nothing |
@@ -45,13 +52,77 @@ Default `http://<frame>:9000`. Interactive documentation at `/api/docs`.
 | GET | `/api/library/photo/{id}` | one record |
 | GET | `/api/library/photo/{id}/thumb` | JPEG thumbnail, cacheable |
 | GET | `/api/library/photo/{id}/file` | the original file |
+| GET | `/api/removed?include_restored=&limit=` | the removal journal, newest first |
+| GET | `/api/removed/summary` | how many are in the deleted folder and what they weigh |
+| GET | `/api/removed/{stored_as}/thumb` | JPEG thumbnail of a removed picture |
+| GET | `/api/removed/{stored_as}/file` | the removed file itself |
+| POST | `/api/removed/{stored_as}/restore` | put it back where it came from, and say where that was |
+| GET | `/api/removed/journal` | the raw journal as `removals.jsonl` (NDJSON) |
 | GET | `/api/current?size=` | **a JPEG of the photograph on the frame right now** |
 | GET | `/api/screenshot` | **a PNG of what is on the frame's screen right now** |
 | GET | `/api/transitions` | the available transition names |
+| GET | `/api/caption-fields` | what can be written over a picture, with labels |
+| GET | `/api/mat-styles` | the mat styles, with the wording the settings page uses |
+| GET | `/api/fits` | what `fit: auto` may do with a picture that needs help |
+| GET | `/api/geo-detail` | how much of an address a caption may show |
+| GET | `/api/date-windows` | the rolling date filters, and which one is in force |
+| GET | `/api/openapi.json` | the OpenAPI schema |
+| GET | `/api/docs` | a plain-text notice; see above |
 | GET | `/api/health` | liveness, no auth |
+| POST | `/api/{action}` | shorthand, e.g. `POST /api/next` — **registered last**, see below |
 
 Set `http.auth_user` and `http.auth_password` for HTTP basic auth on everything
 except `/api/health`.
+
+### Route order, and why it matters
+
+`POST /api/{action}` matches any single-segment POST under `/api/`, and
+Starlette matches routes in the order they were registered. It is therefore
+declared **after** every other route, and nothing but the static files may be
+registered below it. Placed higher, it swallows its specific neighbours: that
+is exactly how `POST /api/restart?save=true` once arrived at the shorthand
+handler instead of the restart handler, where the query parameter was never
+read and **Save & restart** silently discarded the changes it had been asked
+to apply.
+
+### Removed pictures
+
+"Remove" never unlinks anything: the picture is moved to
+`library.deleted_folder` and an entry is appended to a journal beside it. The
+journal is what these endpoints read, not the folder listing — the folder only
+knows there is a file called `IMG_4312.jpg`, while the journal knows it was
+taken in Lisbon in 2019, removed on Tuesday from the web interface, and which
+folder it belongs back in. `{stored_as}` is the name the file was given in the
+deleted folder, as returned by `GET /api/removed`.
+
+Removing over the network is off unless `http.allow_delete` is set: without it
+`delete` is refused with 403 and a picture can only be removed at the frame
+itself, with a button or a key. `POST /api/removed/{stored_as}/restore` puts a
+picture back whatever that setting says.
+
+### What answers, and from where
+
+Three checks sit in front of every request, in one piece of ASGI middleware:
+
+- **A body limit** of 1 MiB. Starlette buffers a request body in memory before
+  any handler sees it, so without a limit an unauthenticated POST of a
+  gigabyte is enough to have the frame killed by the OOM killer — and with
+  `Restart=always` that is a restart loop, not a single crash.
+- **The `Host` header** must be the frame's own name or address (its hostname,
+  `<hostname>.local`, `localhost`, whatever `http.host` names, or an address it
+  actually has). This is what stops a page on the internet from reading
+  `/api/config` through the owner's own browser.
+- **`Origin` / `Referer` on anything that changes state.** A POST with no body
+  and no content type is a CORS "simple request" — no preflight, so CORS never
+  gets a say and any site the owner visits could quietly fire `/api/delete`. A
+  browser always labels such a request with its `Origin`, and one that does not
+  match this host is refused. A request carrying neither header is left alone:
+  that is curl, Home Assistant or a shell script, none of which a website can
+  forge.
+
+`http.cors_origins` names the sites that may call this API from a browser.
+`*` is refused out loud and logged rather than honoured: on an interface with
+no password it would grant every page on the web the run of the frame.
 
 `/api/health` is a liveness probe and nothing more -- it answers `{"ok": true}`
 to a monitoring system without a password. What the Pi is actually doing --
@@ -78,6 +149,7 @@ the lot.
 | `tags` | `"holiday, france"` or `["holiday", "france"]` |
 | `tags_match_all` | `false` (any of them, the default) or `true` (all of them) |
 | `location` | any part of a place name — `France` catches every town in it |
+| `date_window` | a rolling window: `today`, `7d`, `30d`, `90d`, `1y`, `3y`, `on_this_day`, or `all` |
 | `date_from`, `date_to` | `2024-07-14`, `14.07.2024`, or a Unix timestamp; `""` for no limit |
 | `min_rating` | 1–5 |
 | `search` | free text over titles, captions, tags and places |
@@ -87,6 +159,16 @@ the lot.
 An upper date limit means the whole of that day, not midnight at the start of
 it. The folder is also a setting (`library.subfolder`), so it survives a
 restart and the settings page always agrees with the filter panel.
+
+`date_window` is a *rule*, not a pair of dates, and that distinction is the
+point of it. Setting `7d` stores "the last seven days"; the frame works out
+what that means every time it asks the library, and re-resolves the selection
+when the day turns. Storing the two dates instead — which is what a client
+computing them itself would do — freezes the filter on the day it was set, and
+a month later the frame is still showing that same week with nothing to say so.
+`on_this_day` is the same calendar day in every year. A window and an explicit
+`date_from`/`date_to` are two answers to one question, so setting either clears
+the other.
 
 ```bash
 # only the holiday pictures, from this summer
@@ -141,6 +223,7 @@ Topics, with `mqtt.topic_prefix` defaulting to `picframe` and `device_id` to
 | `picframe/picframe/tags_match_all/set` | in | `on` / `off` |
 | `picframe/picframe/location_filter/set` | in | any part of a place name |
 | `picframe/picframe/date_from/set`, `…/date_to/set` | in | `2024-07-14`, or empty for no limit |
+| `picframe/picframe/dates_7d/set`, `…/dates_today/set`, `…/dates_on_this_day/set`, … | in | one button per rolling window; any payload presses it |
 | `picframe/picframe/clear_filters/set` | in | any payload shows everything again |
 
 State is published as **one** JSON document that every Home Assistant entity
@@ -227,6 +310,7 @@ costs no extra traffic.
 | `PATCH /api/config` | `{"slideshow.interval": 90}`; add `?persist=true` to write the config file |
 | `POST /api/geo/preview` | `{"detail": "custom", "key_order": [["village","town"],["country"]]}` → what that would write under the picture currently on screen, plus the address keys that picture's own reply carries. Reads the geocache only; never makes a network request |
 | `POST /api/restart` | stop cleanly and come back up; saves the configuration first unless `?save=false` |
+| `POST /api/quit` | stop, and stay stopped: the process exits 143, and `RestartPreventExitStatus=143` in the unit keeps systemd from starting it again. `sudo systemctl start picframe3@<user>` brings it back |
 
 Writing the mask `••••••••` back to a password changes nothing, so reading the
 configuration, editing one key and sending it all back cannot blank a secret.

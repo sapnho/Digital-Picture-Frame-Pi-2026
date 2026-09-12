@@ -12,3 +12,6 @@ venv/
 *.db3-shm
 transitions.png
 demo.png
+
+# Scratch space for agent/tooling output; never part of the project.
+Claude outputs/

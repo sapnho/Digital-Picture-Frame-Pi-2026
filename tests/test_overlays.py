@@ -196,3 +196,17 @@ def test_the_example_address_exercises_the_rule():
     assert "isolated_dwelling" not in geocode.EXAMPLE_ADDRESS
     assert geocode.format_address(geocode.EXAMPLE_ADDRESS,
                                   geocode.key_order_for("full"))
+
+
+def test_a_malformed_clock_position_does_not_reach_the_draw_path():
+    """A hand-edited "top-right" used to be an IndexError frames later."""
+    from picframe3.gfx import overlays
+
+    assert overlays.normalise_position("bl") == "BL"
+    assert overlays.normalise_position(" tc ") == "TC"
+    for nonsense in ("", None, "T", "top-right", "XY", 7):
+        assert overlays.normalise_position(nonsense) == overlays.DEFAULT_POSITION
+
+    style = TextStyle(size=20)
+    placed = overlays.clock((800, 480), style, position="top-right", now=0)
+    assert placed is not None and 0 <= placed.x < 800 and 0 <= placed.y < 480

@@ -74,7 +74,13 @@ else
 fi
 
 WORKDIR=""
-cleanup() { [ -n "$WORKDIR" ] && rm -rf "$WORKDIR"; }
+# The EXIT trap runs last, so whatever it returns becomes the script's exit
+# status.  In tree mode WORKDIR is empty, the test is false, and without the
+# explicit `return 0` a completely successful install ended with `exit 1`.
+cleanup() {
+  [ -n "$WORKDIR" ] && rm -rf "$WORKDIR"
+  return 0
+}
 trap cleanup EXIT
 
 # Is this an update?  An existing venv with a working picframe3 in it is the
@@ -104,15 +110,29 @@ echo "   for user   $RUN_USER"
 step "1/6  System packages"
 # Deliberately short. There is no compositor, no X server and no SDL here:
 # the frame renders through EGL onto DRM/KMS by itself.
-PACKAGES=(
-  python3-venv python3-dev
+#
+# The split matters. Without something in REQUIRED the install cannot finish
+# at all -- `python3 -m venv` aborts without a word, or the frame comes up and
+# finds no EGL -- so a missing one is fatal here, named, rather than a warning
+# followed by a crash three steps later. Everything in OPTIONAL costs a
+# feature and nothing else, and `picframe3 doctor` names each of them again.
+#
+# python3-dev and gcc are in REQUIRED because evdev (keyboard and touch, part
+# of the `all` extra) is a C extension that PyPI ships as source only: with no
+# compiler `pip install` stops halfway through with a compiler error, which is
+# a dead end for anyone who did not expect to be compiling anything.
+REQUIRED_PACKAGES=(
+  python3-venv python3-dev gcc              # the venv, and evdev's C extension
   libegl1 libgles2 libgbm1 libdrm2          # the graphics path
+)
+OPTIONAL_PACKAGES=(
   fonts-dejavu-core libraqm0                # captions, incl. shaped scripts
   python3-gi gir1.2-glib-2.0                # GStreamer bindings…
   gir1.2-gst-plugins-base-1.0
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good
   gstreamer1.0-libav gstreamer1.0-alsa      # …and video playback
 )
+PACKAGES=("${REQUIRED_PACKAGES[@]}" "${OPTIONAL_PACKAGES[@]}")
 if command -v apt-get >/dev/null; then
   $SUDO apt-get update -qq
   if $SUDO apt-get install -y --no-install-recommends "${PACKAGES[@]}" >/dev/null 2>&1; then
@@ -126,23 +146,46 @@ if command -v apt-get >/dev/null; then
     for pkg in "${PACKAGES[@]}"; do
       $SUDO apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")
     done
-    if [ ${#MISSING[@]} -eq 0 ]; then
+    MISSING_REQUIRED=()
+    MISSING_OPTIONAL=()
+    for pkg in ${MISSING[@]+"${MISSING[@]}"}; do
+      case " ${REQUIRED_PACKAGES[*]} " in
+        *" $pkg "*) MISSING_REQUIRED+=("$pkg") ;;
+        *)          MISSING_OPTIONAL+=("$pkg") ;;
+      esac
+    done
+    if [ ${#MISSING_REQUIRED[@]} -ne 0 ]; then
+      die "these packages are needed and apt could not install them: ${MISSING_REQUIRED[*]}
+   Try 'sudo apt-get update' and then 'sudo apt-get install ${MISSING_REQUIRED[*]}'
+   to see what apt says about them, then run this installer again."
+    fi
+    if [ ${#MISSING_OPTIONAL[@]} -eq 0 ]; then
       ok "${#PACKAGES[@]} packages present"
     else
-      warn "not available here: ${MISSING[*]}"
-      warn "picframe3 will still install; 'picframe3 doctor' will say what is missing"
+      warn "not available here: ${MISSING_OPTIONAL[*]}"
+      warn "these cost a feature each (video, shaped captions); the frame itself"
+      warn "will run. 'picframe3 doctor' names them again with what they do."
     fi
   fi
 else
-  warn "no apt-get here; install the equivalents yourself"
+  warn "no apt-get here; install the equivalents yourself:"
+  warn "${PACKAGES[*]}"
 fi
 
 # ------------------------------------------------------------------ 2. groups
 step "2/6  Permissions"
 # video + render: the DRM device.  input: keyboard and touchscreen, which are
 # read straight from evdev because there is no display server to do it for us.
-$SUDO usermod -aG video,render,input "$RUN_USER" 2>/dev/null || true
-ok "$RUN_USER is in video, render and input"
+# The tick has to depend on the result. Printed unconditionally it told the
+# owner the permissions were in place while the frame went on to fail with
+# "permission denied" on /dev/dri/card0 and nothing to connect the two.
+if $SUDO usermod -aG video,render,input "$RUN_USER" 2>/dev/null; then
+  ok "$RUN_USER is in video, render and input"
+  warn "group membership only takes effect after a reboot (or a fresh login)"
+else
+  warn "could not add $RUN_USER to video, render and input"
+  warn "run: sudo usermod -aG video,render,input $RUN_USER   — then reboot"
+fi
 
 # -------------------------------------------------------------------- 3. venv
 step "3/6  picframe3"
@@ -163,16 +206,38 @@ if [ "$MODE" = "download" ]; then
 fi
 
 mkdir -p "$(dirname "$VENV")"
+# A venv is a handful of symlinks into one particular /usr/bin/python3.N plus a
+# site-packages full of that ABI's compiled extensions. An OS upgrade
+# (Bookworm -> Trixie moves 3.11 to 3.13) leaves the symlink pointing at an
+# interpreter that may still exist and still start, while every .so under
+# site-packages is for the version that has gone -- so the venv looks healthy
+# to `[ -x ]` and the next pip call dies with a bare traceback under `set -e`.
+# Asking the interpreter to import something is the cheapest honest test.
+if [ -n "$VENV" ] && [ -e "$VENV/bin/python" ] && \
+   ! "$VENV/bin/python" -c "import sys" >/dev/null 2>&1; then
+  warn "the existing virtual environment no longer runs (usually an OS or"
+  warn "Python upgrade); rebuilding it from scratch. Your configuration,"
+  warn "pictures and index are elsewhere and are not touched."
+  rm -rf "${VENV:?}"
+fi
 # --system-site-packages so the apt PyGObject (and so GStreamer) is visible.
 # Building PyGObject inside a venv needs a toolchain and several minutes.
 if [ ! -x "$VENV/bin/python" ]; then
-  python3 -m venv --system-site-packages "$VENV"
+  python3 -c "import ensurepip, venv" >/dev/null 2>&1 \
+    || die "python3 cannot create virtual environments here. Install python3-venv: sudo apt-get install python3-venv"
+  python3 -m venv --system-site-packages "$VENV" \
+    || die "could not create the virtual environment at $VENV"
 fi
-"$VENV/bin/pip" install --upgrade pip wheel >/dev/null
+# Shown, not swallowed. These three calls download and (for evdev) compile;
+# on a Pi that is minutes of apparent silence, and silence is what makes
+# someone reach for Ctrl-C. --progress-bar off keeps the log readable when it
+# is not a terminal, which is every unattended and piped install.
+echo "   installing Python packages — several minutes on a Pi, mostly downloads…"
+"$VENV/bin/pip" install --progress-bar off --upgrade pip wheel
 if [ -d "$SOURCE" ]; then
-  "$VENV/bin/pip" install --upgrade "$SOURCE[all]" >/dev/null
+  "$VENV/bin/pip" install --progress-bar off --upgrade "${SOURCE}[all]"
 else
-  "$VENV/bin/pip" install --upgrade "$SOURCE" >/dev/null
+  "$VENV/bin/pip" install --progress-bar off --upgrade "$SOURCE"
 fi
 $SUDO ln -sfn "$VENV/bin/picframe3" "$SHIM"
 ok "$("$VENV/bin/picframe3" --version) installed, 'picframe3' on your PATH"
@@ -184,7 +249,7 @@ if [ "$UPDATE" -eq 1 ] && [ -z "${PICFRAME_SETUP:-}" ]; then
   # here reads the existing config, writes it straight back, and refreshes the
   # systemd unit so a renamed option or a moved venv takes effect.
   "$SHIM" --config "$CONFIG" setup --yes --venv-bin "$VENV/bin" >/dev/null
-  ok "$CONFIG untouched; service unit refreshed"
+  ok "$CONFIG untouched; service unit and system rules refreshed"
   echo "   Run 'picframe3 setup' to change any of your answers."
 elif [ -n "${PICFRAME_YES:-}" ]; then
   step "4/6  Setting it up"

@@ -28,7 +28,7 @@ jobs:
             libegl1 libgles2 libgbm1 libdrm2 mesa-utils libgl1-mesa-dri \
             fonts-dejavu-core libraqm0
 
-      - run: pip install -e ".[dev,web]"
+      - run: pip install -e ".[dev,web,mqtt,heif]"
       - run: ruff check src tests tools
       - run: pytest -q
 
@@ -50,7 +50,80 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install -e .
-      - name: Configuration reference must match the code
+      # Both files come out of the same script and the same definitions, so
+      # both have to be regenerated and committed together. The example
+      # configuration used to be kept by hand and had quietly fallen sixteen
+      # settings behind the code.
+      - name: Reference and example configuration must match the code
         run: |
           python tools/gen_config_docs.py
-          git diff --exit-code docs/CONFIG.md
+          git diff --exit-code docs/CONFIG.md config/picframe3.example.yaml
+
+  # The installer and the unit file are the two pieces of this project that
+  # nothing else exercises: they run once, on somebody else's Pi, and a
+  # mistake in either is discovered by the person least able to diagnose it.
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the checkers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends shellcheck systemd
+
+      - name: The installer must parse and pass shellcheck
+        run: |
+          bash -n packaging/install.sh
+          shellcheck packaging/install.sh
+
+      - name: The unit file must be valid systemd
+        run: |
+          # @EXEC@ is what `picframe3 setup` substitutes. systemd-analyze
+          # insists on an absolute path that is really there and really
+          # executable, so stand in /bin/true; and a template unit has to be
+          # named <name>@.service for it to be understood as one.
+          mkdir -p units
+          sed 's|@EXEC@|/bin/true|' packaging/picframe3.service \
+            > units/picframe3@.service
+          # systemd-analyze reports an unknown directive as a warning and still
+          # exits 0 -- which is precisely how StartLimitIntervalSec sat in
+          # [Service], silently ignored, through several releases. Any output
+          # at all therefore fails this job.
+          output=$(systemd-analyze verify units/picframe3@.service 2>&1) || true
+          if [ -n "$output" ]; then
+            echo "$output"
+            echo "::error file=packaging/picframe3.service::systemd-analyze is not happy with this unit"
+            exit 1
+          fi
+          echo "packaging/picframe3.service verifies clean"
+
+  # A real install, from a real wheel, into an empty virtual environment --
+  # the only arrangement in which a missing data file shows up at all. An
+  # editable install finds everything on disk whether the build backend was
+  # told to ship it or not.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: Install picframe3[all], not editable, into a clean venv
+        run: |
+          python -m venv /tmp/frame
+          /tmp/frame/bin/pip install --upgrade pip
+          /tmp/frame/bin/pip install ".[all]"
+
+      - name: The wheel must carry every file the frame opens at runtime
+        run: /tmp/frame/bin/python tools/check_package_data.py
+
+      - name: The command must work from that install
+        run: |
+          /tmp/frame/bin/picframe3 --version
+          /tmp/frame/bin/picframe3 transitions
+
+      - name: The source distribution must carry the licence
+        run: |
+          pip install --upgrade build
+          python -m build --sdist --outdir dist .
+          tar tzf dist/*.tar.gz | grep -q '/LICENSE$'

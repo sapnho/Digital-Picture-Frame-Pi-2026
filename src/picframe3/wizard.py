@@ -22,6 +22,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -33,6 +34,7 @@ _log = logging.getLogger(__name__)
 SERVICE_NAME = "picframe3@{user}.service"
 SERVICE_UNIT = "/etc/systemd/system/picframe3@.service"
 POLKIT_RULE = "/etc/polkit-1/rules.d/50-picframe3-network.rules"
+UDEV_RULE = "/etc/udev/rules.d/99-picframe3.rules"
 SAMBA_CONF = "/etc/samba/smb.conf"
 SAMBA_BEGIN = "# >>> picframe3 >>>"
 SAMBA_END = "# <<< picframe3 <<<"
@@ -196,6 +198,57 @@ def run_root(command: list[str], *, check: bool = False, input_text: str | None 
                           capture_output=True)
 
 
+def packaged(name: str) -> str:
+    """Read one of the files in ``packaging/``.
+
+    Those files are the single definition of the unit, the polkit rule and the
+    udev rule.  Keeping a second copy of the same text here as a Python string
+    is how the two drifted apart: only the copy in this module was ever
+    installed, so the one in ``packaging/`` could grow an ``ExecReload`` for a
+    signal nothing handles and nobody found out.  They ship inside the wheel
+    (see ``[tool.hatch.build.targets.wheel.force-include]``) so this works on
+    a Pi with no source tree.
+    """
+    try:
+        from importlib.resources import files
+
+        return (files("picframe3") / "data" / name).read_text(encoding="utf-8")
+    except (AttributeError, FileNotFoundError, ModuleNotFoundError, OSError):
+        # An editable install has no package data, so fall back to the source
+        # tree this module was imported from -- that is a developer running
+        # `picframe3 setup` out of a checkout, and it should still work.
+        return (Path(__file__).resolve().parents[2] / "packaging" / name) \
+            .read_text(encoding="utf-8")
+
+
+def write_as_root(text: str, destination: str, *, mode: str | None = "0644") -> bool:
+    """Put ``text`` at ``destination``, with root's permission.
+
+    The wizard runs as the owner, and everything it writes lives under /etc or
+    /boot, so the content has to travel through a file root can read.  It used
+    to travel through a predictable name in a world-writable directory
+    (``/tmp/picframe3@.service`` and four siblings), which is the textbook way
+    to lose that race: anyone else on the machine can create that path first,
+    as a symbolic link, and have root copy our content wherever the link
+    points.  ``mkstemp`` picks a name nobody can guess and creates it 0600.
+
+    ``mode=None`` copies instead of installing, for /boot/firmware: it is a FAT
+    filesystem, where ``install -m`` attempts a chmod the filesystem cannot
+    represent.
+    """
+    fd, tmp = tempfile.mkstemp(prefix="picframe3-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        if mode is None:
+            command = ["cp", tmp, destination]
+        else:
+            command = ["install", "-D", "-m", mode, tmp, destination]
+        return run_root(command).returncode == 0
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 def missing_groups(user: str) -> list[str]:
     try:
         member_of = {g.gr_name for g in grp.getgrall() if user in g.gr_mem}
@@ -309,12 +362,9 @@ def setup_samba(config: Config, user: str) -> bool:
     else:
         merged = existing.rstrip() + "\n\n" + block
 
-    tmp = Path("/tmp/picframe3-smb.conf")
-    tmp.write_text(merged, encoding="utf-8")
-    if run_root(["cp", str(tmp), SAMBA_CONF]).returncode != 0:
+    if not write_as_root(merged, SAMBA_CONF):
         say(f"{YELLOW}   ! Could not write {SAMBA_CONF}{RESET}")
         return False
-    tmp.unlink(missing_ok=True)
 
     if not open_share:
         say(f"   Set a password for the share (user “{user}”). It is separate "
@@ -446,12 +496,7 @@ def advertise_share() -> bool:
           </service>
         </service-group>
         """)
-    tmp = Path("/tmp/picframe3-avahi.service")
-    tmp.write_text(service, encoding="utf-8")
-    run_root(["mkdir", "-p", "/etc/avahi/services"])
-    ok_write = run_root(["cp", str(tmp), "/etc/avahi/services/picframe3.service"]).returncode == 0
-    tmp.unlink(missing_ok=True)
-    if not ok_write:
+    if not write_as_root(service, "/etc/avahi/services/picframe3.service"):
         say(f"{YELLOW}   ! Could not write the mDNS announcement.{RESET}")
         return False
     run_root(["systemctl", "enable", "avahi-daemon"])
@@ -539,14 +584,8 @@ def install_service(user: str, venv_bin: Path | None) -> bool:
     if not confirm("   Start the frame automatically when the Pi powers on?", default=True):
         return False
 
-    unit = _service_unit(user, venv_bin)
-    tmp = Path("/tmp/picframe3@.service")
-    tmp.write_text(unit, encoding="utf-8")
-    if run_root(["cp", str(tmp), SERVICE_UNIT]).returncode != 0:
-        say(f"{YELLOW}   ! Could not write {SERVICE_UNIT}{RESET}")
+    if not write_service_unit(user, venv_bin):
         return False
-    tmp.unlink(missing_ok=True)
-    run_root(["systemctl", "daemon-reload"])
     name = SERVICE_NAME.format(user=user)
     if run_root(["systemctl", "enable", name]).returncode != 0:
         say(f"{YELLOW}   ! Could not enable {name}{RESET}")
@@ -554,7 +593,46 @@ def install_service(user: str, venv_bin: Path | None) -> bool:
     say(f"   {GREEN}✓{RESET} {name} enabled")
     note("No console autologin and no desktop session are involved: the frame "
          "takes the screen directly, so it starts before anyone logs in.")
+    install_udev_rules()
     install_network_rule(user)
+    return True
+
+
+def write_service_unit(user: str, venv_bin: Path | None) -> bool:
+    """Write /etc/systemd/system/picframe3@.service and reload systemd."""
+    if not write_as_root(_service_unit(user, venv_bin), SERVICE_UNIT):
+        say(f"{YELLOW}   ! Could not write {SERVICE_UNIT}{RESET}")
+        return False
+    run_root(["systemctl", "daemon-reload"])
+    return True
+
+
+def install_udev_rules() -> bool:
+    """Make the keyboard, the touchscreen and the screen readable by the frame.
+
+    Raspberry Pi OS Lite runs no seat manager for a service nobody logged into,
+    so the ``uaccess`` rules that hand a desktop user their own input devices
+    never fire here: ``/dev/input/event*`` stays root-owned at 0600, and being
+    in the ``input`` group buys exactly nothing.  This rule is what makes the
+    group membership mean something.
+
+    It shipped in ``packaging/`` from the start and was never installed by
+    anything, so the only hint anyone got was ``picframe3 doctor`` asking
+    whether the user was in the ``input`` group -- which they always were.
+    """
+    if not os.path.isdir("/etc/udev/rules.d"):
+        return False                       # no udev here; nothing to install
+    if not write_as_root(packaged("99-picframe3.rules"), UDEV_RULE):
+        say(f"{YELLOW}   ! Could not write {UDEV_RULE}; the keyboard and "
+            f"touchscreen may stay unreadable.{RESET}")
+        return False
+    run_root(["udevadm", "control", "--reload"])
+    # --reload only affects devices that appear from now on.  Re-triggering
+    # applies the rule to the keyboard that is already plugged in, so this
+    # works without a reboot.
+    run_root(["udevadm", "trigger", "--subsystem-match=input",
+              "--subsystem-match=drm"])
+    say(f"   {GREEN}✓{RESET} keyboard, touchscreen and screen readable by the frame")
     return True
 
 
@@ -571,11 +649,7 @@ def install_network_rule(user: str) -> bool:
     """
     if shutil.which("pkaction") is None and not os.path.isdir("/etc/polkit-1"):
         return False                       # not a polkit system; nothing to do
-    rule = _network_rule(user)
-    tmp = Path("/tmp/50-picframe3-network.rules")
-    tmp.write_text(rule, encoding="utf-8")
-    ok = run_root(["install", "-D", "-m", "0644", str(tmp), POLKIT_RULE]).returncode == 0
-    tmp.unlink(missing_ok=True)
+    ok = write_as_root(_network_rule(user), POLKIT_RULE)
     if ok:
         say(f"   {GREEN}✓{RESET} may reconnect its own Wi-Fi when it drops")
     else:
@@ -585,86 +659,99 @@ def install_network_rule(user: str) -> bool:
 
 
 def _network_rule(user: str) -> str:
-    """The polkit rule, with this frame's user written into it."""
-    return textwrap.dedent("""\
-        // Installed by picframe3.  Lets the frame mend its own network
-        // connection -- reconnect its wireless device, or restart
-        // NetworkManager -- and grants nothing else to anyone else.
-        polkit.addRule(function (action, subject) {
-            if (subject.user !== "%s") {
-                return undefined;
-            }
-            if (action.id === "org.freedesktop.NetworkManager.network-control") {
-                return polkit.Result.YES;
-            }
-            if (action.id === "org.freedesktop.systemd1.manage-units" &&
-                action.lookup("unit") === "NetworkManager.service") {
-                return polkit.Result.YES;
-            }
-            return undefined;
-        });
-        """) % user
+    """The polkit rule from ``packaging/``, with this frame's user in it."""
+    return "".join(
+        line if line.lstrip().startswith("//") else line.replace("@USER@", user)
+        for line in packaged("50-picframe3-network.rules").splitlines(keepends=True)
+    )
 
 
 def _service_unit(user: str, venv_bin: Path | None) -> str:
+    """The unit from ``packaging/picframe3.service``, pointed at this install.
+
+    Only the executable is substituted.  Everything else -- ``WorkingDirectory``
+    (``~``, systemd's own shorthand for the home of ``User=``, so a home
+    outside /home works), the ordering, the restart policy -- is whatever that
+    file says, which is the point of reading it rather than repeating it.
+    """
     executable = str((venv_bin / "picframe3") if venv_bin else Path(sys.argv[0]).resolve())
     if not os.path.exists(executable):
         executable = shutil.which("picframe3") or executable
-    home = pwd.getpwnam(user).pw_dir
-    return textwrap.dedent(f"""\
-        [Unit]
-        Description=picframe3 digital picture frame
-        Documentation=https://github.com/sapnho/Digital-Picture-Frame-Pi-2026
-        After=systemd-user-sessions.service network-online.target
-        Wants=network-online.target
-        ConditionPathExistsGlob=/dev/dri/card*
+    # Only the ExecStart line, not the whole file: the comments above it name
+    # the placeholder, and a blanket replace would rewrite those too and leave
+    # an explanation that no longer explains anything.
+    return "".join(
+        line.replace("@EXEC@", executable) if line.startswith("ExecStart=") else line
+        for line in packaged("picframe3.service").splitlines(keepends=True)
+    )
 
-        [Service]
-        Type=simple
-        User=%i
-        Group=%i
-        SupplementaryGroups=video render input
-        Environment=PYTHONUNBUFFERED=1
-        WorkingDirectory={home}
-        ExecStart={executable} run
-        Restart=always
-        RestartSec=5
-        StartLimitIntervalSec=300
-        StartLimitBurst=10
-        NoNewPrivileges=yes
-        PrivateTmp=yes
-        ProtectSystem=full
-        ProtectControlGroups=yes
-        ProtectKernelModules=yes
-        RestrictRealtime=yes
-        RestrictSUIDSGID=yes
-        MemoryMax=75%
-        OOMPolicy=continue
 
-        [Install]
-        WantedBy=multi-user.target
-        """)
+#: Kernel parameters a picture frame wants: never blank the console, no
+#: raspberry logos, no blinking cursor, and no boot messages -- all four are
+#: things that otherwise appear over the picture.
+CMDLINE_WANTED = ("consoleblank=0", "logo.nologo", "vt.global_cursor_default=0", "quiet")
 
 
 def tidy_boot() -> None:
-    """Stop the console blanking or printing over the picture."""
+    """Stop the console blanking or printing over the picture.
+
+    cmdline.txt is a single line by definition: the bootloader hands the first
+    line to the kernel and ignores everything after it.  The previous version
+    read the file, called ``.strip()`` -- which removes whitespace at the two
+    ends and nothing in between -- and wrote the result back with the missing
+    parameters appended.  A file that had somehow acquired a second line
+    therefore came back still split in two, with the frame's parameters
+    stranded on a line the kernel never reads, and in the worst case a Pi that
+    does not boot.  This runs in the ``--yes`` path, which is to say on every
+    single update, so one bad write is permanent.
+
+    Hence the three rules below: keep a copy of what was there, refuse outright
+    anything that is not exactly one line, and check that what we are about to
+    write is still one line before writing it.
+    """
     for candidate in ("/boot/firmware/cmdline.txt", "/boot/cmdline.txt"):
         path = Path(candidate)
         if not path.exists():
             continue
         try:
-            line = path.read_text(encoding="utf-8").strip()
-        except OSError:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            say(f"{YELLOW}   ! Could not read {candidate}: {exc}{RESET}")
             return
-        wanted = ["consoleblank=0", "logo.nologo", "vt.global_cursor_default=0"]
-        missing = [w for w in wanted if w not in line]
+
+        lines = [line for line in raw.splitlines() if line.strip()]
+        if len(lines) != 1:
+            say(f"{YELLOW}   ! {candidate} holds {len(lines)} lines, not one; "
+                f"leaving it alone.{RESET}")
+            note("Only the first line of cmdline.txt reaches the kernel, so "
+                 "there is no safe way to guess which one the parameters "
+                 "belong on. Put the kernel command line back on a single "
+                 "line and run 'picframe3 setup' again, or append these to it "
+                 "by hand: " + " ".join(CMDLINE_WANTED) + ".")
+            return
+
+        line = lines[0].strip()
+        missing = [want for want in CMDLINE_WANTED if want not in line.split()]
         if not missing:
             return
-        tmp = Path("/tmp/picframe3-cmdline.txt")
-        tmp.write_text(line + " " + " ".join(missing) + "\n", encoding="utf-8")
-        if run_root(["cp", str(tmp), candidate]).returncode == 0:
+        new_line = line + " " + " ".join(missing)
+        if len(new_line.splitlines()) != 1:     # cannot happen; cheap to prove
+            say(f"{YELLOW}   ! Refusing to write a multi-line {candidate}.{RESET}")
+            return
+
+        backup = candidate + ".picframe3.bak"
+        if run_root(["cp", candidate, backup]).returncode != 0:
+            say(f"{YELLOW}   ! Could not back {candidate} up to {backup}; "
+                f"leaving the boot options alone.{RESET}")
+            return
+        # mode=None: /boot/firmware is FAT, where `install -m` would attempt a
+        # chmod the filesystem cannot represent.
+        if write_as_root(new_line + "\n", candidate, mode=None):
             say(f"   {GREEN}✓{RESET} boot options tidied ({', '.join(missing)})")
-        tmp.unlink(missing_ok=True)
+            note(f"The previous {Path(candidate).name} is kept as "
+                 f"{Path(backup).name}, next to it.")
+        else:
+            say(f"{YELLOW}   ! Could not write {candidate}.{RESET}")
         return
 
 
@@ -704,15 +791,15 @@ def run(config_path: str | None = None, *, venv_bin: str | None = None,
         say(f"   pictures        {', '.join(config.library.picture_folders)}")
         fix_groups(user)
         tidy_boot()
+        # The update path goes through here (install.sh runs `setup --yes`), so
+        # anything installed outside the config file has to be refreshed here
+        # too -- otherwise a fix to the unit or to a rule only ever reaches
+        # people who run the wizard interactively.
+        install_udev_rules()
         if shutil.which("systemctl") and Path("/run/systemd/system").exists():
-            unit = _service_unit(user, Path(venv_bin) if venv_bin else None)
-            tmp = Path("/tmp/picframe3@.service")
-            tmp.write_text(unit, encoding="utf-8")
-            if run_root(["cp", str(tmp), SERVICE_UNIT]).returncode == 0:
-                run_root(["systemctl", "daemon-reload"])
+            if write_service_unit(user, Path(venv_bin) if venv_bin else None):
                 run_root(["systemctl", "enable", SERVICE_NAME.format(user=user)])
                 say(f"   service         {SERVICE_NAME.format(user=user)} enabled")
-            tmp.unlink(missing_ok=True)
         say("   Run 'picframe3 setup' on a terminal to change any of this.")
         return 0
 

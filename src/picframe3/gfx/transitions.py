@@ -16,12 +16,35 @@ from collections.abc import Sequence
 
 _log = logging.getLogger(__name__)
 
+# Two vertex shaders, one per quad convention, written out in full.  The
+# renderer used to derive the second from the first with a string replacement
+# that had to match two source lines including their indentation: a whitespace
+# change anywhere in the shader would have silently left the NDC mapping alone
+# and drawn the picture into a quarter of the screen, with no error anywhere.
+#
+# ``layout(location = 0)`` is not decoration either.  Both shaders are drawn
+# with the renderer's single VAO, which feeds attribute 0; without the explicit
+# binding a driver is free to put ``a_pos`` somewhere else, and the result is a
+# black screen that glGetError is perfectly happy with.
+
+#: For a quad whose vertices are already in clip space (-1..1).
 VERTEX_SHADER = """#version 300 es
-in vec2 a_pos;
+layout(location = 0) in vec2 a_pos;
 out vec2 v_uv;
 void main() {
     v_uv = a_pos * 0.5 + 0.5;
     gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+"""
+
+#: For the renderer's shared 0..1 quad, which is also the uv range, so the
+#: mapping to clip space happens here.
+VERTEX_SHADER_UNIT_QUAD = """#version 300 es
+layout(location = 0) in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+    v_uv = a_pos;
+    gl_Position = vec4(a_pos * 2.0 - 1.0, 0.0, 1.0);
 }
 """
 
@@ -52,10 +75,19 @@ vec3 pf_linear_to_srgb(vec3 c) {
 
 vec4 pf_sample(sampler2D tex, vec4 xform, vec2 uv) {
     vec2 c = (uv - 0.5) * xform.xy + 0.5 + xform.zw;
-    if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0) {
+    // Effects such as blur, zoom and bump deliberately reach a little outside
+    // the screen rectangle.  On an axis the picture covers completely (|scale|
+    // <= 1, which under "fit: cover" is every axis) the texel just past the
+    // edge still belongs to the image, so the edge texel is what the effect
+    // wants; returning the background there is what put dark seams along two
+    // edges of every blur and zoom.  Only a letterboxed axis (|scale| > 1) is
+    // genuinely outside the picture, and there the background must still show.
+    vec2 covered = step(abs(xform.xy), vec2(1.0));
+    vec2 s = mix(c, clamp(c, 0.0, 1.0), covered);
+    if (s.x < 0.0 || s.x > 1.0 || s.y < 0.0 || s.y > 1.0) {
         return u_background;
     }
-    return texture(tex, c);
+    return texture(tex, s);
 }
 
 vec4 pf_from(vec2 uv) { return pf_sample(u_from, u_from_xform, uv); }

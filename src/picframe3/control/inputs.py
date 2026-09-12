@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from ..config import InputConfig
 from ..events import Action, Command
+from ..install import install_hint
 
 _log = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class InputWatcher:
             import evdev  # noqa: F401
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError(
-                "input handling needs python-evdev (pip install 'picframe3[input]')"
+                f"input handling needs python-evdev ({install_hint('input')})"
             ) from exc
         self._key_actions = self._build_keymap()
         self._devices: dict[str, Any] = {}

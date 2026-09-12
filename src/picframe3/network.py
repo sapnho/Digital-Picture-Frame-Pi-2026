@@ -50,6 +50,17 @@ _log = logging.getLogger(__name__)
 _RTF_UP = 0x0001
 _RTF_GATEWAY = 0x0002
 
+#: The three things a check can conclude, kept apart on purpose.  The watchdog
+#: this replaces had only "reachable" and "not reachable", so a network that
+#: silently drops ICMP, and a machine with no ``ping`` binary, both read as a
+#: permanent outage -- and the escalation ladder then reconnected the radio and
+#: restarted NetworkManager every cooldown, for ever, which is exactly the
+#: failure the watchdog exists to prevent.
+ONLINE = "online"            # a reply came back
+OFFLINE = "offline"          # the check ran and nothing came back
+UNKNOWN = "unknown"          # nothing has been measured yet
+UNMEASURABLE = "unmeasurable"  # no route to test, or no way to test it
+
 
 def default_route() -> tuple[str, str] | None:
     """The IPv4 gateway and the interface it is reached through, or None.
@@ -79,13 +90,27 @@ def default_route() -> tuple[str, str] | None:
     return None
 
 
-async def ping(host: str, *, timeout: float = 3.0, count: int = 2) -> bool:
-    """One ping run.  True when anything came back."""
+async def ping(host: str, *, timeout: float = 3.0, count: int = 2) -> bool | None:
+    """One ping run.
+
+    Three answers, not two, because the difference between them decides
+    whether the watchdog is allowed to touch anything:
+
+    * ``True``  -- a reply came back.
+    * ``False`` -- the run finished and nothing came back.
+    * ``None``  -- the check could not be made at all, because there is no
+      ``ping`` binary on this system (iputils is not installed, or the image
+      is a minimal one).  That is not an outage and must never be repaired:
+      the link may be perfectly healthy and simply unmeasurable from here.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             "ping", "-n", "-c", str(count), "-W", str(int(max(1, timeout))), host,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
+    except FileNotFoundError:
+        # No ping at all.  Reported once by the caller, never acted on.
+        return None
     except (OSError, ValueError):
         return False
     try:
@@ -142,6 +167,18 @@ class NetworkWatch:
         self.interface = interface
 
         self.online: bool | None = None
+        #: Which of the three states the last check left the watcher in.  What
+        #: the log and Home Assistant say, and what ``_may_repair`` reads.
+        self.status: str = UNKNOWN
+        #: Whether a check has ever succeeded since this process started.
+        #: Nothing is repaired before it has: without a known-good reading the
+        #: watcher cannot tell a broken link from a network that filters ICMP,
+        #: and repairing the second one is how the frame ends up reconnecting
+        #: its radio every half hour for the rest of its life.
+        self._ever_online = False
+        #: So "cannot check" and "never seen the network up" are each said once
+        #: rather than on every pass through the loop.
+        self._said: set[str] = set()
         self._consecutive = 0
         self._changed_at = time.monotonic()
         self._last_action_at = 0.0
@@ -190,28 +227,63 @@ class NetworkWatch:
                 _log.debug("network check failed", exc_info=True)
             await asyncio.sleep(self.interval)
 
+    def _say_once(self, key: str, message: str, *args) -> None:
+        """Log something that is true for as long as the condition lasts.
+
+        A frame with no ``ping`` binary would otherwise write the same line
+        every interval for months; saying it once, and again after the
+        condition clears, is what keeps the journal readable.
+        """
+        if key not in self._said:
+            self._said.add(key)
+            _log.warning(message, *args)
+
     async def check_once(self) -> bool:
         """One check, and whatever it leads to.  Returns reachability."""
         host, iface = self._resolve()
         self.resolved_target = host
         if not host:
-            # No default route at all.  That is a real outage, but there is
-            # nothing to ping and nothing useful to reconnect to.
-            _log.debug("no default route; nothing to check")
+            # No default route at all.  The frame is certainly not on a
+            # network, but there is also nothing to ping and nothing useful to
+            # reconnect *to*, so this is recorded and never acted on.
+            self.status = UNMEASURABLE
+            self._say_once("noroute", "no default route; nothing to check")
             self._note(False)
             return False
+        self._said.discard("noroute")
 
         reachable = False
+        measurable = False
         for attempt in range(self.attempts):
-            if await ping(host, timeout=self.timeout):
+            answer = await ping(host, timeout=self.timeout)
+            if answer is None:
+                # No ping binary: the link is not measurable from here.  Not
+                # an outage, and above all not something to repair.
+                self.status = UNMEASURABLE
+                self._say_once(
+                    "noping",
+                    "cannot check the network: no 'ping' command on this system "
+                    "(install iputils-ping); watching is disabled until there is one")
+                return bool(self.online)
+            measurable = True
+            if answer:
                 reachable = True
                 break
             if attempt + 1 < self.attempts:
                 await asyncio.sleep(5.0)
+        self._said.discard("noping")
 
         self._note(reachable)
-        if reachable or not self.repair:
-            return reachable
+        if reachable:
+            self.status = ONLINE
+            self._ever_online = True
+            self._said.discard("neverup")
+            return True
+        self.status = OFFLINE if measurable else UNMEASURABLE
+        if not self.repair:
+            return False
+        if not self._may_repair():
+            return False
         if self._consecutive < self.failures:
             return False
 
@@ -222,6 +294,24 @@ class NetworkWatch:
             return False
 
         await self._repair(iface)
+        return False
+
+    def _may_repair(self) -> bool:
+        """Whether the watcher has earned the right to touch the connection.
+
+        One successful check since startup is the whole test, and it is what
+        separates "the link went down" from "this network has never answered a
+        ping".  On a LAN that filters ICMP the second is permanent, and a
+        watchdog that repairs it reconnects the radio for ever without once
+        mending anything.
+        """
+        if self._ever_online:
+            return True
+        self._say_once(
+            "neverup",
+            "%s has never answered since startup, so this may be a network that "
+            "filters ICMP rather than an outage; watching and reporting only",
+            self.resolved_target or "the gateway")
         return False
 
     def _note(self, reachable: bool) -> None:
@@ -273,6 +363,11 @@ class NetworkWatch:
             return {}
         return {
             "online": self.online,
+            # online / offline / unknown / unmeasurable.  The web UI and
+            # ``doctor`` say which of the three it is rather than turning
+            # "cannot tell" into "broken".
+            "status": self.status,
+            "ever_online": self._ever_online,
             "target": self.resolved_target,
             "interface": self._resolve()[1],
             "for_seconds": round(time.monotonic() - self._changed_at, 1),

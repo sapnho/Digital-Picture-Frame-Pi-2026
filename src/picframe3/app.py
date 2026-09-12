@@ -11,10 +11,11 @@ from datetime import datetime
 from typing import Any
 
 from . import __version__, uischema
+from . import settings as settings_module
 from .config import Config
 from .control.power import BacklightControl, PowerSchedule
 from .events import Action, Bus, Command, State
-from .gfx import Renderer, Slide, Texture, create_backend, transitions
+from .gfx import Renderer, create_backend, transitions
 from .gfx import overlays as overlay_builders
 from .gfx.textstyle import TextStyle
 from .health import Health
@@ -22,11 +23,13 @@ from .library.db import Library, Record
 from .library.playlist import ANY_OTHER, Filters, Playlist
 from .library.removed import RemovalLog
 from .library.scanner import Scanner
-from .media import PrepareOptions, SlideLoader, no_files_screen
+from .media import PrepareOptions, SlideLoader
 from .media import geocode as geocode_module
 from .media.geocode import Geocoder
 from .media.mat import MatStyle
 from .network import NetworkWatch
+from .settings import ConfigApplier
+from .slideshow import SlideshowController
 
 _log = logging.getLogger(__name__)
 
@@ -76,20 +79,24 @@ class PicFrame:
             repair=config.network.repair,
         )
 
-        self.current: list[Record] = []
-        #: How the picture on screen was laid out (cover/contain/blur/mat).
-        self._current_fit = ""
+        #: What is on screen and when it changes.  See picframe3.slideshow.
+        self.slideshow = SlideshowController(self)
+        #: How a changed setting reaches the running frame.  See
+        #: picframe3.settings.
+        self.applier = ConfigApplier(self)
         #: Settings changed that only a fresh process will pick up, and whether
         #: anything has been changed but not yet written to the config file.
         self._restart_needed: set[str] = set()
         self._config_dirty = False
         #: Set by the restart command; the CLI reads it after the loop ends.
         self.restart_requested = False
+        #: Set by the quit command.  The CLI turns it into a distinct exit
+        #: status, because under systemd a clean exit is not a stop: with
+        #: Restart=always, "quit" used to mean "black for five seconds".
+        self.quit_requested = False
         self.paused = bool(config.slideshow.paused)
         self.show_info = True
         self.display_on = True
-        self._next_change_at = 0.0
-        self._slide_started = 0.0
         self._clock_minute: str | None = None
         self._info_until = 0.0
         self._dirty = True
@@ -98,12 +105,42 @@ class PicFrame:
         self._fps = 0.0
         self._fps_window = time.monotonic()
         self._scanning = False
-        self._video_started = False
         self._overlay_mtime: float | None = None
-        self._placeholder_shown = False
         self._location_pending: set[int] = set()
+        #: The capture every waiting caller shares, so two open browser tabs
+        #: asking for a screenshot at the same moment cost one read-back rather
+        #: than one timing out into a 503.
         self._capture_request: asyncio.Future | None = None
         self._location_backfill_at = 0.0
+        self._backfilling = False
+        #: What the off-schedule last decided, or None when there is no
+        #: schedule.  The schedule acts on its edges; between them the display
+        #: belongs to whoever last touched it.
+        self._scheduled_display: bool | None = None
+        #: The local date the rolling date filter was last resolved for.
+        self._window_day = time.strftime("%Y-%m-%d")
+        #: Library totals, cached.  state() is rebuilt on every event-stream
+        #: push and every MQTT heartbeat, and these are COUNT(*) and SUM() over
+        #: the whole index plus the folder and tag aggregates -- in the same
+        #: loop that draws the screen.
+        self._stats_cache: dict[str, Any] = {}
+        self._stats_at = -1e9
+
+    def _scan_exclusions(self) -> list[str]:
+        """Folder names the scanner skips -- including the frame's own bin.
+
+        picframe put the deleted folder inside the picture folders so it could
+        be seen over the share, and that is still the sensible place for it.
+        Left in the scan, every removed picture was noticed by inotify seconds
+        later and indexed straight back in, which reads as "Remove does not
+        work".
+        """
+        exclude = list(self.config.library.exclude)
+        deleted = os.path.basename(
+            os.path.expanduser(self.config.library.deleted_folder).rstrip("/"))
+        if deleted and deleted not in exclude:
+            exclude.append(deleted)
+        return exclude
 
     def _health_disk_path(self) -> str:
         """Which filesystem the free-space reading is about.
@@ -160,7 +197,8 @@ class PicFrame:
             geocoder=self.geocoder,
             include_videos=cfg.library.include_videos,
             ignore_hidden=cfg.library.ignore_hidden,
-            exclude=cfg.library.exclude,
+            exclude=self._scan_exclusions(),
+            prune_max_fraction=cfg.library.prune_max_fraction,
         )
 
         filters = Filters.from_dict(self.library.get_state("playlist_filters") or {})
@@ -270,23 +308,46 @@ class PicFrame:
         return tasks
 
     async def _render_loop(self) -> None:
+        """Draw, and keep drawing.
+
+        Every pass is wrapped, because this task *is* the frame: an exception
+        here used to end it, which ended `run()`, which ended the process --
+        five seconds of black and a fresh start under systemd, and a permanently
+        dark screen without it.  A malformed clock position or a driver hiccup
+        is worth a log line and a skipped frame, not the appliance.
+
+        Repeated failures are counted rather than merely logged: a fault that
+        recurs every frame would otherwise fill the journal at sixty lines a
+        second, so the loop slows down while it is failing.
+        """
         assert self.renderer is not None
         await self._advance(initial=True)
+        failures = 0
         while not self._stop.is_set():
-            now = time.monotonic()
-            self._tick_video()
-            self._tick_overlays(now)
-
-            if (not self.paused and self.display_on
-                    and now >= self._next_change_at):
-                await self._advance()
+            try:
                 now = time.monotonic()
+                self._tick_video()
+                self._tick_overlays(now)
 
-            if self._dirty or self._animating(now):
-                self.renderer.draw(after_draw=self._capture_hook())
-                self._dirty = False
-                self._frames += 1
-                self._last_frame_at = time.monotonic()
+                if (not self.paused and self.display_on
+                        and now >= self._next_change_at):
+                    await self._advance()
+                    now = time.monotonic()
+
+                if self._dirty or self._animating(now):
+                    self.renderer.draw(after_draw=self._capture_hook())
+                    self._dirty = False
+                    self._frames += 1
+                    self._last_frame_at = time.monotonic()
+                failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                failures += 1
+                if failures <= 3 or failures % 100 == 0:
+                    _log.exception("frame %d failed; carrying on", failures)
+                await asyncio.sleep(min(5.0, 0.1 * failures))
+                continue
 
             await asyncio.sleep(self._sleep_for(time.monotonic()))
 
@@ -321,14 +382,19 @@ class PicFrame:
         frame is merely busy would be worse than useless.
         """
         loop = asyncio.get_running_loop()
-        request: asyncio.Future = loop.create_future()
-        self._capture_request = request
+        request = self._capture_request
+        if request is None or request.done():
+            # One slot meant two callers overwrote each other: the first waited
+            # out its fifteen seconds for a frame nobody was going to hand it.
+            # Everyone arriving before the next frame now shares one capture.
+            request = loop.create_future()
+            self._capture_request = request
         self._dirty = True                      # make sure a frame is drawn
-        try:
-            pixels = await asyncio.wait_for(request, timeout)
-        finally:
-            if self._capture_request is request:
-                self._capture_request = None
+        pixels = await asyncio.wait_for(asyncio.shield(request), timeout)
+        if self._capture_request is request:
+            # Otherwise a full-screen read-back (8 MB at 1080p) stays referenced
+            # until the next screenshot, on a device with MemoryMax=75%.
+            self._capture_request = None
         return await loop.run_in_executor(None, _encode_png, pixels)
 
     def _animating(self, now: float) -> bool:
@@ -369,69 +435,143 @@ class PicFrame:
 
     # ------------------------------------------------------------------
     # Slides
+    #
+    # The slideshow itself lives in picframe3.slideshow: one implementation of
+    # "show this picture", one lock around it, one place where the timing is
+    # decided.  What is left here is the frame's half of that conversation --
+    # the things a slide change has to do to the *rest* of the appliance -- and
+    # a set of thin delegations, so that "the next picture" is still spelled
+    # the same way from the command handler, the API and the tests.
     # ------------------------------------------------------------------
     async def _advance(self, *, initial: bool = False, backwards: bool = False) -> None:
-        assert self.playlist and self.loader and self.renderer
-        self._stop_video()
-        group = self.playlist.previous() if backwards else self.playlist.next()
-        if not group:
-            self._show_placeholder()
-            self._next_change_at = time.monotonic() + 10.0
-            return
+        await self.slideshow.advance(initial=initial, backwards=backwards)
 
-        metas = [r.as_meta() for r in group]
-        for record, meta in zip(group, metas, strict=False):
-            if record.location:
-                meta.tags = meta.tags or []
-        prepared = None
-        if not backwards and self.loader.prefetched_for(metas):
-            prepared = await self.loader.take_prefetched()
-        if prepared is None:
-            self.loader.cancel_prefetch()
-            prepared = await self.loader.load(metas)
-        if prepared is None:
-            _log.warning("skipping unreadable file %s", metas[0].path)
-            self.library.set_hidden(group[0].id, True)   # stop retrying forever
-            self.playlist.refresh()
-            await self._advance(initial=initial)
-            return
+    async def _jump(self, payload: dict) -> None:
+        await self.slideshow.jump(payload)
 
-        self._placeholder_shown = False
-        self.current = group
-        self._current_fit = prepared.fit
-        kb = self.config.slideshow.kenburns and not prepared.is_video
-        texture = Texture.from_image(
-            prepared.image, srgb=True, mipmap=not prepared.is_video
-        )
-        duration = self._slide_duration(group)
-        if kb:
-            slide = Slide.with_random_pan(
-                texture, duration=duration, zoom=self.config.slideshow.kenburns_zoom
-            )
-        else:
-            slide = Slide(texture, fit="cover", duration=duration)
-        slide.meta = prepared
-        self.renderer.show(
-            slide,
-            transition=self.config.slideshow.transition,
-            duration=0.0 if initial else self.config.slideshow.transition_time,
-        )
-        self._slide_started = time.monotonic()
-        self._next_change_at = self._slide_started + duration
-        self._video_started = False
+    def mark_dirty(self) -> None:
+        """Draw another frame: something on screen has changed."""
         self._dirty = True
 
-        for record in group:
-            self.library.mark_played(record.id, self.playlist.round)
+    def describe_empty(self) -> tuple[str, str]:
+        """What to write on the screen when there is nothing to show.
+
+        A filter that matches nothing is the one way a working frame goes
+        blank, and "No pictures yet" would send its owner looking at the
+        folder, the scan and the SD card.  Say which it is.
+        """
+        filtered = (self.playlist is not None and self.playlist.filters.active
+                    and (self.library.stats().get("files", 0) if self.library else 0))
+        message = "Nothing matches the filter" if filtered else "No pictures yet"
+        subtitle = (self.playlist.filters.describe() if filtered
+                    else "Looking in " + ", ".join(self.config.library.picture_folders))
+        return message, subtitle
+
+    def on_slide_shown(self, group: list[Record]) -> None:
+        """Everything outside the slideshow that a new picture has to touch."""
         self._build_info_overlay(group)
         self._info_until = self._slide_started + self.config.viewer.text_seconds
         self._request_location(group)
-
-        upcoming = self.playlist.peek()
-        if upcoming:
-            self.loader.prefetch([r.as_meta() for r in upcoming])
         self._publish()
 
+    # -- delegations -------------------------------------------------------
+    @property
+    def current(self) -> list[Record]:
+        return self.slideshow.current
+
+    @current.setter
+    def current(self, value: list[Record]) -> None:
+        self.slideshow.current = value
+
+    @property
+    def _current_fit(self) -> str:
+        return self.slideshow.current_fit
+
+    @property
+    def _next_change_at(self) -> float:
+        return self.slideshow.next_change_at
+
+    @_next_change_at.setter
+    def _next_change_at(self, value: float) -> None:
+        self.slideshow.next_change_at = value
+
+    @property
+    def _slide_started(self) -> float:
+        return self.slideshow.slide_started
+
+    @_slide_started.setter
+    def _slide_started(self, value: float) -> None:
+        self.slideshow.slide_started = value
+
+    @property
+    def _video_started(self) -> bool:
+        return self.slideshow.video_started
+
+    @_video_started.setter
+    def _video_started(self, value: bool) -> None:
+        self.slideshow.video_started = value
+
+    @property
+    def _placeholder_shown(self):
+        return self.slideshow.placeholder_shown
+
+    def _slide_duration(self, group: list[Record]) -> float:
+        return self.slideshow.slide_duration(group)
+
+    def _video_window(self) -> float:
+        return self.slideshow.video_window()
+
+    def _video_playing(self) -> bool:
+        return self.slideshow.video_playing()
+
+    def _video_pending(self) -> bool:
+        return self.slideshow.video_pending()
+
+    def _tick_video(self) -> None:
+        self.slideshow.tick_video()
+
+    def _start_video(self, path: str | None) -> None:
+        self.slideshow.start_video(path)
+
+    def _stop_video(self) -> None:
+        self.slideshow.stop_video()
+
+    def _next_change_in(self, now: float) -> float:
+        return self.slideshow.next_change_in(now)
+
+    def _library_stats(self) -> dict[str, Any]:
+        """Library totals, refreshed at most every few seconds.
+
+        ``state()`` is rebuilt on every push to the event stream and every MQTT
+        heartbeat -- several times a second during a transition -- and these are
+        ``COUNT(*)`` and ``SUM()`` over the whole index plus the folder and tag
+        aggregates, run in the thread that draws the picture.  A watching
+        browser made the cross-fade stutter.  A few seconds stale is invisible;
+        a stuttering fade is not.
+        """
+        if self.library is None:
+            return {}
+        now = time.monotonic()
+        if now - self._stats_at > 5.0:
+            self._stats_at = now
+            self._stats_cache = self.library.stats()
+            self._removed_cache = self.removals.summary() if self.removals else {}
+        return self._stats_cache
+
+    def _removed_summary(self) -> dict[str, Any]:
+        self._library_stats()               # refreshes both together
+        return getattr(self, "_removed_cache", {})
+
+    def invalidate_stats(self) -> None:
+        """Force the next state() to re-count, after something changed them."""
+        self._stats_at = -1e9
+
+    def _video_payload(self) -> dict[str, Any]:
+        return self.slideshow.video_payload()
+
+    # ------------------------------------------------------------------
+    # Place names
+    # ------------------------------------------------------------------
     def _request_location(self, group: list[Record]) -> None:
         """Resolve the place name for a picture that has coordinates but no name.
 
@@ -469,25 +609,27 @@ class PicFrame:
         finally:
             self._location_pending.discard(record.id)
 
-    def _restyle_locations(self) -> None:
+    async def _restyle_locations(self) -> None:
         """Rewrite every place name after the wording settings change.
 
         The geocache holds Nominatim's raw replies, so this is a pass over the
         index and the cache with no network at all -- which is the whole point
         of caching the reply rather than the formatted string.
+
+        It runs in a worker thread.  Done inline it walked thousands of rows
+        with a query each, in the same loop that draws the screen: the picture
+        froze mid-transition, the web interface stopped answering and MQTT ran
+        into its keep-alive, for anything from seconds to a minute -- and it did
+        it for every geo setting, including the ones that cannot change a single
+        name.
         """
-        if self.geocoder is None:
+        if self.geocoder is None or self.library is None:
             return
         cfg = self.config.geo
         self.geocoder.set_style(
             geocode_module.key_order_for(cfg.detail, cfg.key_order), cfg.suppress)
-        changed = 0
-        for file_id, lat, lon in self.library.with_position():
-            name = self.geocoder.lookup(lat, lon, cached_only=True)
-            record = self.library.get(file_id)
-            if record is not None and (record.location or "") != (name or ""):
-                self.library.set_location(file_id, name)
-                changed += 1
+        loop = asyncio.get_running_loop()
+        changed = await loop.run_in_executor(None, self._rewrite_locations)
         _log.info("place names rewritten as %r (%d changed)", cfg.detail, changed)
         if self.current:
             for record in self.current:
@@ -497,156 +639,15 @@ class PicFrame:
             self._build_info_overlay(self.current)
             self._dirty = True
 
-    def _slide_duration(self, group: list[Record]) -> float:
-        """How long this slide is expected to stay up.
-
-        For a photograph this is the interval and that is the whole story.  For
-        a video it is only an estimate -- the fade in, then the film -- used for
-        the first deadline and for what the API reports.  What actually ends a
-        video slide is the player saying it has finished, so a video runs for as
-        long as it plays, however long the interval for a still picture is.
-        """
-        base = float(self.config.slideshow.interval)
-        record = group[0]
-        if not record.is_video:
-            return base
-        cfg = self.config.slideshow
-        window = self._video_window()
-        if cfg.video_loop:
-            length = window
-        else:
-            length = float(record.duration or 0.0)
-            if window > 0:
-                length = min(length, window) if length else window
-        if length <= 0:                      # duration unknown: the EOS decides
-            return base
-        return length + cfg.transition_time
-
-    def _video_window(self) -> float:
-        """The cap handed to the player: seconds of playback, 0 = to the end.
-
-        ``video_loop`` repeats a short clip, so it needs a window to repeat
-        inside -- ``video_max_seconds`` when set, otherwise the still-picture
-        interval.  Without looping the window is just the cap, and 0 means the
-        film plays out in full.
-        """
-        cfg = self.config.slideshow
-        limit = float(cfg.video_max_seconds)
-        if cfg.video_loop and limit <= 0:
-            return float(cfg.interval)
-        return max(0.0, limit)
-
-    def _show_placeholder(self) -> None:
-        # A filter that matches nothing is the one way a working frame goes
-        # blank, and "No pictures yet" would send its owner looking at the
-        # folder, the scan and the SD card.  Say which it is.
-        filtered = (self.playlist is not None and self.playlist.filters.active
-                    and (self.library.stats().get("files", 0) if self.library else 0))
-        message = "Nothing matches the filter" if filtered else "No pictures yet"
-        subtitle = (self.playlist.filters.describe() if filtered
-                    else "Looking in " + ", ".join(self.config.library.picture_folders))
-        if self._placeholder_shown == (message, subtitle) or self.renderer is None:
-            return
-        image = no_files_screen(
-            (self.backend.width, self.backend.height),
-            self.config.viewer.no_files_img,
-            message=message,
-            subtitle=subtitle,
-        )
-        self.renderer.show(Slide(Texture.from_image(image, srgb=True)), transition="fade")
-        self._placeholder_shown = (message, subtitle)
-        self.current = []
-        self._dirty = True
-
-    # ------------------------------------------------------------------
-    # Video
-    # ------------------------------------------------------------------
-    def _video_playing(self) -> bool:
-        return self.video is not None and self.video.playing
-
-    def _video_pending(self) -> bool:
-        """A video is on screen but has not been set going yet."""
-        r = self.renderer
-        if r is None or r.current is None or self._video_started:
-            return False
-        prepared = getattr(r.current, "meta", None)
-        return bool(prepared is not None and getattr(prepared, "is_video", False))
-
-    def _hold_slide(self) -> None:
-        """Keep the slide up: the video decides when it is over, not the clock."""
-        self._next_change_at = time.monotonic() + 0.5
-
-    def _end_slide(self) -> None:
-        self._next_change_at = min(self._next_change_at, time.monotonic())
-
-    def _tick_video(self) -> None:
-        renderer = self.renderer
-        if renderer is None or renderer.current is None:
-            return
-        prepared = getattr(renderer.current, "meta", None)
-        if prepared is None or not getattr(prepared, "is_video", False):
-            return
-        if not self._video_started:
-            # The poster frame fades in first and the film starts on a fully
-            # opaque picture -- a video running underneath a crossfade both
-            # looks wrong and throws away its opening second.
-            self._hold_slide()
-            if renderer.in_transition:
-                return
-            self._start_video(prepared.video_path)
-            return
-        if self.video is None:               # poster only: no player available
-            return
-        frame = self.video.poll()
-        if frame is not None:
-            renderer.current.flip_v = True
-            renderer.current.texture.update(frame.data, frame.width, frame.height)
-            self._dirty = True
-        if self.video.playing:
-            # However long a still picture is given, a video gets its own
-            # length: the deadline is pushed ahead for as long as it runs.
-            self._hold_slide()
-        else:
-            self._end_slide()
-
-    def _start_video(self, path: str | None) -> None:
-        if not path:
-            return
-        try:
-            from .media.video import VideoPlayer, available
-
-            if not available():
-                _log.info("GStreamer missing; showing the poster frame only")
-                self._video_started = True
-                # Nothing will move, so the poster is a still picture and gets
-                # a still picture's time.
-                self._next_change_at = (time.monotonic()
-                                        + float(self.config.slideshow.interval))
-                return
-            if self.video is None:
-                self.video = VideoPlayer(
-                    (self.backend.width, self.backend.height),
-                    mute=self.config.slideshow.video_mute,
-                    loop=self.config.slideshow.video_loop,
-                    max_seconds=self._video_window(),
-                )
-            else:
-                # The player outlives a slide, so re-read the settings: they can
-                # change under it from the web UI or MQTT.
-                self.video.mute = self.config.slideshow.video_mute
-                self.video.loop = self.config.slideshow.video_loop
-                self.video.max_seconds = self._video_window()
-            self.video.play(path)
-            self._video_started = True
-        except Exception as exc:
-            _log.warning("cannot play %s: %s", path, exc)
-            self._video_started = True
-            self._end_slide()
-
-    def _stop_video(self) -> None:
-        if self.video is not None:
-            self.video.stop()
-        self._video_started = False
+    def _rewrite_locations(self) -> int:
+        changed = 0
+        for file_id, lat, lon in self.library.with_position():
+            name = self.geocoder.lookup(lat, lon, cached_only=True)
+            record = self.library.get(file_id)
+            if record is not None and (record.location or "") != (name or ""):
+                self.library.set_location(file_id, name)
+                changed += 1
+        return changed
 
     # ------------------------------------------------------------------
     # Overlays
@@ -859,12 +860,18 @@ class PicFrame:
             self.show_info = not self.show_info if action is Action.INFO_TOGGLE else True
             if self.current:
                 self._build_info_overlay(self.current)
+                # Fade it in from wherever it is, rather than snapping it on:
+                # the fade is measured from the slide's start, so start the
+                # caption's clock now.  (This line used to be a no-op --
+                # _slide_started is never in the future.)
+                self._slide_started = (time.monotonic()
+                                       - self.config.slideshow.transition_time)
                 self._info_until = time.monotonic() + self.config.viewer.text_seconds
-                self._slide_started = min(self._slide_started, time.monotonic())
             self._dirty = True
         elif action is Action.CLOCK_TOGGLE:
             self.config.viewer.show_clock = not self.config.viewer.show_clock
             self._clock_minute = None
+            self._config_dirty = True        # it is a setting, and it is unsaved
             self._dirty = True
         elif action is Action.SET_CONFIG:
             self._apply_setting(payload.get("key", ""), payload.get("value"))
@@ -878,6 +885,10 @@ class PicFrame:
         elif action is Action.RESTART:
             self.request_restart()
         elif action is Action.QUIT:
+            # Under systemd a clean exit is not a stop -- Restart=always brings
+            # the frame straight back -- so say plainly that this was a quit and
+            # let the CLI exit with the status the unit file knows about.
+            self.quit_requested = True
             self._stop.set()
         self._publish()
 
@@ -955,79 +966,48 @@ class PicFrame:
         return getattr(self, "_folder_cache", [])
 
     def _apply_setting(self, key: str, value: Any) -> None:
+        """Write one setting and make the running frame match it.
+
+        Every surface ends up here -- the settings page, MQTT, `picframe3
+        config --set` -- so this is the one place that has to be careful: a
+        value arriving from the network must not be able to point the frame at
+        a file outside the places it is allowed to write, and a secret must not
+        be written into the log on its way past.
+        """
         if not key:
             return
         if key in uischema.SECRETS and value == uischema.REDACTED:
             return          # a masked secret read back and written unchanged
+        problem = uischema.check_path_setting(key, value, self.config)
+        if problem:
+            # The last line of defence, whichever surface the value came from.
+            _log.warning("refusing %s: %s", key, problem)
+            return
         try:
             applied = self.config.set(key, value)
         except (KeyError, ValueError, TypeError) as exc:
-            _log.warning("cannot set %s=%r: %s", key, value, exc)
+            _log.warning("cannot set %s: %s", key, exc)
             return
-        _log.info("config %s = %r", key, applied)
+        # Never the value itself for a secret: setting the broker password from
+        # the settings page used to write it into the journal and the log file,
+        # on a device whose logs nobody ever rotates.
+        shown = uischema.REDACTED if key in uischema.SECRETS else repr(applied)
+        _log.info("config %s = %s", key, shown)
         self._config_dirty = True
-        section = key.split(".")[0]
         if uischema.needs_restart(key):
             self._restart_needed.add(key)
-        if section == "viewer":
-            self.loader.options = self._prepare_options()
-            self._clock_minute = None
-            if self.current:
-                self._build_info_overlay(self.current)
-        elif section == "slideshow":
-            self.renderer.transition_name = self.config.slideshow.transition
-            self.renderer.transition_time = self.config.slideshow.transition_time
-            self.renderer.transition_pool = transitions.resolve_pool(
-                self.config.slideshow.transition_choices)
-            self.playlist.portrait_pairs = self.config.slideshow.portrait_pairs
-            self.playlist.recent_days = self.config.slideshow.recent_days
-            if key.endswith("order"):
-                self.playlist.set_order(self.config.slideshow.order)
-            self.loader.options = self._prepare_options()
-        elif section == "geo":
-            self._restyle_locations()
-        elif section == "display" and key.endswith("brightness"):
-            self.set_brightness(self.config.display.brightness)
-        elif section == "display" and key.endswith("background"):
-            self.renderer.background = tuple(self.config.display.background)
-        elif section == "logging" and key.endswith("level"):
-            logging.getLogger().setLevel(
-                getattr(logging, str(self.config.logging.level).upper(), logging.INFO))
-        elif section == "display" and key.endswith("rotate"):
-            self.renderer.rotate = self.config.display.rotate
-            self._clock_minute = None
-            if self.current:
-                self._build_info_overlay(self.current)
-        elif section == "health":
-            self.health.enabled = self.config.health.enabled
-            self.health.interval = max(5.0, float(self.config.health.interval))
-            self.health.disk_path = self._health_disk_path()
-            if self.health.enabled:
-                self.health.snapshot()
-        elif section == "network":
-            # The loop reads these attributes on every pass, so every one of
-            # them -- the watcher itself included -- takes effect at the next
-            # check without a restart.
-            cfg_net = self.config.network
-            self.network.target = cfg_net.target
-            self.network.interface = cfg_net.interface
-            self.network.interval = max(10.0, float(cfg_net.interval))
-            self.network.failures = max(1, int(cfg_net.failures))
-            self.network.attempts = max(1, int(cfg_net.attempts))
-            self.network.timeout = max(1.0, float(cfg_net.timeout))
-            self.network.cooldown = max(0.0, float(cfg_net.cooldown))
-            self.network.settle = max(0.0, float(cfg_net.settle))
-            self.network.repair = cfg_net.repair
-            self.network.enabled = cfg_net.enabled
-        elif section == "power":
-            self.power = PowerSchedule(self.config.power.schedule,
-                                       self.config.power.dim_schedule)
-        elif section == "library" and key.endswith("subfolder"):
-            self.playlist.filters.subfolder = self.config.library.subfolder
-            self.playlist.refresh()
-        self._dirty = True
+        self.applier.apply(key)
 
     def _reload_config(self) -> None:
+        """Re-read the config file and apply everything that changed.
+
+        This used to apply five settings out of sixty and then clear both
+        status flags, so the frame reported itself up to date while running the
+        old brightness, rotation, log level, playlist order and filters.  It
+        goes through the same table as every other change now, and the
+        "restart required" list is rebuilt from what actually changed rather
+        than emptied.
+        """
         if not self.config.source_path:
             return
         try:
@@ -1035,48 +1015,30 @@ class PicFrame:
         except Exception as exc:
             _log.error("cannot reload config: %s", exc)
             return
+        before = self.config.as_dict()
         self.config = fresh
-        self._restart_needed.clear()
+        changed = settings_module.changed_keys(before, fresh.as_dict())
+        self._restart_needed = settings_module.restart_required(changed)
+        self.applier.apply_all(changed)
+        # After applying, not before: applying the brightness goes through
+        # set_brightness(), which quite rightly marks the configuration dirty.
+        # Clearing first left every reload reporting unsaved changes for ever.
         self._config_dirty = False
-        self.loader.options = self._prepare_options()
-        self.power = PowerSchedule(fresh.power.schedule, fresh.power.dim_schedule)
-        self.renderer.transition_name = fresh.slideshow.transition
-        self.renderer.transition_time = fresh.slideshow.transition_time
-        self.renderer.transition_pool = transitions.resolve_pool(
-            fresh.slideshow.transition_choices)
         self._clock_minute = None
         self._dirty = True
-        _log.info("configuration reloaded")
-
-    async def _jump(self, payload: dict) -> None:
-        target = payload.get("id")
-        if target is None and payload.get("path"):
-            record = self.library.by_path(str(payload["path"]))
-            target = record.id if record else None
-        if target is None:
-            return
-        group = self.playlist.jump_to(int(target))
-        if group:
-            self.playlist._history.append(list(self.playlist.current_ids))
-            self.playlist.current_ids = [r.id for r in group]
-            self.loader.cancel_prefetch()
-            prepared = await self.loader.load([r.as_meta() for r in group])
-            if prepared is not None:
-                self.current = group
-                texture = Texture.from_image(prepared.image, srgb=True)
-                slide = Slide(texture, duration=self.config.slideshow.interval)
-                slide.meta = prepared
-                self.renderer.show(slide)
-                self._slide_started = time.monotonic()
-                self._next_change_at = self._slide_started + self.config.slideshow.interval
-                self._build_info_overlay(group)
-                self._info_until = self._slide_started + self.config.viewer.text_seconds
-                self._dirty = True
+        _log.info("configuration reloaded (%d settings changed)", len(changed))
 
     async def _delete_current(self, source: str = "") -> None:
         if not self.current:
             return
         record = self.current[0]
+        if not self.config.http.allow_delete and source in ("http", "mqtt"):
+            # The switch the settings page offers, and the one the reference
+            # documented, finally does something.  A key press or a GPIO button
+            # is somebody standing at the frame and is never refused.
+            _log.warning("refusing to remove %s: removal from the network is off",
+                         self.current[0].path)
+            return
         target_dir = os.path.expanduser(self.config.library.deleted_folder)
         os.makedirs(target_dir, exist_ok=True)
         destination = os.path.join(target_dir, os.path.basename(record.path))
@@ -1086,7 +1048,12 @@ class PicFrame:
             destination = os.path.join(target_dir, f"{stem}-{n}{ext}")
             n += 1
         try:
-            shutil.move(record.path, destination)
+            # Off the event loop.  The deleted folder is often on another
+            # filesystem -- a stick, a share -- and then this is a full copy:
+            # done inline, a two-gigabyte video froze the picture, the web
+            # interface and MQTT for minutes.
+            await asyncio.get_running_loop().run_in_executor(
+                None, shutil.move, record.path, destination)
         except OSError as exc:
             _log.error("cannot move %s aside: %s", record.path, exc)
             return
@@ -1098,6 +1065,7 @@ class PicFrame:
         self.removals.record(record, os.path.basename(destination), source=source)
         self.library.forget([record.path])
         self.playlist.refresh()
+        self.invalidate_stats()
         await self._advance()
 
     async def _restore_removed(self, stored_as: str) -> dict[str, Any]:
@@ -1128,7 +1096,8 @@ class PicFrame:
             destination = f"{stem}-restored-{n}{ext}" if n > 1 else f"{stem}-restored{ext}"
             n += 1
         try:
-            shutil.move(source_path, destination)
+            await asyncio.get_running_loop().run_in_executor(
+                None, shutil.move, source_path, destination)
         except OSError as exc:
             _log.error("cannot restore %s: %s", source_path, exc)
             return {"ok": False, "error": str(exc)}
@@ -1140,6 +1109,7 @@ class PicFrame:
             )
         if self.playlist is not None:
             self.playlist.refresh()
+        self.invalidate_stats()
         self._dirty = True
         return {"ok": True, "path": destination,
                 "moved": destination != entry.get("original_path")}
@@ -1163,6 +1133,32 @@ class PicFrame:
         self._dirty = True
         _log.info("display %s", "on" if on else "off")
 
+    def apply_power_schedule(self, *, force: bool = False) -> None:
+        """Follow the off-schedule without overruling the person in the room.
+
+        This ran every second and simply asserted the schedule's opinion, which
+        had two consequences and both of them were wrong.  With no schedule
+        configured -- the shipped default -- ``display_should_be_on()`` always
+        says yes, so switching the screen off from Home Assistant, the web page
+        or the keyboard was undone a second later and the display could not be
+        turned off at all.  And with ``power.enabled: false``, the reading most
+        people take as "I do not want a schedule", the answer was always no:
+        one second after startup the screen went dark and stayed dark.
+
+        A schedule is a thing with edges.  Act on them, and leave the display
+        alone in between.
+        """
+        cfg = self.config.power
+        if not cfg.enabled or not self.power.off_schedule:
+            self._scheduled_display = None
+            return
+        wanted = self.power.display_should_be_on()
+        if not force and wanted == self._scheduled_display:
+            return                       # no edge: a manual switch stands
+        self._scheduled_display = wanted
+        if wanted != self.display_on:
+            self.set_display(wanted)
+
     def set_brightness(self, value: float) -> None:
         value = max(0.0, min(1.0, float(value)))
         self.config.display.brightness = value
@@ -1170,6 +1166,9 @@ class PicFrame:
             self.renderer.brightness = value
         if self.backlight.available:
             self.backlight.set(value)
+        # It is a setting like any other, and a frame that says "no unsaved
+        # changes" after the brightness was turned down loses it on restart.
+        self._config_dirty = True
         self._dirty = True
 
     # ------------------------------------------------------------------
@@ -1195,13 +1194,19 @@ class PicFrame:
             await asyncio.sleep(1.0)
             now = time.monotonic()
 
-            wanted = self.power.display_should_be_on() and self.config.power.enabled
-            if wanted != self.display_on:
-                self.set_display(wanted)
-            scheduled = self.power.brightness(default=self.config.display.brightness)
-            if self.renderer is not None and abs(self.renderer.brightness - scheduled) > 0.01:
-                self.renderer.brightness = scheduled
-                self._dirty = True
+            self.apply_power_schedule()
+            # Only while the screen is meant to be showing something.  On a
+            # panel with no DPMS and no backlight, "off" *is* a brightness of
+            # zero in the shader -- and this line put it back a second later.
+            if self.display_on:
+                scheduled = self.power.brightness(
+                    default=self.config.display.brightness)
+                if (self.renderer is not None
+                        and abs(self.renderer.brightness - scheduled) > 0.01):
+                    self.renderer.brightness = scheduled
+                    self._dirty = True
+
+            self._roll_date_window()
 
             if cfg.library.rescan_interval > 0 and now - last_scan > cfg.library.rescan_interval:
                 last_scan = now
@@ -1211,6 +1216,7 @@ class PicFrame:
             # request a second, so a quiet trickle is the only polite way to
             # geocode a library, and it costs nothing once the cache is warm.
             if (self.geocoder is not None and self.scanner is not None
+                    and not self._backfilling
                     and now - self._location_backfill_at > 30.0):
                 self._location_backfill_at = now
                 asyncio.create_task(self._backfill_locations())
@@ -1223,11 +1229,39 @@ class PicFrame:
                 last_publish = now
                 self._publish()
 
+    def _roll_date_window(self) -> None:
+        """Re-resolve a rolling date filter when the day turns.
+
+        The window is stored as a rule and worked out afresh on every query, so
+        nothing is ever *wrong* -- but the selection the playlist is working
+        through was built yesterday.  "On this day" in particular would go on
+        showing yesterday's anniversary until something else happened to
+        refresh it.
+        """
+        if self.playlist is None or not self.playlist.filters.date_window:
+            return
+        today = time.strftime("%Y-%m-%d")
+        if today == self._window_day:
+            return
+        self._window_day = today
+        self.playlist.refresh()
+        _log.info("date filter re-resolved for %s (%d pictures)",
+                  today, self.playlist.size)
+        self._publish()
+
     async def _backfill_locations(self) -> None:
+        # Nominatim can take ten seconds to answer, or hang; without this guard
+        # a new run was started every thirty seconds regardless, and a slow
+        # server meant an unbounded pile of overlapping ones.
+        if self._backfilling:
+            return
+        self._backfilling = True
         try:
             resolved = await self.scanner.backfill_locations_async(limit=10)
         except Exception:  # pragma: no cover - network
             return
+        finally:
+            self._backfilling = False
         if resolved and self.current:
             fresh = self.library.get(self.current[0].id)
             if fresh is not None and fresh.location != self.current[0].location:
@@ -1240,6 +1274,7 @@ class PicFrame:
             return
         size_before = self.playlist.size
         self.playlist.refresh()
+        self.invalidate_stats()
         _log.info("library updated: %d -> %d pictures", size_before, self.playlist.size)
         if self._placeholder_shown and self.playlist.size:
             self._next_change_at = 0.0
@@ -1285,8 +1320,8 @@ class PicFrame:
             restart_required=sorted(self._restart_needed),
             unsaved_changes=self._config_dirty,
             can_restart=True,
-            library=self.library.stats() if self.library else {},
-            removed=self.removals.summary() if self.removals else {},
+            library=self._library_stats(),
+            removed=self._removed_summary(),
             current=self._current_payload(record),
             next_change_in=self._next_change_in(now),
             video=self._video_payload(),
@@ -1303,24 +1338,6 @@ class PicFrame:
             uptime=round(now - self.started, 1),
             fps=round(self._fps, 2),
         )
-
-    def _next_change_in(self, now: float) -> float:
-        """Seconds until the next slide.
-
-        While a video runs the deadline is only ever half a second ahead -- it
-        is pushed on every tick -- so reporting it verbatim would show a
-        countdown stuck at 0.5.  What is left of the film is the honest answer.
-        """
-        if self._video_playing():
-            left = []
-            rest_of_film = self.video.duration - self.video.position
-            if rest_of_film > 0 and not self.video.loop:
-                left.append(rest_of_film)    # looping starts it over instead
-            if self.video.max_seconds > 0:
-                left.append(max(0.0, self.video.max_seconds - self.video.elapsed))
-            if left:
-                return round(min(left), 1)
-        return round(max(0.0, self._next_change_at - now), 1)
 
     def _current_payload(self, record: Record | None) -> dict[str, Any]:
         if record is None:
@@ -1339,15 +1356,6 @@ class PicFrame:
         payload["has_position"] = (record.latitude is not None
                                    and record.longitude is not None)
         return payload
-
-    def _video_payload(self) -> dict[str, Any]:
-        if self.video is None or not self.video.playing:
-            return {}
-        return {
-            "playing": True,
-            "position": round(self.video.position, 1),
-            "duration": round(self.video.duration, 1),
-        }
 
     def _publish(self) -> None:
         self.bus.publish(self.state())
@@ -1381,6 +1389,14 @@ class PicFrame:
 
     def shutdown(self) -> None:
         _log.info("shutting down")
+        # Hand the screen back switched on.  Stopping the service during an
+        # off-period used to leave the monitor in DPMS-off with no console
+        # either, which from the sofa is indistinguishable from a dead Pi.
+        if not self.display_on:
+            try:
+                self.set_display(True)
+            except Exception:            # pragma: no cover - driver dependent
+                _log.debug("could not switch the display back on", exc_info=True)
         self._stop_video()
         if self.video is not None:
             self.video.close()

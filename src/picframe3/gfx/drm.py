@@ -18,6 +18,7 @@ import ctypes.util
 import logging
 import os
 import select
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -35,7 +36,13 @@ DRM_MODE_UNKNOWNCONNECTION = 3
 
 DRM_MODE_TYPE_PREFERRED = 1 << 3
 DRM_MODE_PAGE_FLIP_EVENT = 0x01
+#: Flip as soon as the scanout engine can rather than at the next vblank.  Only
+#: usable when the driver advertises DRM_CAP_ASYNC_PAGE_FLIP; asking for it
+#: without that capability fails the ioctl outright.
+DRM_MODE_PAGE_FLIP_ASYNC = 0x02
 DRM_MODE_FLAG_INTERLACE = 1 << 4
+
+DRM_CAP_ASYNC_PAGE_FLIP = 0x7
 
 DRM_MODE_DPMS_ON = 0
 DRM_MODE_DPMS_STANDBY = 1
@@ -157,6 +164,11 @@ PAGE_FLIP_CB = ctypes.CFUNCTYPE(
 VBLANK_CB = PAGE_FLIP_CB
 
 
+def _noop_event(fd, seq, sec, usec, data):  # pragma: no cover - C callback
+    """The event only has to be dequeued; its timestamp tells us nothing new."""
+    return None
+
+
 class EventContext(ctypes.Structure):
     _fields_ = [
         ("version", ctypes.c_int),
@@ -165,6 +177,22 @@ class EventContext(ctypes.Structure):
         ("page_flip_handler2", ctypes.c_void_p),
         ("sequence_handler", ctypes.c_void_p),
     ]
+
+
+# Building a libffi closure costs an mmap and an icache flush, and the two here
+# were being rebuilt for every single page flip -- sixty times a second for the
+# whole life of the frame.  They never change, so they are built once and the
+# context they live in is reused; keeping the module-level references alive is
+# also what stops ctypes from collecting the trampolines out from under libdrm.
+_VBLANK_HANDLER = VBLANK_CB(_noop_event)
+_PAGE_FLIP_HANDLER = PAGE_FLIP_CB(_noop_event)
+_EVENT_CONTEXT = EventContext(
+    version=2,
+    vblank_handler=_VBLANK_HANDLER,
+    page_flip_handler=_PAGE_FLIP_HANDLER,
+    page_flip_handler2=None,
+    sequence_handler=None,
+)
 
 
 # --------------------------------------------------------------------------
@@ -216,11 +244,31 @@ lib.drmIsMaster.restype = ctypes.c_int
 lib.drmIsMaster.argtypes = [ctypes.c_int]
 lib.drmGetDeviceNameFromFd2.restype = ctypes.c_char_p
 lib.drmGetDeviceNameFromFd2.argtypes = [ctypes.c_int]
+# Old libdrm builds may not export drmGetCap; a missing capability query only
+# means "assume the feature is absent", which is the safe answer anyway.
+_drm_get_cap = getattr(lib, "drmGetCap", None)
+if _drm_get_cap is not None:
+    _drm_get_cap.restype = ctypes.c_int
+    _drm_get_cap.argtypes = [ctypes.c_int, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint64)]
 
 
 # --------------------------------------------------------------------------
 # Pythonic layer
 # --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FlipResult:
+    """What one ``page_flip`` call actually achieved.
+
+    Both halves matter to the caller and neither implies the other: a flip can
+    be refused while an older one completes, and a flip can be queued while
+    nothing completes.  ``queued`` says whether the kernel took the new buffer,
+    ``completions`` how many earlier flips were confirmed finished.
+    """
+
+    queued: bool
+    completions: int = 0
+
 
 @dataclass
 class Output:
@@ -243,6 +291,12 @@ class Output:
 class DrmDevice:
     """An open DRM master on a card node."""
 
+    #: Total time a flip event is waited for before the frame is given up on.
+    #: One ``select`` timeout is not enough to conclude anything -- a signal or
+    #: a momentarily busy driver can cut the wait short -- but waiting forever
+    #: would hang the whole application on a wedged GPU, so the wait is bounded.
+    flip_deadline = 3.0
+
     def __init__(self, path: str | None = None):
         self.path = path or self._autodetect()
         try:
@@ -254,6 +308,14 @@ class DrmDevice:
         self._saved_crtc: Crtc | None = None
         self._dpms_prop: int | None = None
         self._dpms_connector: int | None = None
+        #: True between queueing a flip and collecting its completion event.
+        #: Without it a timed-out wait leaves the event in the fd, and the next
+        #: wait returns instantly on that stale event while the buffer it
+        #: belongs to is still being scanned out.
+        self._flip_pending = False
+        #: When that flip was queued, so a completion that never arrives can be
+        #: written off rather than freezing the frame for good.
+        self._flip_since = 0.0
 
     @staticmethod
     def _autodetect() -> str:
@@ -377,6 +439,24 @@ class DrmDevice:
             )
         return outs[0]
 
+    # -- capabilities ------------------------------------------------------
+    def get_cap(self, cap: int) -> int:
+        if _drm_get_cap is None:
+            return 0
+        value = ctypes.c_uint64()
+        if _drm_get_cap(self.fd, cap, ctypes.byref(value)) != 0:
+            return 0
+        return value.value
+
+    @property
+    def supports_async_flip(self) -> bool:
+        """Whether the driver accepts DRM_MODE_PAGE_FLIP_ASYNC.
+
+        Asking for an async flip on a driver that does not support it makes the
+        ioctl fail, so this has to be checked rather than attempted.
+        """
+        return bool(self.get_cap(DRM_CAP_ASYNC_PAGE_FLIP))
+
     # -- master ------------------------------------------------------------
     def become_master(self) -> None:
         if lib.drmIsMaster(self.fd):
@@ -427,30 +507,97 @@ class DrmDevice:
         mode = ctypes.byref(s.mode) if s.mode_valid else None
         lib.drmModeSetCrtc(self.fd, s.crtc_id, s.buffer_id, s.x, s.y, conns, 1, mode)
 
-    def page_flip(self, crtc_id: int, fb_id: int, timeout: float = 1.0) -> bool:
-        """Queue a flip for the next vblank and block until it completes.
+    def page_flip(self, crtc_id: int, fb_id: int, timeout: float = 1.0, *,
+                  asynchronous: bool = False, wait: bool = True) -> FlipResult:
+        """Queue a flip and report what happened, as a :class:`FlipResult`.
 
-        Returns False on timeout so the caller can keep running (a stalled
-        compositor-less frame should not deadlock the whole application).
+        The caller needs the completion count rather than just "did it work":
+        a GBM buffer may only be handed back once the flip that replaced it *on
+        screen* has been confirmed, and a flip that was merely queued proves
+        nothing about the buffer it displaced.
+
+        Any completion still outstanding from an earlier flip is collected
+        first.  The kernel queues exactly one event per flip, so leaving one in
+        the fd would make the next wait return immediately on the stale event
+        and report a flip that is still in the air.
+
+        ``asynchronous`` asks the driver to flip as soon as it can instead of
+        at the next vblank, and ``wait=False`` returns once the flip is queued
+        -- together they are the ``vsync: false`` path, where the completion is
+        collected at the start of the following frame instead.
         """
-        rc = lib.drmModePageFlip(self.fd, crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, None)
+        collected = 0
+        if self._flip_pending:
+            collected += self._collect_flip(timeout)
+            if self._flip_pending:
+                # Still in the air: the CRTC will not take another flip, and
+                # trying anyway would only earn an EBUSY.
+                return FlipResult(queued=False, completions=collected)
+        flags = DRM_MODE_PAGE_FLIP_EVENT
+        if asynchronous:
+            flags |= DRM_MODE_PAGE_FLIP_ASYNC
+        rc = lib.drmModePageFlip(self.fd, crtc_id, fb_id, flags, None)
         if rc != 0:
             if -rc in (16, 11):  # EBUSY / EAGAIN -- a flip is still pending
-                return False
+                return FlipResult(queued=False, completions=collected)
             raise OSError(-rc, "drmModePageFlip failed")
-        return self.wait_flip(timeout)
+        self._flip_pending = True
+        self._flip_since = time.monotonic()
+        if wait:
+            collected += self._collect_flip(timeout)
+        return FlipResult(queued=True, completions=collected)
 
     def wait_flip(self, timeout: float = 1.0) -> bool:
-        ready, _, _ = select.select([self.fd], [], [], timeout)
-        if not ready:
-            _log.warning("page flip timed out after %.1fs", timeout)
-            return False
-        ctx = EventContext()
-        ctx.version = 2
-        ctx.vblank_handler = VBLANK_CB(_noop_event)
-        ctx.page_flip_handler = PAGE_FLIP_CB(_noop_event)
-        lib.drmHandleEvent(self.fd, ctypes.byref(ctx))
-        return True
+        """Block until the pending flip completes.  True if one was collected."""
+        return self._collect_flip(timeout) > 0
+
+    def _collect_flip(self, timeout: float = 1.0) -> int:
+        """Dequeue the outstanding flip event, retrying up to ``timeout``.
+
+        A single ``select`` timeout used to be treated as "this flip is lost",
+        which was both premature and unrecoverable: the event stayed queued and
+        every later wait read it instead of the one it was waiting for.
+
+        The caller's timeout is honoured rather than raised to
+        ``flip_deadline``, because this blocks the loop that also serves HTTP,
+        MQTT and the video tick, and because the shutdown path deliberately
+        asks for a tenth of a second.  ``flip_deadline`` is the *give-up*
+        point: once a flip has been outstanding that long, waiting for it
+        again on every frame would freeze the picture for good, so the flip is
+        written off, the pending flag is cleared and the next frame is allowed
+        to try.  A driver that then delivers the stale event early costs one
+        frame of tearing; refusing to flip ever again costs the appliance.
+        """
+        if not self._flip_pending:
+            return 0
+        if self._flip_since and time.monotonic() - self._flip_since > self.flip_deadline:
+            _log.warning("writing off a page flip that never completed after "
+                         "%.1fs; resuming", self.flip_deadline)
+            self._flip_pending = False
+            self._flip_since = 0.0
+            return 0
+        step = max(0.001, min(timeout, 0.25))
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                _log.debug("no page-flip event within %.2fs; still pending", timeout)
+                return 0
+            try:
+                ready, _, _ = select.select([self.fd], [], [], min(step, remaining))
+            except InterruptedError:  # pragma: no cover - signal during select
+                continue
+            if not ready:
+                _log.debug("page flip still in flight after %.1fs; waiting", step)
+                continue
+            lib.drmHandleEvent(self.fd, ctypes.byref(_EVENT_CONTEXT))
+            self._flip_pending = False
+            self._flip_since = 0.0
+            return 1
+
+    @property
+    def flip_pending(self) -> bool:
+        return self._flip_pending
 
     # -- power -------------------------------------------------------------
     def _find_dpms(self, connector_id: int) -> int | None:
@@ -504,12 +651,12 @@ class DrmDevice:
 
     def close(self) -> None:
         if getattr(self, "fd", None) is not None and self.fd >= 0:
+            # Closing the fd discards any queued event with it, so nothing is
+            # left pending for a later device on the same card to trip over.
+            self._flip_pending = False
+            self._flip_since = 0.0
             os.close(self.fd)
             self.fd = -1
-
-
-def _noop_event(fd, seq, sec, usec, data):  # pragma: no cover - callback
-    return None
 
 
 def list_outputs() -> Iterator[tuple[str, Output]]:

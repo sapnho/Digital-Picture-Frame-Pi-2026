@@ -15,22 +15,36 @@ class ShaderError(RuntimeError):
 
 
 def _compile(kind: int, source: str, label: str) -> int:
+    """Compile one shader, or raise ``ShaderError`` leaving nothing behind.
+
+    A shader that fails to compile still exists as a GL object.  Since a failed
+    transition is something the renderer recovers from rather than dies of, the
+    name has to be deleted here or every failed attempt would leak one.
+    """
     shader = gl.glCreateShader(kind)
-    src = source.encode()
-    arr = (ctypes.c_char_p * 1)(src)
-    length = (ctypes.c_int * 1)(len(src))
-    gl.glShaderSource(shader, 1, arr, length)
-    gl.glCompileShader(shader)
-    status = ctypes.c_int()
-    gl.glGetShaderiv(shader, gl.COMPILE_STATUS, ctypes.byref(status))
-    if not status.value:
-        log_len = ctypes.c_int()
-        gl.glGetShaderiv(shader, gl.INFO_LOG_LENGTH, ctypes.byref(log_len))
-        buf = ctypes.create_string_buffer(max(log_len.value, 1))
-        gl.glGetShaderInfoLog(shader, len(buf), None, buf)
-        numbered = "\n".join(f"{i + 1:3d}| {line}" for i, line in enumerate(source.splitlines()))
-        raise ShaderError(f"{label} failed to compile:\n{buf.value.decode()}\n{numbered}")
-    return shader
+    if not shader:
+        raise ShaderError(f"{label}: glCreateShader returned 0")
+    ok = False
+    try:
+        src = source.encode()
+        arr = (ctypes.c_char_p * 1)(src)
+        length = (ctypes.c_int * 1)(len(src))
+        gl.glShaderSource(shader, 1, arr, length)
+        gl.glCompileShader(shader)
+        status = ctypes.c_int()
+        gl.glGetShaderiv(shader, gl.COMPILE_STATUS, ctypes.byref(status))
+        if not status.value:
+            log_len = ctypes.c_int()
+            gl.glGetShaderiv(shader, gl.INFO_LOG_LENGTH, ctypes.byref(log_len))
+            buf = ctypes.create_string_buffer(max(log_len.value, 1))
+            gl.glGetShaderInfoLog(shader, len(buf), None, buf)
+            numbered = "\n".join(f"{i + 1:3d}| {line}" for i, line in enumerate(source.splitlines()))
+            raise ShaderError(f"{label} failed to compile:\n{buf.value.decode()}\n{numbered}")
+        ok = True
+        return shader
+    finally:
+        if not ok:
+            gl.glDeleteShader(shader)
 
 
 class Program:
@@ -38,24 +52,41 @@ class Program:
 
     def __init__(self, vertex_src: str, fragment_src: str, label: str = "program"):
         self.label = label
-        vs = _compile(gl.VERTEX_SHADER, vertex_src, f"{label}.vert")
-        fs = _compile(gl.FRAGMENT_SHADER, fragment_src, f"{label}.frag")
-        self.id = gl.glCreateProgram()
-        gl.glAttachShader(self.id, vs)
-        gl.glAttachShader(self.id, fs)
-        gl.glLinkProgram(self.id)
-        status = ctypes.c_int()
-        gl.glGetProgramiv(self.id, gl.LINK_STATUS, ctypes.byref(status))
-        if not status.value:
-            log_len = ctypes.c_int()
-            gl.glGetProgramiv(self.id, gl.INFO_LOG_LENGTH, ctypes.byref(log_len))
-            buf = ctypes.create_string_buffer(max(log_len.value, 1))
-            gl.glGetProgramInfoLog(self.id, len(buf), None, buf)
-            raise ShaderError(f"{label} failed to link: {buf.value.decode()}")
-        gl.glDeleteShader(vs)
-        gl.glDeleteShader(fs)
+        # Set first so a failure anywhere below still leaves a Program whose
+        # close() is harmless, and so the cleanup here can tell "no program
+        # object yet" from "one that has to be deleted".
+        self.id = 0
         self._uniforms: dict[str, int] = {}
         self._attribs: dict[str, int] = {}
+        vs = fs = 0
+        try:
+            vs = _compile(gl.VERTEX_SHADER, vertex_src, f"{label}.vert")
+            fs = _compile(gl.FRAGMENT_SHADER, fragment_src, f"{label}.frag")
+            self.id = gl.glCreateProgram()
+            gl.glAttachShader(self.id, vs)
+            gl.glAttachShader(self.id, fs)
+            gl.glLinkProgram(self.id)
+            status = ctypes.c_int()
+            gl.glGetProgramiv(self.id, gl.LINK_STATUS, ctypes.byref(status))
+            if not status.value:
+                log_len = ctypes.c_int()
+                gl.glGetProgramiv(self.id, gl.INFO_LOG_LENGTH, ctypes.byref(log_len))
+                buf = ctypes.create_string_buffer(max(log_len.value, 1))
+                gl.glGetProgramInfoLog(self.id, len(buf), None, buf)
+                raise ShaderError(f"{label} failed to link: {buf.value.decode()}")
+        except Exception:
+            # A link failure leaves a perfectly real program object behind, and
+            # the caller may well go on to try another shader, so it has to be
+            # deleted rather than left to the process exit.
+            self.close()
+            raise
+        finally:
+            # The shaders are attached; deleting the names now means they go
+            # away with the program, on the success and the failure path alike.
+            if vs:
+                gl.glDeleteShader(vs)
+            if fs:
+                gl.glDeleteShader(fs)
 
     def use(self) -> None:
         gl.glUseProgram(self.id)

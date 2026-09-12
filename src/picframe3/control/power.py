@@ -13,6 +13,7 @@ because "22:30-07:00" is the obvious way to say it.
 
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import logging
 import re
@@ -49,44 +50,93 @@ class TimeRange:
         return minutes >= self.start or minutes < self.end     # wraps midnight
 
 
-def _ranges_for(schedule: dict, when: _dt.datetime) -> list[tuple[TimeRange, object]]:
-    """Collect the ranges that apply to ``when``'s weekday.
+class _ParsedSchedule:
+    """One schedule dict, parsed once.
 
-    Accepts either ``{"all": ["22:00-07:00"]}`` (a list of ranges) or
-    ``{"20:00-23:00": 0.4}`` (a range mapped to a value).
+    The maintenance loop asks the schedule what it should be doing every
+    second.  Parsing the dict on every one of those calls was not merely
+    wasteful: a range the owner mistyped produced a warning per evaluation, so
+    a single bad character in the config wrote 86 400 lines a day into the
+    journal and, on a frame that logs to the card, eventually filled it.  The
+    dict is small and changes almost never, so it is parsed when it changes and
+    the result is kept -- and a parse failure is therefore reported once, when
+    it happens, which is also when it is useful.
     """
-    day = _DAYS[when.weekday()]
-    today_aliases = {"all", "daily", "*", day,
-                     "weekday" if when.weekday() < 5 else "weekend"}
-    day_keys = set(_DAYS) | {"all", "daily", "*", "weekday", "weekend"}
-    out: list[tuple[TimeRange, object]] = []
-    for key, value in (schedule or {}).items():
-        key_l = str(key).strip().lower()
-        if key_l in day_keys:
-            if key_l not in today_aliases:
-                continue                      # a rule for some other day
-            items = value if isinstance(value, (list, tuple)) else [value]
-            for item in items:
-                rng = TimeRange.parse(str(item))
-                if rng:
-                    out.append((rng, True))
-        else:
-            rng = TimeRange.parse(key_l)
-            if rng is not None:
-                out.append((rng, value))
-    return out
+
+    def __init__(self, schedule: dict | None):
+        #: The dict as it was when this was built.  Compared (not merely
+        #: identity-checked) on every use, so a schedule edited in place is
+        #: noticed just as reliably as one replaced wholesale.
+        self.source = copy.deepcopy(schedule or {})
+        #: One entry per usable range, in the order the config wrote them:
+        #: the weekday key it lives under (None for a range that is itself the
+        #: key), the range, and the value it carries.  Source order is kept
+        #: because the dimming rules are applied last-match-wins.
+        self.rules: list[tuple[str | None, TimeRange, object]] = []
+        self._parse()
+
+    def _parse(self) -> None:
+        day_keys = set(_DAYS) | {"all", "daily", "*", "weekday", "weekend"}
+        for key, value in (self.source or {}).items():
+            key_l = str(key).strip().lower()
+            if key_l in day_keys:
+                items = value if isinstance(value, (list, tuple)) else [value]
+                for item in items:
+                    rng = TimeRange.parse(str(item))
+                    if rng is not None:
+                        self.rules.append((key_l, rng, True))
+            else:
+                rng = TimeRange.parse(key_l)
+                if rng is not None:
+                    self.rules.append((None, rng, value))
+
+    def matches(self, schedule: dict | None) -> bool:
+        """Whether this parse is still the parse of ``schedule``."""
+        return self.source == (schedule or {})
+
+    def for_day(self, when: _dt.datetime) -> list[tuple[TimeRange, object]]:
+        """The ranges that apply on ``when``'s weekday, already parsed."""
+        day = _DAYS[when.weekday()]
+        today = {"all", "daily", "*", day,
+                 "weekday" if when.weekday() < 5 else "weekend"}
+        return [(rng, value) for key, rng, value in self.rules
+                if key is None or key in today]
 
 
 class PowerSchedule:
+    """When the screen is off, and how bright it is when it is on.
+
+    Both schedules are parsed lazily and kept until the dict they came from
+    actually changes, because this object is consulted once a second for the
+    life of the frame and the answer only moves when the owner edits a setting.
+    """
+
     def __init__(self, off_schedule: dict | None = None,
                  dim_schedule: dict | None = None):
         self.off_schedule = off_schedule or {}
         self.dim_schedule = dim_schedule or {}
+        self._off_parsed: _ParsedSchedule | None = None
+        self._dim_parsed: _ParsedSchedule | None = None
+
+    def _parsed(self, which: str) -> _ParsedSchedule:
+        """The parsed form of one schedule, rebuilt only when it has changed.
+
+        The attributes are public and the config layer replaces them, so the
+        cache is validated against the dict rather than trusted -- a stale
+        parse would have the screen turning off at last week's times.
+        """
+        attribute = f"_{which}_parsed"
+        schedule = getattr(self, f"{which}_schedule")
+        parsed = getattr(self, attribute)
+        if parsed is None or not parsed.matches(schedule):
+            parsed = _ParsedSchedule(schedule)
+            setattr(self, attribute, parsed)
+        return parsed
 
     def display_should_be_on(self, when: _dt.datetime | None = None) -> bool:
         when = when or _dt.datetime.now()
         minutes = when.hour * 60 + when.minute
-        for rng, _ in _ranges_for(self.off_schedule, when):
+        for rng, _ in self._parsed("off").for_day(when):
             if rng.contains(minutes):
                 return False
         return True
@@ -96,7 +146,7 @@ class PowerSchedule:
         when = when or _dt.datetime.now()
         minutes = when.hour * 60 + when.minute
         value = default
-        for rng, level in _ranges_for(self.dim_schedule, when):
+        for rng, level in self._parsed("dim").for_day(when):
             if rng.contains(minutes):
                 try:
                     value = max(0.05, min(1.0, float(level)))

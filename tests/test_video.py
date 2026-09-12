@@ -123,8 +123,10 @@ def test_max_seconds_stops_the_player_itself(player):
     _age(player, 2.0)
     player.poll()
     assert not player.playing
-    # Paused, not torn down: the last frame stays on screen to be faded out.
-    assert FakeGst.last_pipeline.state == FakeGst.State.PAUSED
+    # Torn down, not left paused.  The last frame is already a texture and
+    # stays on screen for the crossfade either way; what a paused pipeline does
+    # keep is the one hardware decoder the Pi has, and the next video needs it.
+    assert FakeGst.last_pipeline.state == FakeGst.State.NULL
 
 
 def test_end_of_stream_ends_playback_when_not_looping(player):
@@ -309,3 +311,81 @@ def test_the_countdown_reports_what_is_left_of_the_film():
 
     frame.video.max_seconds, frame.video.elapsed = 30.0, 12.0
     assert frame._next_change_in(time.monotonic()) == pytest.approx(18.0)
+
+
+# ---------------------------------------------------------------------------
+# Poster frames: the loader thread must always come back
+# ---------------------------------------------------------------------------
+
+class FakePosterSink:
+    """Records what was pulled, and how patiently."""
+
+    def __init__(self, sample=None):
+        self.sample = sample
+        self.calls = []
+
+    def emit(self, name, *args):
+        self.calls.append((name, args))
+        return self.sample
+
+
+class FakePosterPipeline:
+    def __init__(self, sink, change):
+        self.sink = sink
+        self.change = change
+        self.states = []
+
+    def get_by_name(self, name):
+        return self.sink
+
+    def set_state(self, state):
+        self.states.append(state)
+
+    def get_state(self, timeout):
+        return self.change, None, None
+
+    def query_duration(self, fmt):
+        return False, 0
+
+
+def _poster_gst(monkeypatch, sink, change):
+    """FakeGst wired up for poster_frame, plus the pipeline it will build."""
+    pipeline = FakePosterPipeline(sink, change)
+    gst = types.SimpleNamespace(
+        SECOND=FakeGst.SECOND,
+        State=FakeGst.State,
+        Format=FakeGst.Format,
+        SeekFlags=FakeGst.SeekFlags,
+        MapFlags=FakeGst.MapFlags,
+        StateChangeReturn=types.SimpleNamespace(SUCCESS="success", ASYNC="async",
+                                               FAILURE="failure"),
+        parse_launch=lambda desc: pipeline,
+    )
+    monkeypatch.setattr(video_module, "_gst_ready", True)
+    monkeypatch.setattr(video_module, "Gst", gst)
+    return gst, pipeline
+
+
+def test_a_video_that_never_prerolls_does_not_hang_the_loader(monkeypatch):
+    """The blocker: one broken file used to take a loader thread with it.
+
+    ``pull-preroll`` blocks for ever, and the state change that said the file
+    was never going to preroll was thrown away.  A handful of such files and
+    the frame has no loader threads left.
+    """
+    sink = FakePosterSink()
+    gst, pipeline = _poster_gst(monkeypatch, sink, "failure")
+
+    assert video_module.poster_frame("/x/broken.mp4", (32, 24), timeout=1.0) is None
+    assert [name for name, _ in sink.calls] == [], "it waited for a preroll anyway"
+    assert pipeline.states[-1] == FakeGst.State.NULL, "the decoder was not released"
+
+
+def test_the_preroll_pull_always_has_a_deadline(monkeypatch):
+    sink = FakePosterSink(sample=None)
+    gst, pipeline = _poster_gst(monkeypatch, sink, "success")
+
+    assert video_module.poster_frame("/x/slow.mp4", (32, 24), timeout=2.0) is None
+    assert [name for name, _ in sink.calls] == ["try-pull-preroll"]
+    assert sink.calls[0][1] == (2 * FakeGst.SECOND,)
+    assert pipeline.states[-1] == FakeGst.State.NULL

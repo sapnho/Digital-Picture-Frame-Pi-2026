@@ -10,7 +10,11 @@
                                          │
                          ┌───────────────▼──────────────────────────┐
                          │            PicFrame (app.py)             │
-                         │  slideshow state machine, timing, power  │
+                         │   wiring, render loop, power, overlays   │
+                         │  SlideshowController (slideshow.py):     │
+                         │   what is on screen, and for how long    │
+                         │  ConfigApplier (settings.py):            │
+                         │   one table, setting → effect            │
                          └───┬───────────────┬──────────────┬───────┘
                              │               │              │
               ┌──────────────▼───┐  ┌────────▼───────┐  ┌───▼────────────┐
@@ -28,6 +32,26 @@
               └──────────────────┘                   │  the screen  │
                                                      └──────────────┘
 ```
+
+## Where the slideshow lives
+
+`app.py` is the appliance: it builds everything, runs the render loop, keeps
+the overlays and the power schedule, and answers for the whole frame in
+`state()`. What it deliberately does *not* hold any more is the slideshow.
+
+`slideshow.py` has one implementation of "show this picture", used by the next
+and previous commands, by the jump from the web gallery, and by the first slide
+at startup — and one `asyncio.Lock` around it. Preparing a slide takes a second
+or two on a Pi and the coroutine yields while it happens; before the lock, a
+key press in that window ran a second advance concurrently, drew from the
+playlist twice and left the caption describing one picture while the screen
+showed another.
+
+`settings.py` is the other half of the same idea: one table mapping a changed
+setting to its effect on the running frame, used both when a single setting
+arrives from MQTT or the settings page and when the whole config file is
+re-read. There used to be three partial implementations of that, and the
+reload path applied about a tenth of what it then reported as applied.
 
 ## The display path
 
@@ -167,3 +191,39 @@ container. `tests/test_render.py` runs all fifteen transition shaders through
 real GLES and reads the pixels back; `picframe3 demo` renders a contact sheet of
 transitions, mats and overlays to a PNG. Every screenshot in this project was
 produced that way.
+
+## What CI does not cover
+
+Worth knowing before trusting a green tick. CI runs the renderer against
+llvmpipe, checks that `docs/CONFIG.md` and `config/picframe3.example.yaml`
+still match the dataclasses, lints the shell, verifies the systemd unit with
+`systemd-analyze`, and installs the wheel into a clean virtual environment to
+prove every data file the frame opens at runtime is really inside it.
+
+It does not, and largely cannot, cover:
+
+- **`packaging/install.sh` actually running.** It is parsed and linted, never
+  executed: it installs apt packages, creates users' groups and writes to
+  `/etc`, and a runner is not a Pi. Everything it does on a fresh machine —
+  the download path, the apt fallback that installs packages one at a time,
+  the venv rebuild after a Python upgrade — is tested by hand.
+- **The wizard's system changes.** Writing the unit, the udev rule, the polkit
+  rule and the Samba block all need root and a real systemd, udev, polkit and
+  Samba. The unit *text* is verified; the act of installing it is not.
+- **`/boot/firmware/cmdline.txt`.** No runner has one. The single-line rule and
+  the backup are enforced in code and reviewed by reading.
+- **Real hardware.** No DRM master, no KMS page flip, no vsync, no DSI panel,
+  no HDMI hotplug, no v3d driver. llvmpipe compiles the same shaders and
+  produces the same pixels, but says nothing about frame pacing, tearing, or
+  what the Pi's GPU does with a 4K texture.
+- **GStreamer video playback.** PyGObject comes from apt through
+  `--system-site-packages`, which is an arrangement no CI job reproduces.
+- **MQTT against a real broker, and Home Assistant discovery.** The payloads
+  are unit-tested; that Home Assistant makes the entities it should is not.
+- **Anything that takes time.** Thermal throttling, undervoltage, an SD card
+  filling up, a Wi-Fi link dropping at 3am and the watchdog mending it,
+  inotify under a kernel watch limit — the failures a frame on a wall actually
+  has are all long-running, and none of them fit in a CI job.
+- **Upgrading.** Running the installer over an older install, and the OS
+  upgrade that breaks a venv, are single-shot situations on a machine with
+  history. CI always starts from nothing.

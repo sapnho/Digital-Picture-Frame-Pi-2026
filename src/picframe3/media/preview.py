@@ -24,6 +24,7 @@ def render_preview(path: str, is_video: bool = False,
     first frame will not decode -- all of them mean "no picture this time",
     which every caller can live with.
     """
+    opened = None
     try:
         from PIL import Image, ImageOps
 
@@ -34,7 +35,11 @@ def render_preview(path: str, is_video: bool = False,
             if image is None:
                 return None
         else:
-            image = Image.open(path)
+            # Kept in its own name so the finally below can close it: Image.open
+            # holds the file open until it is, and this runs once per thumbnail
+            # on a web page full of them -- enough to run a long-lived frame out
+            # of file descriptors.
+            opened = image = Image.open(path)
             image.draft("RGB", size)          # JPEG DCT scaling: much faster
             image = ImageOps.exif_transpose(image)
         image = image.convert("RGB")
@@ -45,3 +50,6 @@ def render_preview(path: str, is_video: bool = False,
     except Exception as exc:
         _log.debug("preview failed for %s: %s", path, exc)
         return None
+    finally:
+        if opened is not None:
+            opened.close()

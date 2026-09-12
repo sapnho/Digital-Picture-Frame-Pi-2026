@@ -19,6 +19,24 @@ _log = logging.getLogger(__name__)
 _MAX_TEXTURE_SIZE: int | None = None
 
 
+def _pixels(data):
+    """A pointer ctypes can pass as ``const void *`` without copying.
+
+    ``bytes`` goes straight through, which matters: the data has already been
+    copied once by ``image.tobytes()`` (or by the video decoder), and building a
+    ``ctypes`` array from it copied every byte a second time -- several
+    megabytes per upload, thirty times a second on the video path.  A writable
+    buffer such as a ``bytearray`` is wrapped in place; only a read-only buffer
+    that is not ``bytes`` has to be copied, because ``from_buffer`` refuses it.
+    """
+    if isinstance(data, bytes):
+        return data
+    try:
+        return (ctypes.c_ubyte * len(data)).from_buffer(data)
+    except TypeError:  # pragma: no cover - read-only memoryview and friends
+        return (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+
+
 def max_texture_size() -> int:
     global _MAX_TEXTURE_SIZE
     if _MAX_TEXTURE_SIZE is None:
@@ -68,11 +86,18 @@ class Texture:
 
         arr = np.ascontiguousarray(array[::-1] if flip else array, dtype=np.uint8)
         h, w = arr.shape[:2]
-        if arr.shape[2] == 3:
+        if arr.ndim == 2:
+            # A greyscale frame has no channel axis at all, and indexing one
+            # that is not there is an IndexError rather than a bad picture.
+            arr = arr[:, :, None]
+        channels = arr.shape[2]
+        if channels in (1, 3):
             rgba = np.empty((h, w, 4), dtype=np.uint8)
-            rgba[..., :3] = arr
+            rgba[..., :3] = arr                      # broadcasts for greyscale
             rgba[..., 3] = 255
             arr = rgba
+        elif channels != 4:
+            raise ValueError(f"expected 1, 3 or 4 channels, got {channels}")
         return cls.from_bytes(w, h, arr.tobytes(), srgb=srgb, mipmap=mipmap)
 
     @classmethod
@@ -82,9 +107,8 @@ class Texture:
         gl.glBindTexture(gl.TEXTURE_2D, tex.id)
         gl.glPixelStorei(gl.UNPACK_ALIGNMENT, 1)
         internal = gl.SRGB8_ALPHA8 if srgb else gl.RGBA8
-        buf = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
         gl.glTexImage2D(gl.TEXTURE_2D, 0, internal, width, height, 0,
-                        gl.RGBA, gl.UNSIGNED_BYTE, ctypes.byref(buf))
+                        gl.RGBA, gl.UNSIGNED_BYTE, _pixels(data))
         tex._configure(mipmap, anisotropy)
         gl.glBindTexture(gl.TEXTURE_2D, 0)
         return tex
@@ -128,15 +152,15 @@ class Texture:
         h = height or self.height
         gl.glBindTexture(gl.TEXTURE_2D, self.id)
         gl.glPixelStorei(gl.UNPACK_ALIGNMENT, 1)
-        buf = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+        pixels = _pixels(data)
         if (w, h) != (self.width, self.height):
             internal = gl.SRGB8_ALPHA8 if self.srgb else gl.RGBA8
             gl.glTexImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0,
-                            gl.RGBA, gl.UNSIGNED_BYTE, ctypes.byref(buf))
+                            gl.RGBA, gl.UNSIGNED_BYTE, pixels)
             self.width, self.height = w, h
         else:
             gl.glTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h,
-                               gl.RGBA, gl.UNSIGNED_BYTE, ctypes.byref(buf))
+                               gl.RGBA, gl.UNSIGNED_BYTE, pixels)
         gl.glBindTexture(gl.TEXTURE_2D, 0)
 
     # -- use ---------------------------------------------------------------

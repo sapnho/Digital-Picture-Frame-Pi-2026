@@ -12,7 +12,21 @@ import sys
 from . import __version__
 from .config import DEFAULT_CONFIG_PATHS, Config
 
+# picframe3 is not on PyPI, so `pip install picframe3[...]` is a 404 and was
+# the wrong half of every repair hint doctor printed.  Installing from the
+# repository is what works, and the definitions live in picframe3.install so
+# that every module reporting a missing extra -- the web server, MQTT, evdev,
+# GPIO -- names the same command.
+from .install import install_hint as _install_hint
+from .install import pip_command as _pip
+
 _log = logging.getLogger("picframe3")
+
+#: Exit status for the `quit` action. 128 + SIGTERM, the conventional "this
+#: was told to stop", and what `RestartPreventExitStatus=143` in
+#: packaging/picframe3.service keys off so systemd leaves the frame stopped.
+QUIT_EXIT_CODE = 143
+
 
 
 # --------------------------------------------------------------------------
@@ -90,6 +104,16 @@ def cmd_run(args) -> int:
 
     if frame.restart_requested:
         return _restart(frame)
+    # `quit` means stop, and under systemd a clean exit does not stop anything:
+    # the unit has Restart=always, so ESC, Q, the `quit` API action and the
+    # MQTT command all exited 0 and had the frame back on screen five seconds
+    # later. Exiting 143 instead is what RestartPreventExitStatus=143 in the
+    # unit keys off. Started by hand there is no supervisor and the status is
+    # simply what the shell reports.
+    if getattr(frame, "quit_requested", False):
+        _log.info("quit requested; exiting %d so the frame stays stopped",
+                  QUIT_EXIT_CODE)
+        return QUIT_EXIT_CODE
     return code
 
 
@@ -142,6 +166,7 @@ def cmd_scan(args) -> int:
         include_videos=config.library.include_videos,
         ignore_hidden=config.library.ignore_hidden,
         exclude=config.library.exclude,
+        prune_max_fraction=config.library.prune_max_fraction,
     )
 
     def progress(n: int, path: str) -> None:
@@ -276,7 +301,7 @@ def cmd_doctor(args) -> int:
             print("     → optional: sudo apt install libraqm0  (shaping for "
                   "Arabic/Hebrew/Indic captions)")
     except Exception as exc:
-        ok &= check("image decoding", False, str(exc), "pip install Pillow")
+        ok &= check("image decoding", False, str(exc), f"{_pip()} install Pillow")
 
     try:
         import pillow_heif  # noqa: F401
@@ -284,7 +309,7 @@ def cmd_doctor(args) -> int:
         check("HEIC/HEIF support", True)
     except ImportError:
         check("HEIC/HEIF support", False, "not installed",
-              "pip install pillow-heif   (needed for iPhone photos)")
+              f"{_install_hint('heif')}   (needed for iPhone photos)")
 
     from .media import video
 
@@ -381,43 +406,106 @@ def cmd_doctor(args) -> int:
             gateway, iface = route
             check("network", True, f"{gateway} via {iface}")
             if config.network.repair:
-                rule = "/etc/polkit-1/rules.d/50-picframe3-network.rules"
-                check("may mend its own connection", os.path.exists(rule),
-                      "" if os.path.exists(rule) else "polkit rule missing",
-                      "run 'picframe3 setup' to install it, or set "
-                      "network.repair: false to watch without mending.")
+                check("may mend its own connection", *_repair_permission())
+
+    # -- the keyboard and the touchscreen
+    #
+    # Group membership is necessary and nowhere near sufficient. Raspberry Pi
+    # OS Lite runs no seat manager for a service nobody logged into, so the
+    # uaccess rules never fire and /dev/input/event* stays root-owned at 0600
+    # until packaging/99-picframe3.rules is installed. Actually opening a node
+    # is the only test that distinguishes the two, which is why asking "is
+    # this user in the 'input' group?" -- and they always were -- was such a
+    # misleading thing for doctor to say on its own.
+    import glob
+
+    nodes = sorted(glob.glob("/dev/input/event*"))
+    if not nodes:
+        print("   note: no /dev/input/event* devices — nothing is plugged in, "
+              "which is normal for a frame driven only from its web page")
+    else:
+        readable = []
+        for node in nodes:
+            try:
+                os.close(os.open(node, os.O_RDONLY | os.O_NONBLOCK))
+                readable.append(node)
+            except OSError:
+                pass
+        ok &= check("keyboard and touch devices", bool(readable),
+                    f"{len(readable)} of {len(nodes)} readable",
+                    "if you have just installed picframe3, reboot: the 'input' "
+                    "group only applies to a fresh login. Otherwise run "
+                    "'picframe3 setup', which installs "
+                    "/etc/udev/rules.d/99-picframe3.rules — the rule that makes "
+                    "that group membership mean anything.")
 
     # -- optional services
     for module, label, extra in (
-        ("fastapi", "web interface", "pip install 'picframe3[web]'"),
-        ("aiomqtt", "MQTT / Home Assistant", "pip install 'picframe3[mqtt]'"),
-        ("evdev", "keyboard & touch input", "pip install 'picframe3[input]'"),
+        ("fastapi", "web interface", "web"),
+        ("aiomqtt", "MQTT / Home Assistant", "mqtt"),
+        ("evdev", "keyboard & touch input", "input"),
+        ("gpiozero", "GPIO buttons", "gpio"),
     ):
         try:
             __import__(module)
             check(label, True)
         except ImportError:
-            check(label, False, "not installed", extra)
+            check(label, False, "not installed", _install_hint(extra))
 
     # -- who am I
-    import grp
+    #
+    # SUDO_USER first, then this process's own uid. os.getlogin() was neither:
+    # it reports the owner of the controlling terminal and raises outright
+    # when there is none, which is every `ssh host picframe3 doctor` and every
+    # run from a service -- so the whole group check was quietly skipped in
+    # exactly the situations where it mattered.
+    import pwd
 
-    groups = {g.gr_name for g in grp.getgrall() if os.getlogin() in g.gr_mem} \
-        if _can_getlogin() else set()
-    for needed in ("video", "render", "input"):
-        if groups and needed not in groups:
-            print(f"   note: user is not in the '{needed}' group")
+    from .wizard import missing_groups
+
+    user = os.environ.get("SUDO_USER") or pwd.getpwuid(os.geteuid()).pw_name
+    for needed in missing_groups(user):
+        print(f"   note: {user} is not in the '{needed}' group")
 
     print("\n" + ("All good." if ok else "Some checks failed — see the arrows above."))
     return 0 if ok else 1
 
 
-def _can_getlogin() -> bool:
-    try:
-        os.getlogin()
-        return True
-    except OSError:
-        return False
+def _repair_permission() -> tuple[bool, str, str]:
+    """Can the frame really mend its own network connection?
+
+    Two things have to be true and only one of them was checked. The rule file
+    being on disk says nothing about whether anything will ever read it: on a
+    system with no polkit daemon -- which a minimal image may well be -- the
+    file sits there forever and the frame's repair is refused every time,
+    while doctor reported a tick. Asking polkit itself whether it knows the
+    action we depend on is the other half.
+    """
+    import shutil
+    import subprocess
+
+    rule = "/etc/polkit-1/rules.d/50-picframe3-network.rules"
+    have_rule = os.path.exists(rule)
+    have_polkit = False
+    if shutil.which("pkaction"):
+        try:
+            have_polkit = subprocess.run(
+                ["pkaction", "--action-id",
+                 "org.freedesktop.NetworkManager.network-control"],
+                capture_output=True, timeout=5,
+            ).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            have_polkit = False
+
+    if have_rule and have_polkit:
+        return True, "polkit rule installed and polkit knows the action", ""
+    if not have_rule:
+        return (False, "polkit rule missing",
+                "run 'picframe3 setup' to install it, or set "
+                "network.repair: false to watch without mending.")
+    return (False, "polkit is not available, so the rule is never read",
+            "install polkitd and NetworkManager, or set network.repair: false "
+            "so the frame reports outages without trying to mend them.")
 
 
 def cmd_config(args) -> int:
@@ -475,11 +563,40 @@ def cmd_setup(args) -> int:
     return run_wizard(args.config, venv_bin=args.venv_bin, assume_yes=args.yes)
 
 
+#: Where `picframe3 setup` and the installer put the shim on PATH.
+SHIM = "/usr/local/bin/picframe3"
+
+
 def cmd_uninstall(args) -> int:
+    """Undo everything setup put on the system, and nothing else.
+
+    An uninstall that removes only the unit is not an uninstall. What was left
+    behind was a polkit rule granting network control to a user who may not
+    even exist any more, a udev rule, a Samba share still offering the picture
+    folder to the whole network, and a /usr/local/bin/picframe3 pointing into
+    a virtual environment that is about to be deleted -- so the next thing the
+    owner typed was `picframe3`, and got "No such file or directory".
+
+    Pictures, configuration and index are deliberately kept: they are the part
+    that took work, and this command is also how people move a frame to
+    another SD card.
+    """
     setup_logging(args.log_level or "WARNING", "", False)
     import getpass
+    import shutil
 
-    from .wizard import SERVICE_NAME, SERVICE_UNIT, run_root, say
+    from .wizard import (
+        POLKIT_RULE,
+        SAMBA_BEGIN,
+        SAMBA_CONF,
+        SAMBA_END,
+        SERVICE_NAME,
+        SERVICE_UNIT,
+        UDEV_RULE,
+        run_root,
+        say,
+        write_as_root,
+    )
 
     user = os.environ.get("SUDO_USER") or getpass.getuser()
     name = SERVICE_NAME.format(user=user)
@@ -487,9 +604,59 @@ def cmd_uninstall(args) -> int:
     run_root(["rm", "-f", SERVICE_UNIT])
     run_root(["systemctl", "daemon-reload"])
     say(f"stopped and removed {name}")
+
+    if os.path.exists(POLKIT_RULE):
+        run_root(["rm", "-f", POLKIT_RULE])
+        say(f"removed {POLKIT_RULE} (permission to mend the network)")
+    if os.path.exists(UDEV_RULE):
+        run_root(["rm", "-f", UDEV_RULE])
+        if shutil.which("udevadm"):
+            run_root(["udevadm", "control", "--reload"])
+        say(f"removed {UDEV_RULE} (input and DRM device permissions)")
+
+    # Only our own shim. If something else put a picframe3 there -- a distro
+    # package, a hand-written script -- removing it would be vandalism, and a
+    # symlink that no longer resolves is exactly what we are cleaning up.
+    if os.path.islink(SHIM) or os.path.isfile(SHIM):
+        target = os.path.realpath(SHIM)
+        if "picframe3" in target:
+            run_root(["rm", "-f", SHIM])
+            say(f"removed {SHIM}")
+        else:
+            say(f"left {SHIM} alone: it points at {target}, which is not ours")
+
+    _remove_samba_block(SAMBA_CONF, SAMBA_BEGIN, SAMBA_END, run_root, say,
+                        write_as_root)
+
     say("Your configuration, index and pictures were left alone.")
     say(f"  config  {Config.load(args.config).source_path}")
+    say("The virtual environment is still at "
+        "~/.local/share/picframe3/venv; delete that folder to reclaim the space.")
     return 0
+
+
+def _remove_samba_block(conf, begin, end, run_root, say, write_as_root) -> None:
+    """Take the frame's share back out of smb.conf, leaving the rest intact.
+
+    The wizard writes the block between two markers precisely so it can be
+    lifted out again without a parser and without touching a line anybody else
+    put in the file.
+    """
+    try:
+        with open(conf, encoding="utf-8") as handle:
+            existing = handle.read()
+    except OSError:
+        return
+    if begin not in existing or end not in existing:
+        return
+    head, _, rest = existing.partition(begin)
+    _, _, tail = rest.partition(end)
+    merged = head.rstrip("\n") + "\n" + tail.lstrip("\n")
+    if write_as_root(merged, conf):
+        say(f"removed the picframe3 share from {conf}")
+        run_root(["systemctl", "restart", "smbd"])
+    else:
+        say(f"could not edit {conf}; the picframe3 share is still in it")
 
 
 def cmd_migrate(args) -> int:

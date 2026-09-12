@@ -1,10 +1,32 @@
+# picframe3, as a systemd template unit: picframe3@<username>.service
+#
+# This file is the ONE definition of the unit. `picframe3 setup` installs it by
+# reading this file and replacing @EXEC@ with the picframe3 it should run --
+# it does not carry a second copy of the text, because two copies drift and
+# only one of them is ever the one that gets installed.
+#
+# Installed as /etc/systemd/system/picframe3@.service.
+
 [Unit]
 Description=picframe3 digital picture frame
 Documentation=https://github.com/sapnho/Digital-Picture-Frame-Pi-2026
-# The DRM device has to exist before we can take over the screen.
-After=systemd-user-sessions.service network-online.target
-Wants=network-online.target
-ConditionPathExistsGlob=/dev/dri/card*
+# network.target, not network-online.target: the frame shows local pictures
+# and needs no network at all to start. Waiting for network-online delays the
+# first picture by up to 90 seconds on a Pi that has not found Wi-Fi yet, and
+# a picture frame that is blank for a minute and a half looks broken.
+After=systemd-user-sessions.service network.target
+# Deliberately no ConditionPathExistsGlob=/dev/dri/card*: a condition that is
+# not met makes systemd record the start as *successful* and do nothing, so a
+# DRM device that is enumerated a moment later leaves a frame that never
+# starts and a unit that looks fine. Restart=always plus the code's own "no
+# display found" message handle that case honestly.
+
+# StartLimit* belong to the unit, not the service. In [Service] systemd logs
+# "Unknown key name ... ignoring" and silently applies its own default of 5
+# starts in 10 seconds -- so a config the frame cannot load killed the frame
+# for good instead of being retried ten times over five minutes.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -15,16 +37,26 @@ Environment=PYTHONUNBUFFERED=1
 # Mesa on the Pi picks the right driver on its own; this only silences the
 # software-rasteriser fallback warning when no GPU node is present.
 Environment=MESA_LOADER_DRIVER_OVERRIDE=
-WorkingDirectory=/home/%i
-ExecStart=/home/%i/.local/share/picframe3/venv/bin/picframe3 run
-ExecReload=/bin/kill -HUP $MAINPID
+# "~" is systemd's own shorthand for the home directory of User=, so this is
+# right for a home outside /home too -- an LDAP account, /var/lib/frame, a
+# second disk. /home/%i was a guess that fails silently on those.
+WorkingDirectory=~
+ExecStart=@EXEC@ run
+# No ExecReload: nothing in picframe3 handles SIGHUP (the process installs
+# SIGINT and SIGTERM only), so `systemctl reload` would have reported success
+# while doing nothing at all. Re-reading the configuration is the `reload`
+# command on the API, or MQTT, or a restart.
 
 Restart=always
 RestartSec=5
-# Give up restarting only if it fails constantly, so a bad config does not
-# spin forever, but a transient HDMI glitch always recovers.
-StartLimitIntervalSec=300
-StartLimitBurst=10
+# `quit` -- the ESC and Q keys, the API and MQTT action -- means stop, so it
+# exits 143 and this keeps systemd from starting the frame straight back up.
+# Every other exit is a fault and is restarted.
+RestartPreventExitStatus=143
+# ...and it is not a fault either. Without this the unit is left `failed
+# (Result: exit-code)`, `systemctl status` is red after a deliberate stop, and
+# any OnFailure= hanging off it would fire.
+SuccessExitStatus=143
 
 # The frame reads photographs and writes an index; it does not need anything else.
 NoNewPrivileges=yes

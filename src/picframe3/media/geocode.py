@@ -139,6 +139,13 @@ CREATE TABLE IF NOT EXISTS geocache (
 );
 """
 
+#: A lookup that failed is cached too, as an empty payload.  Without it an
+#: offline frame asked for the same coordinates again every backfill pass --
+#: ten seconds of timeout plus the polite pause, per row, every thirty seconds,
+#: for ever.  It is a pause, not a verdict: the entry expires, so a frame that
+#: comes back online fills its place names in by itself.
+FAILURE_TTL = 6 * 3600
+
 
 class Geocoder:
     def __init__(
@@ -189,28 +196,38 @@ class Geocoder:
             return None
         key = self._key(lat, lon)
         with self._lock:
-            row = self._db.execute("SELECT payload FROM geocache WHERE key=?", (key,)).fetchone()
+            row = self._db.execute("SELECT payload, fetched FROM geocache WHERE key=?",
+                                   (key,)).fetchone()
         if row:
-            return self._format(json.loads(row[0]))
+            address = json.loads(row[0])
+            if address:
+                return self._format(address)
+            # A remembered failure.  Still failing as far as this call is
+            # concerned, but only until it expires.
+            if time.time() - (row[1] or 0) < FAILURE_TTL:
+                return None
         if cached_only or not self.enabled:
             return None
         payload = self._fetch(lat, lon)
-        if payload is None:
-            return None
         with self._lock:
             self._db.execute(
                 "INSERT OR REPLACE INTO geocache(key, payload, fetched) VALUES (?,?,?)",
-                (key, json.dumps(payload), time.time()),
+                (key, json.dumps(payload if payload is not None else {}), time.time()),
             )
             self._db.commit()
-        return self._format(payload)
+        return self._format(payload) if payload else None
 
     def _fetch(self, lat: float, lon: float) -> dict | None:
+        # The lock is held only long enough to claim the next slot, never
+        # across the sleep or the request.  Holding it through both meant the
+        # picture going on screen waited behind the backfill pass: the frame
+        # showed a photograph with no place name while a background thread sat
+        # in time.sleep() with the lock in its hand.
         with self._lock:
             wait = self.min_interval - (time.monotonic() - self._last_request)
-            if wait > 0:
-                time.sleep(wait)
-            self._last_request = time.monotonic()
+            self._last_request = time.monotonic() + max(0.0, wait)
+        if wait > 0:
+            time.sleep(wait)
         params = urllib.parse.urlencode({
             "lat": f"{lat:.6f}", "lon": f"{lon:.6f}", "format": "jsonv2",
             "zoom": "18", "addressdetails": "1", "accept-language": self.language,
@@ -242,7 +259,8 @@ class Geocoder:
         with self._lock:
             row = self._db.execute("SELECT payload FROM geocache WHERE key=?",
                                    (self._key(lat, lon),)).fetchone()
-        return json.loads(row[0]) if row else None
+        # An empty payload is a remembered failure, not an address.
+        return (json.loads(row[0]) or None) if row else None
 
     def set_style(self, key_order: Sequence[Sequence[str]],
                   suppress: Sequence[str] = ()) -> None:

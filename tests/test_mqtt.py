@@ -7,6 +7,7 @@ error.  These tests read the templates and check that everything they reach for
 is really in the document.
 """
 
+import asyncio
 import io
 import json
 import re
@@ -28,9 +29,24 @@ class _StubApp:
     def __init__(self):
         self.config = Config()
         self.started = 0.0
+        self.bus = _RecordingBus()
 
     def state(self) -> State:
         return State()
+
+
+class _RecordingBus:
+    """Catches what the bridge asks the frame to do, instead of doing it."""
+
+    def __init__(self):
+        self.commands = []
+
+    def submit(self, command):
+        self.commands.append(command)
+        return True
+
+    def subscribe(self, listener):
+        return lambda: None
 
 
 @pytest.fixture
@@ -241,3 +257,147 @@ async def test_a_picture_that_cannot_be_read_is_not_retried_forever(bridge, tmp_
     await bridge._publish_image(client, current)
     await bridge._publish_image(client, current)
     assert client.published == []
+
+
+# ==========================================================================
+# Inbound: the commands Home Assistant actually sends
+# ==========================================================================
+
+def _dispatch(bridge, name, payload):
+    """One message on one entity's `.../set` topic, as the broker delivers it."""
+    asyncio.run(bridge._dispatch(bridge.entity_topic(name), payload))
+    return [(c.action.value, c.payload) for c in bridge.app.bus.commands]
+
+
+def _command_topics(bridge):
+    """Every topic an announced entity publishes to, with its entity name."""
+    out = {}
+    for _, object_id, payload in bridge.discovery_entities():
+        topic = payload.get("command_topic")
+        if topic:
+            out[object_id] = topic
+    return out
+
+
+def test_zero_and_one_on_the_display_topic_still_mean_off_and_on(bridge):
+    """The payload every hand-written automation has always used.
+
+    Reading `0` as a brightness left the screen black with Home Assistant
+    showing the light as on -- and because the brightness is a saved setting,
+    that zero went into the config file and survived the restart.
+    """
+    from picframe3.events import Action
+
+    for payload, expected in (("0", Action.DISPLAY_OFF), ("1", Action.DISPLAY_ON),
+                              ("off", Action.DISPLAY_OFF), ("on", Action.DISPLAY_ON)):
+        bridge.app.bus.commands.clear()
+        asyncio.run(bridge._dispatch(bridge.entity_topic("display"), payload))
+        actions = [c.action for c in bridge.app.bus.commands]
+        assert actions == [expected], f"{payload!r} -> {actions}"
+
+    # A real slider drag is still a brightness, and still turns the screen on.
+    bridge.app.bus.commands.clear()
+    asyncio.run(bridge._dispatch(bridge.entity_topic("display"), "128"))
+    actions = [c.action for c in bridge.app.bus.commands]
+    assert actions == [Action.DISPLAY_ON, Action.BRIGHTNESS]
+
+
+def test_every_announced_button_and_control_is_actually_handled(bridge):
+    """The regression: the Restart button was announced, Home Assistant drew
+    it, and `_dispatch` had never heard of it — so pressing it logged
+    "unhandled MQTT topic" and did nothing. Held for every entity at once, so
+    the next announced control cannot repeat it."""
+    bridge.app.config.http.allow_delete = True    # or Remove is refused, not unhandled
+    unhandled = []
+    for object_id, topic in _command_topics(bridge).items():
+        bridge.app.bus.commands.clear()
+        asyncio.run(bridge._dispatch(topic, "press"))
+        if not bridge.app.bus.commands:
+            unhandled.append(object_id)
+    assert unhandled == [], f"announced but not handled: {unhandled}"
+
+
+def test_the_restart_button_restarts_the_frame(bridge):
+    assert _dispatch(bridge, "restart", "press") == [("restart", {})]
+
+
+def test_every_announced_command_topic_is_one_the_bridge_subscribes_to(bridge):
+    """`<prefix>/#` used to cover everything by accident. With two narrow
+    filters, an entity announced on a topic outside them would be a control
+    that silently does nothing."""
+    allowed = set(bridge.subscriptions())
+    for object_id, topic in _command_topics(bridge).items():
+        ok = topic in allowed or (
+            topic.startswith(bridge.prefix + "/") and topic.endswith("/set")
+            and topic.count("/") == bridge.prefix.count("/") + 2)
+        assert ok, f"{object_id} publishes to {topic}, which nothing listens on"
+
+
+def test_the_bridge_no_longer_subscribes_to_the_whole_prefix(bridge):
+    assert f"{bridge.prefix}/#" not in bridge.subscriptions()
+    assert bridge.subscriptions() == [f"{bridge.prefix}/cmd", f"{bridge.prefix}/+/set"]
+
+
+# -- the brightness slider --------------------------------------------------
+
+def test_the_light_sends_its_brightness_rather_than_the_word_on(bridge):
+    """`command_on_template` was the constant "on", so Home Assistant rendered
+    the slider value and then threw it away: the dashboard moved, the frame
+    did not."""
+    jinja2 = pytest.importorskip("jinja2")
+    payload = dict(bridge.discovery_entities()[0][2])
+    assert payload["unique_id"].endswith("_display")
+    template = jinja2.Template(payload["command_on_template"])
+    assert template.render(brightness=128).strip() == "128"
+    assert template.render().strip() == "on", "a plain switch-on still says on"
+
+
+def test_a_rendered_brightness_reaches_the_frame_as_a_brightness(bridge):
+    got = _dispatch(bridge, "display", "128")
+    assert ("brightness", {"value": pytest.approx(128 / 255)}) in got
+    assert ("display_on", {}) in got, "a brightness implies the screen is on"
+
+
+def test_the_word_on_and_the_word_off_still_work(bridge):
+    assert _dispatch(bridge, "display", "on") == [("display_on", {})]
+    bridge.app.bus.commands.clear()
+    assert _dispatch(bridge, "display", "off") == [("display_off", {})]
+
+
+# -- what the broker may not ask for ---------------------------------------
+
+def test_quit_is_refused_however_it_is_dressed_up(bridge, caplog):
+    """Anything on the broker could publish this, and stopping the frame is
+    not something a picture-frame entity ever needs to do."""
+    with caplog.at_level("WARNING"):
+        asyncio.run(bridge._dispatch(bridge.command_topic, '{"action": "quit"}'))
+    assert bridge.app.bus.commands == []
+    assert "refusing quit" in caplog.text
+
+
+def test_delete_over_mqtt_follows_the_same_switch_as_the_web_ui(bridge, caplog):
+    bridge.app.config.http.allow_delete = False
+    with caplog.at_level("WARNING"):
+        asyncio.run(bridge._dispatch(bridge.command_topic, "delete"))
+    assert bridge.app.bus.commands == []
+    assert "allow_delete" in caplog.text
+
+    bridge.app.config.http.allow_delete = True
+    asyncio.run(bridge._dispatch(bridge.command_topic, "delete"))
+    assert [c.action.value for c in bridge.app.bus.commands] == ["delete"]
+
+
+def test_a_setting_over_mqtt_cannot_point_the_frame_at_a_startup_file(bridge, caplog):
+    with caplog.at_level("WARNING"):
+        asyncio.run(bridge._dispatch(
+            bridge.command_topic,
+            '{"action": "set_config", "key": "logging.file", "value": "~/.bashrc"}'))
+    assert bridge.app.bus.commands == []
+    assert "refusing a setting" in caplog.text
+
+
+def test_an_ordinary_setting_over_mqtt_still_goes_through(bridge):
+    asyncio.run(bridge._dispatch(
+        bridge.command_topic,
+        '{"action": "set_config", "key": "slideshow.interval", "value": 90}'))
+    assert [c.action.value for c in bridge.app.bus.commands] == ["set_config"]

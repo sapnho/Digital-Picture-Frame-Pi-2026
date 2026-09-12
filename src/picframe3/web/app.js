@@ -36,7 +36,16 @@ $("#next").onclick = () => send("next");
 $("#pause").onclick = () => send("toggle_pause");
 $("#power").onclick = () => send("display_toggle");
 $("#del").onclick = async () => {
-  if (confirm("Move this picture out of the library?")) await send("delete");
+  if (!confirm("Move this picture out of the library?")) return;
+  try {
+    await send("delete");
+  } catch (err) {
+    // The one action the owner can switch off for the network (http.allow_delete).
+    // Saying so beats a button that appears to do nothing.
+    $("#saved").textContent =
+      "Removing pictures over the network is switched off — see Settings, " +
+      "Web interface, “Remove pictures from the network”.";
+  }
 };
 $("#rescan").onclick = () => send("rescan");
 
@@ -311,12 +320,35 @@ FILTER_FIELDS().forEach((el) => {
   }
 });
 
-document.querySelectorAll(".filter-quick [data-days]").forEach((button) => {
-  button.onclick = () => {
-    const from = new Date(Date.now() - button.dataset.days * 86400000);
-    applyFilter({ date_from: from.toISOString().slice(0, 10), date_to: "" });
-  };
-});
+/* The rolling date windows.  The buttons send the rule -- "the last 7 days" --
+   and never the two dates it happens to resolve to today, which is what keeps
+   the filter honest a month later. */
+async function loadDateWindows() {
+  const holder = $("#f-windows");
+  if (!holder || holder.dataset.filled) return;
+  holder.dataset.filled = "1";
+  let windows = [];
+  try {
+    windows = await api("/api/date-windows");
+  } catch (_) { return; }
+  windows.forEach((w) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn";
+    button.dataset.window = w.name;
+    button.textContent = w.label;
+    button.onclick = () => applyFilter({ date_window: w.name });
+    holder.appendChild(button);
+  });
+}
+
+function showDateWindow(active) {
+  document.querySelectorAll("#f-windows [data-window]").forEach((button) => {
+    const on = button.dataset.window === (active || "all");
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
 $("#f-reset").onclick = () => applyFilter({ reset: true });
 $("#only-selected").addEventListener("change", loadLibrary);
 
@@ -334,6 +366,7 @@ async function loadFilterOptions() {
       target.appendChild(option);
     });
   };
+  loadDateWindows();
   fill("#f-folder", body.folders, true);
   fill("#f-tag-list", body.tags, false);
   fill("#f-place-list", body.locations, false);
@@ -356,6 +389,7 @@ function showFilter(f) {
   set("#f-to", f.date_to_text);
   const all = $("#f-tags-all");
   if (all && document.activeElement !== all) all.checked = !!f.tags_match_all;
+  showDateWindow(f.date_window);
   $("#filter").classList.toggle("is-active", !!f.active);
 }
 
@@ -711,6 +745,12 @@ function optionList(name) {
   return (SCHEMA.options && SCHEMA.options[name]) || [];
 }
 
+/* Every interpolation below goes through escapeHtml, including the ones whose
+   values come from the config schema rather than from a photograph. Those
+   lists are hard-coded today, which makes this belt and braces rather than a
+   fix — but "safe because of where the data happens to come from" is exactly
+   the kind of safety that stops being true when a setting starts carrying a
+   folder name or a tag. */
 function fieldControl(f) {
   const wrap = document.createElement("div");
   wrap.className = "field";
@@ -720,16 +760,17 @@ function fieldControl(f) {
   let control;
   switch (f.kind) {
     case "bool":
-      control = `<input type="checkbox" data-key="${f.key}" data-kind="bool"` +
+      control = `<input type="checkbox" data-key="${escapeHtml(f.key)}" data-kind="bool"` +
                 `${f.value ? " checked" : ""}>`;
       break;
     case "int":
     case "number":
       control = `<input type="number" step="${f.kind === "int" ? 1 : "any"}" ` +
-                `data-key="${f.key}" data-kind="${f.kind}" value="${f.value ?? ""}">`;
+                `data-key="${escapeHtml(f.key)}" data-kind="${f.kind}" ` +
+                `value="${escapeHtml(f.value ?? "")}">`;
       break;
     case "secret":
-      control = `<input type="password" data-key="${f.key}" data-kind="text" ` +
+      control = `<input type="password" data-key="${escapeHtml(f.key)}" data-kind="text" ` +
                 `value="" autocomplete="new-password" ` +
                 `placeholder="${f.is_set ? "set — type to replace" : "not set"}">`;
       break;
@@ -738,7 +779,7 @@ function fieldControl(f) {
         ? f.choices.map((c) => ({ name: String(c), label: String(c) }))
         : optionList(f.options);
       const current = String(f.value ?? "");
-      control = `<select data-key="${f.key}" data-kind="select">` +
+      control = `<select data-key="${escapeHtml(f.key)}" data-kind="select">` +
         opts.map((o) => `<option value="${escapeHtml(o.name)}"` +
           `${o.name === current ? " selected" : ""}>${escapeHtml(o.label)}</option>`).join("") +
         `</select>`;
@@ -757,7 +798,7 @@ function fieldControl(f) {
       // every folder from that year has to keep working.
       const id = `list-${f.key.replace(/\W/g, "-")}`;
       const opts = optionList(f.options);
-      control = `<input type="text" list="${id}" data-key="${f.key}" ` +
+      control = `<input type="text" list="${id}" data-key="${escapeHtml(f.key)}" ` +
                 `data-kind="text" value="${escapeHtml(f.value ?? "")}" ` +
                 `placeholder="${opts.length ? "any folder" : ""}">` +
                 `<datalist id="${id}">` +
@@ -770,22 +811,22 @@ function fieldControl(f) {
       control = tiersEditor(f);
       break;
     case "csv":
-      control = `<input type="text" data-key="${f.key}" data-kind="csv" ` +
+      control = `<input type="text" data-key="${escapeHtml(f.key)}" data-kind="csv" ` +
                 `value="${escapeHtml((f.value || []).join(", "))}" ` +
                 `placeholder="comma separated">`;
       break;
     case "numbers":
-      control = `<input type="text" data-key="${f.key}" data-kind="numbers" ` +
+      control = `<input type="text" data-key="${escapeHtml(f.key)}" data-kind="numbers" ` +
                 `value="${escapeHtml((f.value || []).join(", "))}" ` +
                 `placeholder="${f.nullable ? "empty = automatic" : "comma separated"}">`;
       break;
     case "json":
-      control = `<textarea rows="${jsonRows(f.value)}" data-key="${f.key}" ` +
+      control = `<textarea rows="${jsonRows(f.value)}" data-key="${escapeHtml(f.key)}" ` +
                 `data-kind="json" spellcheck="false">` +
                 `${escapeHtml(JSON.stringify(f.value ?? null, null, 1))}</textarea>`;
       break;
     default:
-      control = `<input type="text" data-key="${f.key}" data-kind="text" ` +
+      control = `<input type="text" data-key="${escapeHtml(f.key)}" data-kind="text" ` +
                 `value="${escapeHtml(f.value ?? "")}">`;
   }
 
@@ -811,7 +852,7 @@ function fieldControl(f) {
 function tiersEditor(f) {
   const text = (f.value || []).map((tier) => (tier || []).join(", ")).join("\n");
   const keys = optionList(f.options);
-  return `<div data-tiers data-key="${f.key}" data-kind="list">
+  return `<div data-tiers data-key="${escapeHtml(f.key)}" data-kind="list">
     <textarea rows="${Math.max(3, (f.value || []).length)}" spellcheck="false"
               class="tiers-text">${escapeHtml(text)}</textarea>
     <div class="tiers-preview">
@@ -823,8 +864,8 @@ function tiersEditor(f) {
       <p class="muted">Click one to add it to the last line. Not every address
         has every key — that is why a line lists alternatives.</p>
       <div class="tiers-chips">${keys.map((k) =>
-        `<button type="button" data-add="${k.name}" title="${escapeHtml(k.label)}"
-                 class="${k.available ? "have" : ""}">${k.name}</button>`).join("")}</div>
+        `<button type="button" data-add="${escapeHtml(k.name)}" title="${escapeHtml(k.label)}"
+                 class="${k.available ? "have" : ""}">${escapeHtml(k.name)}</button>`).join("")}</div>
     </details>
   </div>`;
 }
@@ -961,7 +1002,7 @@ function pickList(key, chosen, available, asArray, reorder) {
       ${reorder ? `<button type="button" data-move="-1" title="Move up">▲</button>
       <button type="button" data-move="1" title="Move down">▼</button>` : ""}
     </li>`).join("");
-  return `<ol class="caption-list" data-pick-list data-key="${key}" data-kind="list"
+  return `<ol class="caption-list" data-pick-list data-key="${escapeHtml(key)}" data-kind="list"
               data-array="${asArray ? 1 : 0}"${reorder ? " data-ordered" : ""}>${rows}</ol>`;
 }
 

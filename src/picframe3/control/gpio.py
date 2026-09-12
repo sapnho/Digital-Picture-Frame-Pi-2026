@@ -14,6 +14,7 @@ from typing import Any
 
 from ..config import InputConfig
 from ..events import Action, Command
+from ..install import install_hint
 
 _log = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class GpioButtons:
             from gpiozero import Button  # noqa: F401
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError(
-                "GPIO buttons need gpiozero (pip install 'picframe3[gpio]')"
+                f"GPIO buttons need gpiozero ({install_hint('gpio')})"
             ) from exc
         self._buttons: list[Any] = []
 

@@ -81,7 +81,8 @@ sudo reboot
 ```bash
 sudo apt update
 sudo apt install -y --no-install-recommends \
-  python3-venv libegl1 libgles2 libgbm1 libdrm2 \
+  python3-venv python3-dev gcc \
+  libegl1 libgles2 libgbm1 libdrm2 \
   fonts-dejavu-core libraqm0 \
   python3-gi gir1.2-gst-plugins-base-1.0 \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
@@ -89,16 +90,28 @@ sudo apt install -y --no-install-recommends \
 sudo usermod -aG video,render,input "$USER"
 
 python3 -m venv --system-site-packages ~/.local/share/picframe3/venv
-~/.local/share/picframe3/venv/bin/pip install "picframe3[all]"
+~/.local/share/picframe3/venv/bin/pip install \
+  "git+https://github.com/sapnho/Digital-Picture-Frame-Pi-2026#egg=picframe3[all]"
 sudo ln -sfn ~/.local/share/picframe3/venv/bin/picframe3 /usr/local/bin/picframe3
 
 picframe3 setup
 sudo reboot
 ```
 
+picframe3 is installed **from the repository**, not from PyPI — there is no
+`picframe3` package there, and `pip install picframe3` answers 404.
+
 `--system-site-packages` matters: it lets the virtual environment see the
 apt-installed PyGObject, which is how GStreamer is reached. Building PyGObject
 inside the venv needs a toolchain and takes a long time on a Pi.
+
+`python3-dev` and `gcc` are needed because `evdev` — the keyboard and
+touchscreen support — is published as source only and is compiled during the
+install.
+
+Do not skip `picframe3 setup`: besides writing the configuration it installs
+the systemd unit, the udev rule that makes `/dev/input/event*` readable by the
+`input` group, and the polkit rule that lets the frame reconnect its own Wi-Fi.
 </details>
 
 ---
@@ -177,10 +190,16 @@ it dropped:
 
 ```bash
 picframe3 migrate ~/picframe_data/config/configuration.yaml
-sudo systemctl disable --now picframe          # the old one
+systemctl --user disable --now picframe        # the old one
 picframe3 scan
 sudo systemctl enable --now picframe3@pi
 ```
+
+Note the **`--user`**: the pi3d picframe guide installs its service as a user
+unit in `~/.config/systemd/user/picframe.service`. `sudo systemctl disable
+picframe` therefore fails with "Unit picframe.service does not exist", which
+reads like "it was already gone" — and it was not. The old frame then comes
+back at the next login and the two fight over the screen.
 
 Both cannot run at once: only one process can be DRM master.
 
@@ -245,11 +264,23 @@ curl -fsSL https://raw.githubusercontent.com/sapnho/Digital-Picture-Frame-Pi-202
 sudo systemctl restart picframe3@pi
 ```
 
+An update will not change the version of Pillow, FastAPI or numpy your frame
+runs on across a major release: every dependency in `pyproject.toml` has an
+upper bound, so patch and minor releases (where the security fixes are) arrive
+by themselves, while a new major version waits for a release of picframe3 that
+has been tested against it. A frame in a hallway should not be able to break
+itself on a Tuesday evening.
+
 To remove the service again (your pictures, config and index are kept):
 
 ```bash
 picframe3 uninstall
 ```
+
+That stops and removes the service, the `/usr/local/bin/picframe3` shim, the
+udev rule, the polkit rule and the Samba share. Your configuration, index and
+photographs are left exactly where they are; delete
+`~/.local/share/picframe3/venv` if you also want the disk space back.
 
 ---
 
@@ -293,13 +324,25 @@ raise `viewer.upscale_limit` if you would rather it enlarged.
 
 **iPhone photos are skipped** — install HEIC support:
 `~/.local/share/picframe3/venv/bin/pip install pillow-heif`
+(`picframe3 doctor` prints the same command with the path your frame is
+actually running from.)
 
 **Videos do not play** — `picframe3 doctor` says whether GStreamer is visible.
 The usual cause is a venv created without `--system-site-packages`.
 
 **Console text over the picture** — add `consoleblank=0 logo.nologo
 vt.global_cursor_default=0 quiet` to `/boot/firmware/cmdline.txt`. The
-installer does this for you.
+installer does this for you, keeping the previous file next to it as
+`cmdline.txt.picframe3.bak`. It is a **single line** — that is how the
+bootloader reads it — so the installer refuses to touch a `cmdline.txt` that
+has somehow acquired more than one, and tells you instead.
+
+**Keyboard or touchscreen does nothing** — `/dev/input/event*` is readable
+only by root until `picframe3 setup` installs
+`/etc/udev/rules.d/99-picframe3.rules`; being in the `input` group is not
+enough on its own, because Raspberry Pi OS Lite runs no seat manager.
+`picframe3 doctor` opens a device node and says so. Run `picframe3 setup`, then
+reboot.
 
 **Place names never appear** — they need `geo.enabled` *and* `geo.contact`
 (an email address, which OpenStreetMap's terms require). They fill in a few at

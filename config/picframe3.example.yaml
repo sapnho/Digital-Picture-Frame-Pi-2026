@@ -1,226 +1,351 @@
-# picframe3 configuration
-# ------------------------------------------------------------------------
-# Every key below is optional: anything you leave out uses the built-in
-# default, and unknown keys are warned about rather than fatal.  Copy this to
-# ~/.config/picframe3/config.yaml (or run `picframe3 config --init`).
+# picframe3 configuration — a complete, commented starting point
+# ---------------------------------------------------------------------------
+# Generated from the code by tools/gen_config_docs.py — do not edit by hand.
+# Every setting picframe3 has appears below, at its default value, so this file
+# is also the answer to "what can I set?".
 #
-# Changes made from the web UI or MQTT apply immediately; press "Save to
-# config file" in the web UI (or `picframe3 config --set key=value`) to make
-# them survive a restart.
+# Every key is optional: anything you leave out uses the built-in default shown
+# here, and an unknown key produces a warning in the log rather than a crash.
+# Copy this to ~/.config/picframe3/config.yaml (or run `picframe3 config
+# --init`, which writes the same defaults).
+#
+# Changes made from the web UI or MQTT apply immediately; press "Save to config
+# file" there (or `picframe3 config --set key=value`) to make them survive a
+# restart. Settings marked "(restart)" only take effect when the frame starts
+# again.
+#
+# The same list with types and explanations is in docs/CONFIG.md.
 
+# Which screen to use and how hard to drive it.
 display:
-  backend: auto           # auto | kms | headless.  "auto" uses the screen if
-                          # there is one and renders offscreen if there is not.
-  device: null            # /dev/dri/card1 — only needed if autodetection picks wrong
-  connector: null         # HDMI-A-1, HDMI-A-2, DSI-1 … null = first connected output
-  rotate: 0               # 0 or 180.  For a quarter turn, rotate in the kernel:
-                          #   video=HDMI-A-1:1080x1920M@60,rotate=90  in cmdline.txt
-  vsync: true             # page-flip on the vblank; turn off only when debugging
-  fps_limit: 60.0         # cap while something is moving; vsync caps it too
-  background: [0.0, 0.0, 0.0, 1.0]   # shown around a picture that does not fill the screen
-  brightness: 1.0         # 0.0–1.0
+  # auto uses the screen if there is one, otherwise renders offscreen.
+  # (restart)
+  backend: auto
+  # /dev/dri/card1. Empty takes the first card with a connected output.
+  # (restart) (advanced)
+  device: null
+  # HDMI-A-1, HDMI-A-2, DSI-1… Empty takes the first connected output.
+  # (restart) (advanced)
+  connector: null
+  # 0 or 180. For a quarter turn rotate in the kernel
+  # (video=HDMI-A-1:1080x1920M@60,rotate=90) so the Pi reports a portrait
+  # mode.
+  rotate: 0
+  # Page-flip on the vertical blank. Turning it off tears; it exists for
+  # debugging. (restart) (advanced)
+  vsync: true
+  # Only applies while something is animating; a still picture draws no
+  # frames. (restart)
+  fps_limit: 60.0
+  # Red, green, blue, alpha, each 0–1. Shown around a picture that does not
+  # fill the screen. (advanced)
+  background: [0.0, 0.0, 0.0, 1.0]
+  brightness: 1.0         # 0–1, applied in the shader and to the backlight if there is one.
 
+# Pacing and sequencing: how long each picture stays, how it changes, what
+# comes next.
 slideshow:
-  interval: 180.0         # seconds each picture stays on screen
-  transition: fade        # a name from `picframe3 transitions`, or "random"
-  transition_time: 2.5    # seconds
-  order: shuffle          # shuffle | random | date_desc | date_asc | name |
-                          # folder | recent | least_played
-                          #   shuffle — every picture exactly one turn per
-                          #     round, in a fresh random order each round.  The
-                          #     round is kept in the index, so a reboot, a
-                          #     rescan, or a hundred new photographs arriving
-                          #     over Samba do not rob the pictures still
-                          #     waiting for their turn.
-                          #   random  — no memory at all; repeats are possible
-                          #   least_played — strictly the least-shown picture
-  recent_days: 7          # pictures newer than this jump the queue
-  reshuffle_after: 1      # complete passes before reshuffling
-  portrait_pairs: false   # show two upright photos side by side
-  kenburns: false         # slow pan and zoom
-  kenburns_zoom: 1.12
-  transition_choices: []  # which transitions "random" may use;
-                          # [] means the standard pool. e.g. [fade, dissolve, blur]
+  interval: 180.0         # Seconds each picture stays on screen.
+  transition: fade        # Any name from picframe3 transitions, or random.
+  transition_time: 2.5    # Seconds the change from one picture to the next takes.
+  # shuffle gives every picture exactly one turn per round, in a fresh
+  # random order each round, and keeps the round in the index — so reboots,
+  # rescans and newly copied photographs cannot rob the pictures still
+  # waiting. random has no memory and may repeat.
+  order: shuffle
+  recent_days: 7          # Pictures newer than this are shown first in each shuffle round.
+  reshuffle_after: 1      # Complete passes over the library before the order is shuffled again.
+  # Two upright photographs side by side on a landscape screen, each with
+  # its own caption.
+  portrait_pairs: false
+  # Kept only so a migrated picframe configuration still loads. order is
+  # what decides. (advanced)
+  shuffle: true
+  paused: false           # Whether the frame starts paused. (advanced)
+  # Repeat a short video until the picture interval is up, instead of moving
+  # on when it ends.
+  video_loop: false
+  # Videos are silent by default; a frame on a shelf that suddenly talks is
+  # startling.
   video_mute: true
-  video_loop: false       # repeat a short clip until `interval` is up
-  # A video always runs for its own length, whatever `interval` says.
-  video_max_seconds: 0    # 0 = play each video to the end
+  # Cut every video off after this many seconds. 0 plays each one to the
+  # end, however long it is — a video is never cut short by the picture
+  # interval.
+  video_max_seconds: 0.0
+  kenburns: false         # Slow pan and zoom across each picture.
+  kenburns_zoom: 1.12     # How far in the pan starts, e.g. 1.12 = 12% larger than the screen.
+  # Which transitions transition: random may draw from. None ticked means
+  # the standard pool.
+  transition_choices: []
 
+# How a picture is composed on screen, and what is written over it.
 viewer:
-  fit: auto               # auto | cover | contain | blur | mat
-                          #   auto  — mat when the shapes disagree, else fill
-                          #   cover — crop to fill the screen
-                          #   contain — letterbox on the background colour
-                          #   blur  — letterbox on a blurred copy of the picture
-                          #   mat   — always frame it in a passepartout
-  fit_choices: [mat]      # what "auto" may do with a picture that does NOT
-                          # match the screen: any of mat, blur, contain, cover.
-                          # Several means "pick one of these", chosen from the
-                          # file path so a photograph always looks the same.
-                          # A picture that already matches the screen is shown
-                          # edge to edge regardless — that crops nothing.
-  mat_style: single       # single | single_bevel | double | double_bevel |
-                          # float | float_shadow | float_wrap | polaroid
-                          # "random" or "" for any; several names separated by
-                          # spaces means "choose from these", as picframe did.
-                          # picframe's own names (float_polaroid,
-                          # float_color_wrap, double_flat) are accepted too.
-                          # Note: "polaroid" deliberately sits the print high
-                          # with a deep lower margin.  If pictures look badly
-                          # centred, this style is usually why.
-  mat_tolerance: 0.01     # how different the shapes must be before "auto" mats
-  mat_outer_color: null   # [r, g, b]; null derives it from the photograph
-  mat_inner_color: null
-  mat_outer_border: 75    # px at 1080p, scaled to your panel
-  mat_inner_border: 22
-  mat_texture: true       # paper grain on the outer board
-  mat_inner_texture: false  # usually smooth card against the textured board
-  mat_auto_inner_color: true  # false = a darker shade of the outer mat
-  mat_bevel_width: 5      # px at 1080p, for the *_bevel styles
-
-  blur_amount: 20.0
+  # How a picture is placed on the screen. auto decides by shape and is what
+  # most frames want.
+  fit: auto
+  # What fit: auto may do with a picture whose shape does not match the
+  # panel. Several means "pick one of these", chosen from the file path so a
+  # given photograph always looks the same. A picture that already matches
+  # the panel is shown edge to edge regardless, because that crops nothing.
+  fit_choices: [mat]
+  blur_amount: 20.0       # Radius of the blurred backdrop behind a letterboxed picture.
+  # How far the blurred backdrop is enlarged, so its edges are off screen.
+  # (advanced)
   blur_zoom: 1.06
-  blur_dim: 0.55          # 0 = black edges, 1 = full-strength blurred copy
-  upscale_limit: 2.5      # never enlarge a small picture more than this; beyond it
-                          # the frame blur-fills instead of showing it soft
-
-  font: null              # path to a .ttf; null finds DejaVu / Noto / Liberation
+  blur_dim: 0.55          # 0 = black edges, 1 = the blurred copy at full strength.
+  upscale_limit: 2.5      # Beyond this the frame blur-fills rather than enlarging a small picture.
+  # Tick several and each picture gets one of them. polaroid deliberately
+  # sits the print high with a deep lower margin; if pictures look badly
+  # centred, this style is usually why.
+  mat_style: single
+  # How different the picture and screen shapes must be before auto mats. -1
+  # always mats.
+  mat_tolerance: 0.01
+  mat_outer_color: null   # Red, green, blue, 0–255. Empty derives the colour from the photograph.
+  mat_inner_color: null   # Red, green, blue, 0–255. Empty is a darker shade of the outer mat.
+  mat_outer_border: 75    # Width of the board, in pixels at 1080p, scaled to your panel.
+  mat_inner_border: 22    # Width of the inner mat, for the double styles.
+  mat_texture: true       # Paper grain on the outer board — picframe's own board scan.
+  # Usually off: smooth card against the textured board.
+  mat_inner_texture: false
+  # Off makes the inner mat a darker shade of the outer instead of its own
+  # colour from the photograph.
+  mat_auto_inner_color: true
+  # The chamfered cut of the opening, in pixels at 1080p, for the *_bevel
+  # styles.
+  mat_bevel_width: 5
+  font: null              # Path to a .ttf. Empty finds DejaVu, Noto or Liberation.
+  # What is written over the picture, in the order it is written.
   show_text: [title, caption, date, location]
-                          # any of: title caption name date location folder
-                          #         camera exposure
-                          # The order here is the order they are written, and
-                          # the Settings tab edits this list directly.
-  text_separator: "  ·  " # written between the elements above;
-                          # "\n" puts each one on its own line
-  text_size: 34
-  text_seconds: 16.0      # how long the caption stays up after each change
-  text_justify: L         # L | C | R
-  text_scrim: 0.5         # darkening behind the caption, 0–1
-  date_format: "%-d %B %Y"
-
-  show_clock: false
-  clock_format: "%H:%M"
-  clock_size: 120
-  clock_position: TR      # TL TC TR BL BC BR
-  clock_opacity: 0.9
+  text_size: 34           # Caption type size, in pixels at 1080p.
+  text_seconds: 16.0      # How long the caption stays up after each change.
+  # Left, centred or right. A pair of portraits always centres each caption
+  # under its own picture.
+  text_justify: L
+  text_opacity: 1.0       # 0–1. (advanced)
+  text_margin_x: 64       # Gap from the side of the screen to the caption. (advanced)
+  text_margin_y: 36       # Gap above and below the caption inside its band. (advanced)
+  # Darkening behind the caption so it stays legible over a bright picture.
+  # 0–1.
+  text_scrim: 0.5
+  text_separator: '  ·  ' # Written between the caption elements.
+  # strftime: %-d %B %Y is "7 September 2026", %d.%m.%Y is "07.09.2026".
+  date_format: '%-d %B %Y'
+  show_clock: false       # A large clock over the picture.
+  clock_format: '%H:%M'   # strftime: %H:%M or %-I:%M %p.
+  clock_size: 120         # Type size, in pixels at 1080p.
+  clock_position: TR      # Top or bottom, left, centre or right.
+  clock_opacity: 0.9      # 0–1.
+  # How far in from the corner, as a percentage of the screen: across, then
+  # down.
+  clock_offset_pct: [3.0, 3.0]
+  # If this file exists its contents are written under the time, much
+  # smaller — a weather line, a countdown, anything that writes to it.
+  # (advanced)
   clock_extra_file: /dev/shm/picframe-clock.txt
-                          # if this file exists, its contents appear under the
-                          # time — a hook for a weather line, a countdown, …
-                          # (picframe's /dev/shm/clock.txt is read too)
-
+  # If this PNG exists it is drawn over the picture, under the caption. A
+  # hook for anything. (advanced)
   overlay_image: /dev/shm/picframe-overlay.png
-                          # if this PNG exists it is drawn over the picture —
-                          # a hook for weather, calendars, anything you like
+  # Shown when there is nothing to show. Empty is the picture that ships
+  # with the frame; a path is your own; none draws a plain screen naming the
+  # folders it looked in.
+  no_files_img: ''
 
-  no_files_img: ''        # shown when there is nothing to show
-                          #   ''     — the picture that ships with the frame
-                          #   a path — your own picture
-                          #   none   — a plain screen naming the folders it
-                          #            looked in
-
+# Where the photographs are and how they are indexed.
 library:
-  picture_folders:
-    - ~/Pictures
+  # One per line. ~ is your home directory. (restart)
+  picture_folders: [~/Pictures]
+  # The index. Moving it starts an empty library. (restart) (advanced)
   database: ~/.local/share/picframe3/library.db3
-  follow_links: false
-  include_videos: true
-  ignore_hidden: true
-  exclude: ["@eaDir", ".thumbnails", "#recycle"]
-  watch: true             # inotify: new photos appear within seconds
-  rescan_interval: 3600   # full walk as a backstop, in seconds (0 disables)
+  follow_links: false     # Follow symbolic links while scanning. (restart) (advanced)
+  include_videos: true    # Index video files as well as photographs. (restart)
+  ignore_hidden: true     # Skip dot-files and dot-folders. (restart)
+  # Folder names to skip anywhere in the tree. (restart)
+  exclude: ['@eaDir', .thumbnails, '#recycle']
+  watch: true             # inotify: new photographs appear within seconds. (restart)
+  # Full walk as a backstop behind inotify, in seconds. 0 disables it.
+  # (restart)
+  rescan_interval: 3600.0
+  # Index at startup. Off is faster to start but new files wait for the
+  # watch. (restart)
   scan_on_start: true
-  subfolder: ""           # live filter; also settable from MQTT and the web UI
+  # Where “Remove” moves a picture. Nothing is ever unlinked, and every
+  # removal is written to removals.jsonl in this folder — when it went,
+  # where it came from, and what it was. The Removed tab reads that file and
+  # can put a picture back. (restart) (advanced)
   deleted_folder: ~/.local/share/picframe3/deleted
+  # Show only pictures whose path contains this. Pick one of your folders,
+  # or type any part of a path. Empty shows everything.
+  subfolder: ''
+  # How much of the index one scan may drop, as a fraction. A picture folder
+  # on a stick or a share is briefly absent now and then, and every file
+  # under it then looks deleted — this is what stops that from throwing away
+  # the play history and the place names. 0 removes the safeguard. (restart)
+  # (advanced)
+  prune_max_fraction: 0.2
 
+# Turning GPS coordinates into place names for captions.
 geo:
-  enabled: false          # turn GPS coordinates into place names
-  contact: ""             # REQUIRED when enabled: your email address.
-                          # Nominatim's usage policy needs a way to reach you.
-  language: en
-  detail: full            # how much of the address a caption shows:
-                          #   full                 Plage de Hattainville,
-                          #                        Hattainville, Cherbourg,
-                          #                        Normandy, France
-                          #   town_region_country  Hattainville, Normandy, France
-                          #   town_country         Hattainville, France
-                          #   town                 Hattainville
-                          #   region_country       Normandy, France
-                          #   country              France
-                          #   custom               use key_order below verbatim
-                          # Changing this rewrites the place names already in
-                          # the index, from the geocache — no new lookups.
-  suppress: []            # place names never to show, e.g. ["France"]
-  key_order:              # only used when detail is "custom".
-                          # One tier per line, and within a line the keys you
-                          # would accept for that tier, best first: the first
-                          # one this particular address actually has is the one
-                          # written, and the rest of the line is skipped.
-                          # That is what makes one setting behave the same in
-                          # France and in Germany — a French hamlet comes back
-                          # as "village", a German one as "isolated_dwelling".
-                          # The Settings tab has an editor for this, with a
-                          # live preview against the picture on screen.
-    - [tourism, attraction, amenity, isolated_dwelling]
-    - [neighbourhood, suburb, village, town]
-    - [city, municipality, county]
-    - [state, province, region]
-    - [country]
+  enabled: false          # Reverse-geocode GPS coordinates into place names.
+  # **Required when enabled.** Nominatim's usage policy needs a way to reach
+  # you.
+  contact: ''
+  language: en            # Two-letter code: the language place names come back in.
+  # Nominatim's replies, kept forever. Re-wording place names never costs a
+  # request. (advanced)
+  cache: ~/.local/share/picframe3/geocache.db3
+  # How much of an address a caption shows. Changing it rewrites the names
+  # already in the index, from the cache.
+  detail: full
+  suppress: []            # Place names never to show — your own country, say.
+  # Used when **How much of the address** is set to Custom. **One tier per
+  # line**, and within a line the keys you would accept for that tier, best
+  # first — the first one this particular address actually has is the one
+  # written, and the rest of the line is skipped. That is what makes a
+  # single setting behave the same in France and in Germany: a French hamlet
+  # comes back as village, a German one as isolated_dwelling, and a line
+  # reading village, isolated_dwelling, town catches both.
+  key_order:
+  - [tourism, attraction, amenity, isolated_dwelling]
+  - [neighbourhood, suburb, village, town]
+  - [city, municipality, county]
+  - [state, province, region]
+  - [country]
 
+# The broker, and the Home Assistant device it announces.
 mqtt:
-  enabled: false
-  host: ""
-  port: 1883
-  username: ""
-  password: ""
-  tls_ca: ""              # path to a CA certificate for TLS (port 8883)
-  device_id: picframe
+  enabled: false          # Announce the frame to Home Assistant and accept commands. (restart)
+  # Your broker. Home Assistant's built-in Mosquitto is usually the Home
+  # Assistant host itself. (restart)
+  host: ''
+  port: 1883              # 1883 plain, 8883 with TLS. (restart)
+  username: ''            # Leave empty for an open broker. (restart)
+  # Stored in the config file in plain text, so keep that file to yourself.
+  # (restart)
+  password: ''
+  tls_ca: ''              # Path to a CA certificate; use port 8883 with it. (restart) (advanced)
+  # Skip certificate verification. For a self-signed broker on your own LAN.
+  # (restart) (advanced)
+  tls_insecure: false
+  device_id: picframe     # Identifies this frame. Change it if you have two. (restart)
+  # What Home Assistant calls the device. (restart)
   device_name: Picture Frame
+  # homeassistant unless you changed it there. (restart) (advanced)
   discovery_prefix: homeassistant
-  publish_image: true     # send the current photograph, as an image entity
-  image_width: 1280       # longest edge of it, in pixels
+  topic_prefix: picframe  # The frame publishes under <prefix>/<device_id>/…. (restart) (advanced)
+  # Heartbeat, in seconds. State is also published the moment anything
+  # changes. (restart) (advanced)
+  publish_interval: 30.0
+  # Send the picture itself to Home Assistant, so a dashboard can show what
+  # is on the frame. The photograph, not the screen — it is there even while
+  # the display is off.
+  publish_image: true
+  # Longest edge of that picture, in pixels. 1280 looks right on a dashboard
+  # and on a phone; larger costs more on every change. (advanced)
+  image_width: 1280
+  image_quality: 82       # JPEG quality for it, 1–100. (advanced)
 
+# The web interface and REST API.
 http:
-  enabled: true
+  enabled: true           # This web interface and the REST API. (restart)
+  # 0.0.0.0 listens on every network; 127.0.0.1 only on the frame itself.
+  # (restart) (advanced)
   host: 0.0.0.0
-  port: 9000
-  auth_user: ""           # set both to require HTTP basic auth
-  auth_password: ""
+  port: 9000              # The port this page is served on. (restart)
+  auth_user: ''           # Set this and the password to require a login. (restart)
+  auth_password: ''       # Only used when a user name is set. (restart)
+  # Let the Remove button — and Home Assistant's *Remove current picture* —
+  # move pictures out of the library. Off refuses both, and a picture can
+  # then only be removed at the frame itself, with a button or a key.
+  # Nothing is ever unlinked either way: “remove” means moved to the deleted
+  # folder, and the Removed tab can put it back. (restart)
+  allow_delete: true
+  # Named sites that may call this API from a browser, e.g.
+  # https://ha.example.com. Anything listed here can do everything this page
+  # can do — skip pictures, change settings, remove photographs — on behalf
+  # of anyone who visits it while on your network. Leave it empty unless you
+  # are embedding the API somewhere. * is refused: it would grant that to
+  # every site on the web. (restart) (advanced)
+  cors_origins: []
+  # Extra names this frame answers to. It already answers to localhost, to
+  # its own hostname and to any address on your own network; add a name here
+  # only if you reach it through a reverse proxy or an unusual local domain.
+  # A request arriving under some other name is refused, which is what stops
+  # a web page from using your browser as a way in. (restart) (advanced)
+  allowed_hosts: []
 
+# Keyboard, touchscreen, mouse and GPIO buttons.
 input:
-  keyboard: true
-  touch: true
-  mouse: false
-  wake_on_input: true     # any key or touch turns the screen back on
-  gpio_buttons: {}        # e.g. {next: 17, pause: 27, display_toggle: 22}  (BCM pins)
+  keyboard: true          # A keyboard plugged into the Pi, read straight from evdev. (restart)
+  touch: true             # A touchscreen: tap right half for next, left for previous. (restart)
+  mouse: false            # Off by default; a stray mouse should not skip pictures. (restart)
+  gpio_buttons: {}        # BCM pin numbers, e.g. {"next": 17, "pause": 27}. (restart)
+  gpio_pull_up: true      # Buttons wired to ground, which is the usual way. (restart) (advanced)
+  wake_on_input: true     # Any button press turns the screen back on. (restart)
+  # evdev key names per action, e.g. KEY_RIGHT. (restart) (advanced)
+  keymap:
+    next: [KEY_RIGHT, KEY_SPACE, KEY_DOWN]
+    previous: [KEY_LEFT, KEY_UP]
+    pause: [KEY_P]
+    display_toggle: [KEY_O]
+    info_toggle: [KEY_I]
+    clock_toggle: [KEY_C]
+    delete: [KEY_DELETE]
+    quit: [KEY_ESC, KEY_Q]
 
+# When the screen is on, off, or dimmed.
 power:
-  enabled: true
-  schedule: {}            # {all: ["22:30-07:00"]} — screen off overnight
-  dim_schedule: {}        # {"19:00-22:30": 0.45} — dim in the evening
+  # {"all": ["22:30-07:00"]} — ranges may cross midnight, and weekday names
+  # work in place of all.
+  schedule: {}
+  dim_schedule: {}        # {"19:00-22:30": 0.45} — brightness, not on/off.
+  enabled: true           # Named enabled, not on: YAML reads a bare on: key as a boolean.
 
-# What the frame reports about the Pi itself.  Read on a background thread, so
-# a reading never interrupts a transition.
+# What the frame reports about the Pi it runs on — temperature, load,
+# memory, free space and the power supply.
 health:
+  # Measure the Pi’s temperature, load, memory and free space, and report
+  # them to Home Assistant and this page.
   enabled: true
-  interval: 30            # seconds between readings
-  disk_path: ""           # empty: the free space on your first picture folder
+  # Seconds between readings. Taken on a background thread, so it never
+  # interrupts a transition. (advanced)
+  interval: 30.0
+  # Which disk the free-space reading is about. Empty means your first
+  # picture folder — the one that actually fills up. (advanced)
+  disk_path: ''
 
+# Watching the frame’s own link to the house, and mending it when it
+# breaks.
 network:
-  # The frame watches its own link to the house and, if it goes, mends it.
-  # What is pinged is your router (found automatically from the routing table),
-  # never an address on the internet: a frame that restarts its Wi-Fi because a
-  # far-away server dropped a packet is worse than no watchdog at all.
+  # Check every so often that the frame can still reach the house, and say
+  # so in Home Assistant.
   enabled: true
-  target: ""              # empty: the default gateway, re-read on every check
-  interface: ""           # empty: whichever interface the default route uses
-  interval: 60            # seconds between checks
-  attempts: 3             # ping runs per check, before the check counts failed
-  timeout: 3              # seconds to wait for a reply
-  failures: 3             # failed checks in a row before anything is repaired
-  repair: true            # false: watch and report, never touch the connection
-  cooldown: 1800          # never mend more often than this (the safety catch)
-  settle: 45              # let the link settle this long after a repair
+  # Empty means your router, found automatically. Never put an address on
+  # the internet here — the frame would mend a link that is not broken.
+  target: ''
+  interface: ''           # Empty means whichever interface the frame actually uses. (advanced)
+  # Seconds between checks. A minute is plenty — the frame is looking for an
+  # outage, not measuring latency.
+  interval: 60.0
+  # Ping runs per check. One lost packet is not an outage; needing all of
+  # them to fail is what makes a failed check mean something. (advanced)
+  attempts: 3
+  timeout: 3.0            # How long to wait for a reply before that run counts as lost. (advanced)
+  # Three checks a minute apart is several minutes of real silence, not one
+  # lost packet.
+  failures: 3
+  repair: true            # Off watches and reports but never touches the connection.
+  # The safety catch: however bad it looks, never mend more than once in
+  # this window. (advanced)
+  cooldown: 1800.0
+  # After mending, wait this long before checking again — a link that has
+  # just come back needs a moment to finish coming back. (advanced)
+  settle: 45.0
 
+# Where log output goes.
 logging:
-  level: INFO             # DEBUG | INFO | WARNING | ERROR
-  file: ""                # also write to this file (rotated)
+  level: INFO             # DEBUG · INFO · WARNING · ERROR
+  file: ''                # Empty logs to the journal only. (restart) (advanced)
+  # Log through systemd, so journalctl -u picframe3@pi works. (restart)
+  # (advanced)
+  journald: true

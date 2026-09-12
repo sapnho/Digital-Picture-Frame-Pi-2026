@@ -22,6 +22,8 @@ the things it was asked to undo is not a journal.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -90,11 +92,36 @@ class RemovalLog:
         self._append(entry)
         return entry
 
+    @contextlib.contextmanager
+    def _locked(self):
+        """Hold the journal lock, on a file that is never replaced.
+
+        Deliberately not the journal itself.  A restore rewrites the journal
+        through a temporary file and ``os.replace``, which puts a *new* inode
+        at that path -- so a removal waiting on a lock taken on the old inode
+        would be granted it after the rename and write into a file nobody will
+        ever read again.  The lock file has no content and is never renamed,
+        so the two really do take turns.
+        """
+        os.makedirs(self.folder, exist_ok=True)
+        with open(self.path + ".lock", "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     def _append(self, entry: dict[str, Any]) -> None:
         line = json.dumps(entry, ensure_ascii=False, default=str)
         try:
             os.makedirs(self.folder, exist_ok=True)
-            with open(self.path, "a", encoding="utf-8") as fh:
+            with self._locked(), open(self.path, "a", encoding="utf-8") as fh:
+                # Exclusive for the whole append: a restore running at the same
+                # moment reads the journal, rewrites it into a temp file and
+                # renames that over the original, and a removal appended in
+                # between would land in the file that is about to be replaced
+                # and be lost without trace.  The lock is what makes the two
+                # take turns.
                 # A power cut can leave the last line without its newline.
                 # Appending straight onto it would glue the next removal to the
                 # torn one and lose both; a newline first costs nothing and
@@ -119,21 +146,39 @@ class RemovalLog:
 
     def mark_restored(self, stored_as: str, restored_to: str,
                       when: float | None = None) -> bool:
-        """Rewrite one line as restored.  The entry stays in the journal."""
-        entries = self.entries(include_restored=True)
-        hit = False
+        """Rewrite one line as restored.  The entry stays in the journal.
+
+        Read and rewrite happen under the same lock as :meth:`_append`, and the
+        journal is re-read inside it rather than before it -- otherwise a
+        removal recorded between the read and the rename is written into a file
+        that is then replaced by an older copy of itself.
+        """
         stamp = when if when is not None else time.time()
-        for entry in entries:
-            if entry.get("stored_as") == stored_as and not entry.get("restored_at"):
-                entry["restored_at"] = stamp
-                entry["restored_iso"] = _iso(stamp)
-                entry["restored_to"] = restored_to
-                hit = True
-        if hit:
-            self._rewrite(entries)
+        if not os.path.exists(self.path):
+            return False            # nothing to rewrite, and nothing to create
+        try:
+            os.makedirs(self.folder, exist_ok=True)
+            # "a" rather than "w": opening the journal to lock it must not be
+            # able to truncate it.
+            with self._locked():
+                self._invalidate()          # do not trust a cache read before the lock
+                entries = self.entries(include_restored=True)
+                hit = False
+                for entry in entries:
+                    if entry.get("stored_as") == stored_as and not entry.get("restored_at"):
+                        entry["restored_at"] = stamp
+                        entry["restored_iso"] = _iso(stamp)
+                        entry["restored_to"] = restored_to
+                        hit = True
+                if hit:
+                    self._rewrite(entries)
+        except OSError as exc:
+            _log.error("cannot update the removal journal at %s: %s", self.path, exc)
+            return False
         return hit
 
     def _rewrite(self, entries: list[dict[str, Any]]) -> None:
+        """Replace the journal with *entries*.  Call it holding the lock."""
         os.makedirs(self.folder, exist_ok=True)
         tmp = self.path + ".tmp"
         try:

@@ -146,6 +146,12 @@ class LibraryConfig:
     scan_on_start: bool = True
     deleted_folder: str = "~/.local/share/picframe3/deleted"
     subfolder: str = ""                   # live filter, changeable at runtime
+    #: The largest share of the index a single scan may delete.  A picture
+    #: folder on a USB stick or a network share is simply *absent* for a
+    #: moment now and then, and every file under it then looks deleted; without
+    #: this guard one unlucky scan throws away the play history, the hidden
+    #: flags and every geocoded place name.  0 switches the guard off.
+    prune_max_fraction: float = 0.2
 
 
 @dataclass
@@ -194,8 +200,16 @@ class HttpConfig:
     port: int = 9000
     auth_user: str = ""
     auth_password: str = ""
-    allow_delete: bool = False
+    #: Whether the Remove button may work from the web interface and from
+    #: MQTT.  On by default, because removing a picture from the frame is one
+    #: of the things the frame is for; turning it off leaves removal to the
+    #: keyboard and the GPIO buttons, which are in the room.
+    allow_delete: bool = True
     cors_origins: list[str] = field(default_factory=list)
+    #: Extra names the frame will answer to, beyond loopback, the private
+    #: address ranges and its own hostname.  Only needed behind a reverse
+    #: proxy or on a router with an unusual local domain.
+    allowed_hosts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -368,7 +382,23 @@ class Config:
         with open(tmp, "w", encoding="utf-8") as fh:
             yaml.safe_dump(self.as_dict(), fh, sort_keys=False, allow_unicode=True,
                            default_flow_style=False)
+            # os.replace is atomic against a *reader*, but says nothing about
+            # power.  A picture frame lives on a wall socket, so losing power
+            # between the write and the flush is the normal case rather than
+            # the exotic one, and ext4's delayed allocation would leave a
+            # zero-byte config behind.  Flush the file, then the directory
+            # entry that now points at it.
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, target)            # atomic: never a half-written config
+        try:
+            dir_fd = os.open(os.path.dirname(target) or ".", os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:                    # pragma: no cover - not all filesystems
+            pass
         self.source_path = target
         _log.info("configuration written to %s", target)
         return target
@@ -401,6 +431,7 @@ class Config:
             if leaf not in {f.name for f in fields(node)}:
                 raise KeyError(dotted)
             value = _coerce(value, _hints(type(node)).get(leaf), dotted)
+            value = _vet(dotted, value)
             setattr(node, leaf, value)
         elif isinstance(node, dict):
             node[leaf] = value
@@ -436,7 +467,8 @@ def _apply(section: Any, values: dict, prefix: str) -> None:
             _log.warning("ignoring unknown config key %s.%s", prefix, key)
             continue
         try:
-            setattr(section, key, _coerce(value, known.get(key), f"{prefix}.{key}"))
+            dotted = f"{prefix}.{key}"
+            setattr(section, key, _vet(dotted, _coerce(value, known.get(key), dotted)))
         except (TypeError, ValueError) as exc:
             _log.warning("bad value for %s.%s (%s); keeping the default",
                          prefix, key, exc)
@@ -444,6 +476,43 @@ def _apply(section: Any, values: dict, prefix: str) -> None:
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
+
+
+def _vet(dotted: str, value: Any) -> Any:
+    """Reject a value the frame cannot draw, and clamp one it can only survive.
+
+    Type coercion alone is not enough.  ``viewer.clock_position = ""`` is a
+    perfectly good string and puts an ``IndexError`` in the middle of every
+    frame; ``slideshow.interval = 0`` is a perfectly good float and turns the
+    render loop into a busy loop that decodes twenty pictures a second.  Both
+    arrive the same way -- one MQTT message, one line in a hand-edited file --
+    so both are stopped here, at the one place every setting passes through.
+
+    Choices raise (the caller reports "that is not a value for this"); ranges
+    clamp with a log line, because "3600 seconds is the most I will wait" is
+    more useful to somebody than a refusal.
+    """
+    from . import uischema
+
+    allowed = uischema.CHOICES.get(dotted)
+    if allowed and isinstance(value, str):
+        match = {c.casefold(): c for c in allowed}.get(value.strip().casefold())
+        if match is None:
+            raise ValueError(f"{value!r} is not one of {', '.join(allowed)}")
+        return match
+    limits = uischema.LIMITS.get(dotted)
+    if limits and isinstance(value, (int, float)) and not isinstance(value, bool):
+        low, high = limits
+        clamped = value
+        if low is not None:
+            clamped = max(low, clamped)
+        if high is not None:
+            clamped = min(high, clamped)
+        if clamped != value:
+            _log.warning("%s: %r is outside %s..%s; using %r",
+                         dotted, value, low, high, clamped)
+        return type(value)(clamped)
+    return value
 
 
 def _coerce(value: Any, annotation: Any, dotted: str) -> Any:
@@ -456,9 +525,23 @@ def _coerce(value: Any, annotation: Any, dotted: str) -> Any:
         if value is None:
             return None
         if origin in (list, set, tuple):
-            return list(value) if isinstance(value, (list, tuple, set)) else [value]
+            items = list(value) if isinstance(value, (list, tuple, set)) else [value]
+            # The elements matter as much as the container.  A colour typed
+            # into a text box arrives as ["0", "0", "0", "1"], and four
+            # strings in a list of floats do not fail here -- they fail much
+            # later, inside the renderer or inside Pillow, with an error that
+            # names neither the setting nor the value.
+            inner = get_args(annotation)
+            if inner and inner[0] is not Any:
+                return [_coerce(item, inner[0], dotted) for item in items]
+            return items
         if origin is dict:
-            return dict(value) if isinstance(value, dict) else {}
+            if isinstance(value, dict):
+                return dict(value)
+            # Silently turning a malformed schedule into {} deletes the
+            # schedule and says nothing; the caller keeps the old value and
+            # logs instead.
+            raise ValueError(f"{value!r} is not a mapping")
         if len(args) == 1:
             return _coerce(value, args[0], dotted)
         return value
@@ -479,6 +562,14 @@ def _coerce(value: Any, annotation: Any, dotted: str) -> Any:
         return float(value)
     if annotation is str:
         return str(value)
+    # A bare `dict` or `list` annotation -- power.schedule, input.keymap --
+    # reaches here with no origin to inspect.  Letting anything through meant a
+    # mistyped schedule was *stored* as a string and then quietly ignored by
+    # everything that expected a mapping.
+    if annotation is dict and not isinstance(value, dict):
+        raise ValueError(f"{value!r} is not a mapping")
+    if annotation is list and not isinstance(value, (list, tuple)):
+        raise ValueError(f"{value!r} is not a list")
     return value
 
 

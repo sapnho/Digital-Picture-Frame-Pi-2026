@@ -120,11 +120,23 @@ def poster_frame(path: str, size: tuple[int, int], position: float = 0.1,
         f"! appsink name=sink max-buffers=1 drop=false sync=false"
     )
     pipeline = None
+    deadline = int(timeout * Gst.SECOND)
     try:
         pipeline = Gst.parse_launch(desc)
         sink = pipeline.get_by_name("sink")
         pipeline.set_state(Gst.State.PAUSED)
-        pipeline.get_state(int(timeout * Gst.SECOND))
+        # The return of get_state() is the whole point of calling it.  A file
+        # whose codec is missing or whose moov atom is damaged never reaches
+        # PAUSED, and the ASYNC or FAILURE that says so was thrown away here --
+        # after which "pull-preroll", which blocks until a preroll arrives and
+        # has no timeout, waited for a frame that was never coming.  That is a
+        # loader thread gone for good, and after a handful of broken files the
+        # frame has no loader threads left.
+        change, _state, _pending = pipeline.get_state(deadline)
+        if change != Gst.StateChangeReturn.SUCCESS:
+            _log.info("no poster frame from %s: the pipeline did not preroll (%s)",
+                      path, change)
+            return None
         dur_ok, duration = pipeline.query_duration(Gst.Format.TIME)
         if dur_ok and duration > 0:
             pipeline.seek_simple(
@@ -132,9 +144,14 @@ def poster_frame(path: str, size: tuple[int, int], position: float = 0.1,
                 Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
                 int(duration * position),
             )
-            pipeline.get_state(int(timeout * Gst.SECOND))
-        sample = sink.emit("pull-preroll")
+            change, _state, _pending = pipeline.get_state(deadline)
+            if change != Gst.StateChangeReturn.SUCCESS:
+                _log.debug("seek into %s did not settle; using the first frame", path)
+        # try-pull-preroll is the same call with a deadline on it.
+        sample = sink.emit("try-pull-preroll", deadline)
         if sample is None:
+            _log.info("no poster frame from %s: nothing prerolled within %.0fs",
+                      path, timeout)
             return None
         buf = sample.get_buffer()
         ok, info = buf.map(Gst.MapFlags.READ)
@@ -144,14 +161,17 @@ def poster_frame(path: str, size: tuple[int, int], position: float = 0.1,
             caps = sample.get_caps().get_structure(0)
             vw, vh = caps.get_value("width"), caps.get_value("height")
             stride = ((vw * 3) + 3) & ~3          # GStreamer pads rows to 4 bytes
-            data = bytes(info.data)
-            return Image.frombytes("RGB", (vw, vh), data, "raw", "RGB", stride, 1)
+            # frombytes copies into the new image, so the mapped buffer can be
+            # handed over as it is: one copy of a full frame, not two.
+            return Image.frombytes("RGB", (vw, vh), info.data, "raw", "RGB", stride, 1)
         finally:
             buf.unmap(info)
     except Exception as exc:
         _log.warning("could not extract a poster frame from %s: %s", path, exc)
         return None
     finally:
+        # Always, on every path: a pipeline left in PAUSED keeps the hardware
+        # decoder, and there is exactly one of those on a Pi.
         if pipeline is not None:
             pipeline.set_state(Gst.State.NULL)
 
@@ -200,6 +220,10 @@ class VideoPlayer:
         self._started = 0.0
         self._paused = False
         self._paused_at = 0.0
+        #: Whether the decoder has already been handed back (see _finish).  The
+        #: pipeline object is kept afterwards so that ``playing``, ``elapsed``
+        #: and the rest still answer for the video that has just ended.
+        self._released = False
         self.frame_size: tuple[int, int] = size
 
     # -- control -----------------------------------------------------------
@@ -229,8 +253,14 @@ class VideoPlayer:
                 raise RuntimeError("neither playbin3 nor playbin is installed")
             pipeline.set_property("uri", _uri(path))
             pipeline.set_property("video-sink", sink_bin)
-            # GST_PLAY_FLAG_VIDEO | GST_PLAY_FLAG_AUDIO
-            pipeline.set_property("flags", 0x00000001 | 0x00000002)
+            # GST_PLAY_FLAG_VIDEO = 0x1, GST_PLAY_FLAG_AUDIO = 0x2.  Muting
+            # playbin only turns the volume down: the audio branch is still
+            # built, and on a Pi with no audio device configured autoaudiosink
+            # fails to start and takes the whole pipeline into ERROR -- a muted
+            # video that does not play at all.  With the flag cleared no audio
+            # sink is created in the first place, and nothing can fail in it.
+            flags = 0x00000001 if self.mute else 0x00000001 | 0x00000002
+            pipeline.set_property("flags", flags)
         except Exception as exc:
             self._error = str(exc)
             _log.error("cannot build video pipeline: %s", exc)
@@ -245,6 +275,7 @@ class VideoPlayer:
         self._path = path
         self._eos = False
         self._error = None
+        self._released = False
         pipeline.set_state(Gst.State.PLAYING)
         self._started = time.monotonic()
         self._paused = False
@@ -252,7 +283,7 @@ class VideoPlayer:
         return True
 
     def pause(self, paused: bool = True) -> None:
-        if self._pipeline is None:
+        if self._pipeline is None or self._released:
             return
         # A paused frame is not playing, so the time it spends paused must not
         # count against ``max_seconds``.
@@ -272,6 +303,7 @@ class VideoPlayer:
             self._path = None
             self._eos = False
             self._paused = False
+            self._released = False
 
     def close(self) -> None:
         self.stop()
@@ -294,15 +326,20 @@ class VideoPlayer:
         return self.max_seconds > 0 and self.elapsed >= self.max_seconds
 
     def _finish(self) -> None:
-        """Stop feeding frames, leaving the last one on screen.
+        """Stop feeding frames and give the decoder back.
 
-        The pipeline is paused rather than torn down: the slide is still up and
-        about to be crossfaded away, and a frozen last frame is what should fade
-        out.  ``stop()`` releases it when the next slide arrives.
+        The last frame stays on screen regardless -- it was uploaded as a
+        texture and the renderer keeps it until the crossfade replaces it, so
+        nothing here is what holds the picture.  What the pipeline does hold in
+        PAUSED is the V4L2 decoder, of which a Pi has one: leaving it there
+        until the next ``play()`` meant a still picture between two videos kept
+        the hardware decoder busy, and the next video could fail to start
+        because of it.  NULL releases it and the frozen frame is unaffected.
         """
         self._eos = True
-        if self._pipeline is not None:
-            self._pipeline.set_state(Gst.State.PAUSED)
+        if self._pipeline is not None and not self._released:
+            self._pipeline.set_state(Gst.State.NULL)
+            self._released = True
 
     @property
     def error(self) -> str | None:
@@ -347,6 +384,12 @@ class VideoPlayer:
             struct = sample.get_caps().get_structure(0)
             w, h = struct.get_value("width"), struct.get_value("height")
             self.frame_size = (w, h)
+            # The copy stays.  info.data is only valid until the unmap in the
+            # finally below, and the caller uploads the frame after poll() has
+            # returned, so handing out the mapped memory would be a read of
+            # freed buffer -- a crash, not a slow texture.  Removing the copy
+            # means moving the GL upload inside the map, which is a renderer
+            # change; the poster path above avoids it because PIL copies for us.
             return VideoFrame(
                 data=bytes(info.data),
                 width=w,

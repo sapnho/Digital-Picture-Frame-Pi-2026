@@ -7,6 +7,7 @@ tested without a GL context.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -16,6 +17,8 @@ from PIL import Image
 
 from . import textstyle
 from .textstyle import TextStyle
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_SEPARATOR = "  ·  "
 
@@ -36,6 +39,26 @@ CAPTION_FIELDS: tuple[tuple[str, str], ...] = (
 
 #: Just the names, for validation.
 CAPTION_FIELD_NAMES = tuple(name for name, _ in CAPTION_FIELDS)
+
+
+#: Where the clock goes when the configured position makes no sense.
+DEFAULT_POSITION = "TR"
+
+
+def normalise_position(position: str, default: str = DEFAULT_POSITION) -> str:
+    """One of TL TC TR BL BC BR, whatever the configuration file said.
+
+    The layout code indexes ``position[0]`` and ``position[1]``, so an empty
+    string or a stray "top-right" from a hand-edited config used to take the
+    draw path down with an IndexError -- several frames after the setting was
+    changed, which makes it look like anything but a bad value.  Configuration
+    is validated elsewhere; the draw path still has to survive what reaches it.
+    """
+    value = str(position or "").strip().upper()
+    if len(value) == 2 and value[0] in "TB" and value[1] in "LCR":
+        return value
+    _log.warning("unusable overlay position %r; using %s", position, default)
+    return default
 
 
 @dataclass
@@ -131,6 +154,7 @@ def clock(
     the clock's size, as picframe did, puts a sentence across the picture in
     120-point type.
     """
+    position = normalise_position(position)
     align = _align_for(position)
     text = datetime.fromtimestamp(now or time.time()).strftime(fmt)
     w, h = screen
@@ -175,7 +199,7 @@ def _offset(total: int, part: int, align: str) -> int:
 
 
 def _align_for(position: str) -> str:
-    return {"L": "L", "C": "C", "R": "R"}.get(position[1].upper(), "L")
+    return {"L": "L", "C": "C", "R": "R"}.get(normalise_position(position)[1], "L")
 
 
 def notice(
