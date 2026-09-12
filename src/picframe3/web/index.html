@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#101114" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f3f2f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171514" media="(prefers-color-scheme: dark)">
 <title>Picture Frame</title>
 <script>
   /* Stamped before the stylesheet paints, so the page never flashes the wrong
@@ -53,6 +53,7 @@
     </div>
 
     <div class="meta">
+      <span class="kicker">On the wall</span>
       <h1 id="title">—</h1>
       <p id="subtitle" class="muted"></p>
       <ul id="exif" class="chips"></ul>
@@ -86,6 +87,7 @@
          so in its heading. -->
     <section class="filter" id="filter">
       <div class="filter-head">
+        <span class="kicker">Filter</span>
         <h2>What the frame is showing</h2>
         <span class="pill" id="filter-count">—</span>
       </div>
@@ -146,10 +148,16 @@
 
   <!-- ------------------------------------------------------ Removed -->
   <section id="view-removed" class="view">
-    <p class="muted" id="removed-intro">
-      Nothing is ever deleted. Every picture you remove is moved aside and
-      written down here — when it went, where it came from, and what it was.
-    </p>
+    <div class="page-head">
+      <div>
+        <span class="kicker">Removed</span>
+        <h1>Nothing is ever deleted</h1>
+        <p class="lede" id="removed-intro">
+          Every picture you remove is moved aside and written down here — when
+          it went, where it came from, and what it was.
+        </p>
+      </div>
+    </div>
     <div class="toolbar">
       <input id="removed-search" type="search" autocomplete="off"
              placeholder="Search removed pictures…">
@@ -163,13 +171,9 @@
   </section>
 
   <!-- ----------------------------------------------------- Settings -->
+  <!-- Two ways in, one behind the other: nine jobs on the front, and the
+       whole generated list a click away for everything they leave out. -->
   <section id="view-settings" class="view">
-    <div class="toolbar">
-      <input id="settings-search" type="search" autocomplete="off"
-             placeholder="Search every setting…">
-      <label class="inline"><input id="settings-advanced" type="checkbox">
-        Show advanced</label>
-    </div>
     <div id="restart-notice" class="notice" hidden>
       <div>
         <strong id="restart-headline"></strong>
@@ -178,16 +182,79 @@
       <button id="restart-now" class="btn btn-primary" type="button">Save &amp; restart</button>
     </div>
 
-    <form id="settings"></form>
-    <div class="controls">
+    <!-- One head at a time, and the tools sit under whichever it is, directly
+         above what they act on. -->
+    <div class="page-head" id="front-head">
+      <div>
+        <h1>What would you like to change?</h1>
+        <p class="lede">Every card shows what the frame is doing now. Open one
+          and you get only the settings that job needs.</p>
+      </div>
+    </div>
+
+    <div class="page-head" id="all-head" hidden>
+      <div>
+        <button id="settings-back" class="linkish" type="button">← All the jobs</button>
+        <h1 id="all-title">All settings</h1>
+        <p class="lede" id="all-lede"></p>
+      </div>
+    </div>
+
+    <div class="settings-tools">
+      <span class="spacer"></span>
+      <input id="settings-search" type="search" autocomplete="off"
+             placeholder="Search every setting…">
+      <label class="inline" id="settings-advanced-label" hidden>
+        <input id="settings-advanced" type="checkbox"> Show advanced</label>
+    </div>
+
+    <div id="settings-front">
+      <div id="jobs" class="jobs"></div>
+      <nav class="rare">
+        <span class="rare-label">Rarely needed</span>
+        <span id="rare-links"></span>
+      </nav>
+    </div>
+
+    <div id="settings-all" hidden>
+      <form id="settings"></form>
+    </div>
+
+    <!-- Pinned to the foot of the window: a page you can scroll for a minute
+         should never make you scroll back to find the button that keeps what
+         you just changed. -->
+    <div class="save-bar is-clean">
       <button id="save" class="btn btn-primary" type="button">Save to config file</button>
       <button id="reload" class="btn" type="button">Reload from file</button>
       <button id="restart" class="btn" type="button"
               title="Stop the frame and start it again">Restart the frame</button>
+      <span class="unsaved" id="save-state" hidden>Not yet in the config file</span>
+      <span class="spacer"></span>
+      <pre id="saved" class="muted"></pre>
     </div>
-    <pre id="saved" class="muted"></pre>
   </section>
 </main>
+
+<!-- One sheet, filled from whichever job was opened. -->
+<div class="sheet-backdrop" id="sheet-backdrop">
+  <aside class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-head">
+      <div>
+        <span class="kicker" id="sheet-kicker"></span>
+        <h2 id="sheet-title">—</h2>
+        <p id="sheet-state"></p>
+      </div>
+      <button class="btn sheet-close" id="sheet-close" type="button">Close</button>
+    </div>
+    <div class="sheet-body"><div class="form" id="sheet-form"></div></div>
+    <a class="sheet-rest linkish" id="sheet-rest" href="#"></a>
+    <div class="sheet-foot is-clean">
+      <button class="btn btn-primary" id="sheet-save" type="button">Save to config file</button>
+      <span class="spacer"></span>
+      <span class="muted note" id="sheet-note"></span>
+    </div>
+  </aside>
+</div>
 
 <script src="app.js"></script>
 </body>

@@ -77,6 +77,12 @@ the Pi and nothing to rebuild when Mesa updates.
   reports outages, and mends the link itself: reconnect first, restart
   NetworkManager only if that was not enough, never more than once in half an
   hour, and never a reboot
+- **Settings you can find** — the settings page opens on the jobs someone
+  actually comes to do (*how fast pictures change*, *when the screen turns
+  off*), each card saying what the frame is doing now and holding only the
+  three or four settings that job needs. Everything else is one click away in
+  the full list, which is generated from the configuration itself, so no
+  setting can be missing from it
 - `picframe3 doctor` — checks the hardware, drivers, permissions and library and
   tells you the command to fix whatever is missing
 
@@ -154,5 +160,9 @@ image file, which is also how the renderer is tested in CI.
 
 ## Licence
 
-MIT, as `picframe` is. The design owes a great deal to Helge Erbe, Paddy Gaunt
-and Jeff Godfrey, whose work established what a good Pi picture frame does.
+MIT, as `picframe` is. The web interface sets its type in Archivo, carried in
+`src/picframe3/web/fonts/` under the SIL Open Font License 1.1 (`OFL.txt` sits
+beside it) so that the page needs nothing from the outside world.
+
+The design owes a great deal to Helge Erbe, Paddy Gaunt and Jeff Godfrey, whose
+work established what a good Pi picture frame does.

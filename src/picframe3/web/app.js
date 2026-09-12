@@ -518,12 +518,91 @@ function when_text(iso) {
    up missing exactly the settings nobody thought about. */
 
 let SCHEMA = null;
+let onlySection = "";        // "" shows every section in the full list
+let openJob = null;          // the job whose sheet is on screen, if any
 
 async function loadSettings() {
   SCHEMA = await api("/api/config/schema");
-  drawSettings();
+  drawJobs();
+  // Only when it is on screen: drawing the full list wires up every control on
+  // it, and the address-tiers editor asks the frame for a preview as it does.
+  if (!$("#settings-all").hidden) drawSettings();
+  if (openJob) drawSheet(openJob);   // a sheet left open follows the new values
 }
 
+/* Every field of every section, by key: the jobs name settings, the sections
+   own them, and this is what turns one into the other. */
+function fieldsByKey() {
+  return Object.fromEntries(
+    SCHEMA.sections.flatMap((s) => s.fields.map((f) => [f.key, f])));
+}
+
+function settingCount() {
+  return SCHEMA.sections.reduce((n, s) => n + s.fields.length, 0);
+}
+
+/* ---- the front door ------------------------------------------------------
+   Nine cards, each a job someone came here to do, each saying what the frame
+   is doing about it now.  The sentences are written by the frame (uischema),
+   not here: one description of what `fit: auto` currently does, shared with
+   the reference, rather than two that can disagree. */
+function drawJobs() {
+  const grid = $("#jobs");
+  grid.innerHTML = (SCHEMA.jobs || []).map((job) => `
+    <button class="job" type="button" data-job="${escapeHtml(job.name)}">
+      <span class="job-kicker">${escapeHtml(job.kicker)}</span>
+      <span class="job-title">${escapeHtml(job.title)}</span>
+      <span class="job-state">${escapeHtml(job.state)}</span>
+      <span class="job-go">Adjust →</span>
+    </button>`).join("");
+  grid.querySelectorAll(".job").forEach((b) => {
+    b.onclick = () => openSheet(b.dataset.job);
+  });
+
+  /* Whatever no card claims gets a link of its own, worked out rather than
+     listed: add a section to the config and it turns up here by itself. */
+  const claimed = new Set((SCHEMA.jobs || []).map((j) => j.section));
+  const rare = [`<button class="linkish" type="button" data-all="">` +
+                `All ${settingCount()} settings</button>`]
+    .concat(SCHEMA.sections.filter((s) => !claimed.has(s.name)).map((s) =>
+      `<button class="linkish" type="button" data-all="${escapeHtml(s.name)}">` +
+      `${escapeHtml(s.label)}</button>`));
+  const strip = $("#rare-links");
+  strip.innerHTML = rare.join(" ");
+  strip.querySelectorAll("[data-all]").forEach((b) => {
+    b.onclick = () => showAll(b.dataset.all);
+  });
+}
+
+function showJobs() {
+  onlySection = "";
+  $("#settings-front").hidden = false;
+  $("#front-head").hidden = false;
+  $("#settings-all").hidden = true;
+  $("#all-head").hidden = true;
+  $("#settings-advanced-label").hidden = true;
+}
+
+function showAll(section) {
+  onlySection = section || "";
+  $("#settings-front").hidden = true;
+  $("#front-head").hidden = true;
+  $("#settings-all").hidden = false;
+  $("#all-head").hidden = false;
+  $("#settings-advanced-label").hidden = false;
+  const one = SCHEMA.sections.find((s) => s.name === onlySection);
+  $("#all-title").textContent = one ? one.label : `All ${settingCount()} settings`;
+  $("#all-lede").textContent = one ? one.prose
+    : "Generated from the frame's own configuration, so nothing can be missing " +
+      "from it. Grouped the way the config file is.";
+  drawSettings();
+  window.scrollTo({ top: 0 });
+}
+
+/* ---- the full list ------------------------------------------------------
+   The whole schema, or one section of it, or whatever matches the search box.
+   This is the page the front door is standing in front of, not a replacement
+   for it: every setting is still here. */
 function drawSettings() {
   const form = $("#settings");
   const query = ($("#settings-search")?.value || "").trim().toLowerCase();
@@ -532,6 +611,7 @@ function drawSettings() {
   let shown = 0;
 
   for (const section of SCHEMA.sections) {
+    if (onlySection && section.name !== onlySection) continue;
     const visible = section.fields.filter((f) => {
       if (f.advanced && !showAdvanced && !query) return false;
       if (!query) return true;
@@ -542,8 +622,11 @@ function drawSettings() {
 
     const block = document.createElement("section");
     block.className = "settings-group";
-    block.innerHTML = `<h2>${escapeHtml(section.label)}</h2>` +
-                      `<p class="muted">${escapeHtml(section.prose)}</p>` +
+    // With one section on screen the page head has already named it; a second
+    // identical heading under it is furniture.
+    block.innerHTML = (onlySection ? "" :
+                       `<h2>${escapeHtml(section.label)}</h2>` +
+                       `<p class="muted">${escapeHtml(section.prose)}</p>`) +
                       `<div class="form"></div>`;
     const grid = block.querySelector(".form");
     for (const f of visible) grid.appendChild(fieldControl(f));
@@ -556,6 +639,73 @@ function drawSettings() {
   form.querySelectorAll("[data-pick-list]").forEach(wirePickList);
   form.querySelectorAll("[data-tiers]").forEach(wireTiers);
 }
+
+/* ---- one job's sheet ----------------------------------------------------
+   The same controls as the full list, just fewer of them.  There is no Cancel
+   here on purpose: every control applies to the frame as you leave it, the way
+   the rest of this page has always worked, and the only thing left to decide
+   is whether it also goes into the config file. */
+const sheet = () => $("#sheet-backdrop");
+
+function openSheet(name) {
+  openJob = name;
+  drawSheet(name);
+  sheet().setAttribute("data-open", "");
+}
+
+function drawSheet(name) {
+  const job = (SCHEMA.jobs || []).find((j) => j.name === name);
+  if (!job) return closeSheet();
+  const byKey = fieldsByKey();
+  $("#sheet-kicker").textContent = job.kicker;
+  $("#sheet-title").textContent = job.title;
+  $("#sheet-state").textContent = job.state;
+
+  const form = $("#sheet-form");
+  form.innerHTML = "";
+  for (const key of job.fields) {
+    const field = byKey[key];
+    if (field) form.appendChild(fieldControl(field));
+  }
+  form.querySelectorAll("[data-key]").forEach(wireControl);
+  form.querySelectorAll("[data-pick-list]").forEach(wirePickList);
+  form.querySelectorAll("[data-tiers]").forEach(wireTiers);
+
+  // What this job leaves behind in its own section, said as a number so it is
+  // clear the card is a shortcut and not the whole truth.
+  const section = SCHEMA.sections.find((s) => s.name === job.section);
+  const here = job.fields.filter((k) => k.startsWith(`${job.section}.`)).length;
+  const rest = section ? section.fields.length - here : 0;
+  const link = $("#sheet-rest");
+  link.hidden = rest <= 0;
+  if (rest > 0) {
+    link.textContent = `Everything else in ${section.label}: ` +
+      `${rest} more setting${rest === 1 ? "" : "s"} →`;
+    link.onclick = (e) => { e.preventDefault(); closeSheet(); showAll(job.section); };
+  }
+  $("#sheet-note").textContent =
+    "Changes reach the frame as you make them; this writes them into the file.";
+}
+
+async function closeSheet() {
+  if (!openJob) return;
+  openJob = null;
+  sheet().removeAttribute("data-open");
+  // The cards summarise the configuration, so they are stale the moment
+  // anything in the sheet changed: ask the frame again rather than guessing.
+  try { await loadSettings(); } catch (err) { /* the frame is busy or down */ }
+}
+
+sheet().addEventListener("click", (e) => { if (e.target === sheet()) closeSheet(); });
+$("#sheet-close").onclick = () => closeSheet();
+$("#sheet-save").onclick = async () => {
+  await api("/api/config?persist=true", { method: "PATCH", body: "{}" });
+  $("#sheet-note").textContent = "Saved to the config file.";
+  $("#saved").textContent = "Saved to the config file.";
+};
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheet(); });
+$("#settings-back").onclick = () => showJobs();
+
 
 function optionList(name) {
   return (SCHEMA.options && SCHEMA.options[name]) || [];
@@ -860,7 +1010,16 @@ themePicker.onchange = () => {
   try { localStorage.setItem("picframe3-theme", choice); } catch (err) { /* private window */ }
 };
 
-$("#settings-search").oninput = () => { if (SCHEMA) drawSettings(); };
+/* Typing is a way into the full list, not a filter on the cards: a card is a
+   job, and half a job is nothing.  Emptying the box again puts the front door
+   back, unless a single section was chosen deliberately. */
+$("#settings-search").oninput = () => {
+  if (!SCHEMA) return;
+  const query = $("#settings-search").value.trim();
+  if (query && $("#settings-all").hidden) showAll("");
+  else if (!query && !onlySection) showJobs();
+  else drawSettings();
+};
 $("#settings-advanced").onchange = () => { if (SCHEMA) drawSettings(); };
 
 $("#save").onclick = async () => {
@@ -929,23 +1088,26 @@ function renderRestartNotice() {
   if (!state) return;
   const pending = state.restart_required || [];
   const unsaved = !!state.unsaved_changes;
-  if (!pending.length && !unsaved) { notice.hidden = true; return; }
-  notice.hidden = false;
-  if (pending.length) {
-    $("#restart-headline").textContent = pending.length === 1
-      ? "One setting needs a restart"
-      : `${pending.length} settings need a restart`;
-    $("#restart-detail").textContent =
-      pending.join(", ") +
-      (unsaved ? " — these will be saved to the config file first." : "");
-    $("#restart-now").hidden = false;
-  } else {
-    $("#restart-headline").textContent = "Unsaved changes";
-    $("#restart-detail").textContent =
-      "Everything you changed is live on the frame, but not yet in the config " +
-      "file — it would go back to the old values on the next restart.";
-    $("#restart-now").hidden = true;
+
+  /* The save bar is on screen at all times, so it is where "there is something
+     to save" belongs — a notice at the top of a page you have scrolled away
+     from is a notice nobody is looking at.  That leaves the notice the one
+     thing only it can say: which settings are waiting for a restart. */
+  for (const sel of [".save-bar", ".sheet-foot"]) {
+    const bar = document.querySelector(sel);
+    if (bar) bar.classList.toggle("is-clean", !unsaved);
   }
+  $("#save-state").hidden = !unsaved;
+
+  if (!pending.length) { notice.hidden = true; return; }
+  notice.hidden = false;
+  $("#restart-headline").textContent = pending.length === 1
+    ? "One setting needs a restart"
+    : `${pending.length} settings need a restart`;
+  $("#restart-detail").textContent =
+    pending.join(", ") +
+    (unsaved ? " — these will be saved to the config file first." : "");
+  $("#restart-now").hidden = false;
 }
 
 /* --------------------------------------------------------------- utils */

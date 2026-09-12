@@ -47,9 +47,12 @@ def main() -> None:
         "",
         "Every setting here also appears in the **Settings** tab of the web interface —",
         "the page is generated from the same definitions as this file, so neither can",
-        "fall behind the code. Settings marked *(advanced)* are behind the “Show",
-        "advanced” switch there. Anything can also be set from MQTT, or with",
-        "`picframe3 config --set slideshow.interval=90`.",
+        "fall behind the code. That tab opens on a handful of cards, one per job",
+        "(*how fast pictures change*, *where the photographs come from*), each holding",
+        "the few settings that job needs; **All settings** at the foot of it is the",
+        "whole list below, grouped the same way. Settings marked *(advanced)* are",
+        "behind the “Show advanced” switch there. Anything can also be set from MQTT,",
+        "or with `picframe3 config --set slideshow.interval=90`.",
         "",
     ]
     cfg = Config()

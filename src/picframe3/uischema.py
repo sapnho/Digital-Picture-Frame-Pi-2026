@@ -411,6 +411,271 @@ def _options() -> dict[str, list[dict[str, str]]]:
     }
 
 
+# --------------------------------------------------------------------------
+# The front door: jobs, not fields
+# --------------------------------------------------------------------------
+# Seventy-odd settings in twelve sections is the right thing to *have* and the
+# wrong thing to be *shown*.  Nobody arrives at a picture frame wanting to edit
+# `viewer.mat_outer_border`; they arrive wanting a wider board.  So the page
+# opens on a dozen jobs, each holding the three to five settings that job
+# actually needs, with a sentence saying what the frame is doing now.
+#
+# This is a hand-written list, and hand-written lists go stale — which is why
+# nothing is hidden behind it.  Every setting stays reachable through the full
+# list, the tests below hold every key here against the real dataclasses, and
+# a section no job claims turns into a link of its own automatically.
+
+
+def _n(value, digits: int = 1) -> str:
+    """A number as a person writes it: 35, 2.5, 10.75 — never 35.0."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    text = f"{number:.{digits}f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _ratio(value) -> str:
+    """0.85, 1.0 — a fraction always reads as one, never as a bare integer."""
+    try:
+        text = f"{float(value):.2f}".rstrip("0")
+    except (TypeError, ValueError):
+        return str(value)
+    return text + "0" if text.endswith(".") else text
+
+
+def _cap(text: str) -> str:
+    """First letter up, the rest left alone — `str.capitalize` eats GPIO."""
+    return text[:1].upper() + text[1:]
+
+
+def _list(values, limit: int = 3) -> str:
+    values = [str(v) for v in (values or []) if str(v).strip()]
+    if not values:
+        return ""
+    if len(values) <= limit:
+        return ", ".join(values)
+    return f"{', '.join(values[:limit])} and {len(values) - limit} more"
+
+
+ORDER_SHORT = {
+    "shuffle": "shuffle, every picture once",
+    "random": "random, may repeat",
+    "date_desc": "newest first",
+    "date_asc": "oldest first",
+    "name": "by file name",
+    "folder": "by folder",
+    "recent": "most recently taken first",
+    "least_played": "least shown first",
+}
+
+FIT_SHORT = {
+    "auto": "Automatic",
+    "mat": "Always in a mat",
+    "blur": "Always on a blurred copy",
+    "contain": "Always whole, on the background",
+    "cover": "Always cropped to fill",
+}
+
+JUSTIFY_SHORT = {"L": "left", "C": "centred", "R": "right"}
+
+
+def _state_pacing(c) -> str:
+    s = c.slideshow
+    bits = [f"{_n(s.interval)} seconds each",
+            f"{s.transition} over {_n(s.transition_time)} s",
+            ORDER_SHORT.get(s.order, s.order)]
+    return ("paused · " if s.paused else "") + " · ".join(bits)
+
+
+def _state_framing(c) -> str:
+    v = c.viewer
+    bits = [FIT_SHORT.get(v.fit, v.fit)]
+    if v.fit == "auto":
+        does = [{"mat": "mats", "blur": "blurs behind", "contain": "letterboxes",
+                 "cover": "crops"}.get(f, f) for f in (v.fit_choices or ["mat"])]
+        bits.append(f"{' or '.join(does)} a mismatched shape")
+    if v.fit in ("auto", "mat"):
+        board = f"{v.mat_outer_border} px board"
+        if v.mat_texture:
+            board += " with paper grain"
+        bits.append(board)
+    return " · ".join(bits)
+
+
+def _state_captions(c) -> str:
+    v = c.viewer
+    written = [CAPTION_SHORT.get(name, name) for name in (v.show_text or [])]
+    if not written:
+        return "Nothing written over the picture"
+    return (f"{_list(written, 4)} — {JUSTIFY_SHORT.get(v.text_justify, v.text_justify)}, "
+            f"{v.text_size} px, up for {_n(v.text_seconds)} s")
+
+
+def _state_library(c) -> str:
+    lib = c.library
+    bits = [_list(lib.picture_folders) or "no folder set"]
+    if lib.subfolder:
+        bits.append(f"only {lib.subfolder}")
+    bits.append("videos included" if lib.include_videos else "photographs only")
+    bits.append("watching for new files" if lib.watch
+                else f"rescan every {_n(lib.rescan_interval / 60)} min")
+    return " · ".join(bits)
+
+
+def _state_video(c) -> str:
+    s = c.slideshow
+    if not c.library.include_videos:
+        return "No videos in the library"
+    bits = ["plays to the end" if not s.video_max_seconds
+            else f"cut off after {_n(s.video_max_seconds)} s"]
+    bits.append("repeats until the interval is up" if s.video_loop else "never repeats")
+    bits.append("silent" if s.video_mute else "with sound")
+    return _cap(" · ".join(bits))
+
+
+def _state_sleep(c) -> str:
+    p = c.power
+    if not p.enabled or (not p.schedule and not p.dim_schedule):
+        return "On all day — no schedule set, no dimming"
+    off = sum(len(v if isinstance(v, list) else [v]) for v in (p.schedule or {}).values())
+    bits = []
+    bits.append(f"{off} off period{'' if off == 1 else 's'}" if off else "never turns off")
+    bits.append(f"{len(p.dim_schedule)} dimming step"
+                f"{'' if len(p.dim_schedule) == 1 else 's'}"
+                if p.dim_schedule else "no dimming")
+    return _cap(" · ".join(bits))
+
+
+def _state_screen(c) -> str:
+    d = c.display
+    turn = {0: "Upright", 180: "Upside down"}.get(int(d.rotate or 0), f"{d.rotate}°")
+    backend = {"auto": "automatic backend", "kms": "kms backend",
+               "headless": "no screen — headless"}.get(d.backend, d.backend)
+    return f"{turn} · brightness {_ratio(d.brightness)} · {backend}"
+
+
+def _state_places(c) -> str:
+    g = c.geo
+    if not g.enabled:
+        return "Off — captions name no places"
+    from .media.geocode import DETAIL_LABELS
+    detail = DETAIL_LABELS.get(g.detail, g.detail)
+    detail = detail.split("—")[-1].strip().lower()
+    language = LANGUAGE_NAMES.get((g.language or "").lower(), g.language)
+    bits = ["On", language, detail]
+    if g.suppress:
+        bits.append(f"{_list(g.suppress, 2)} hidden")
+    if not g.contact:
+        bits.append("no contact address — lookups will fail")
+    return " · ".join(bits)
+
+
+def _state_ha(c) -> str:
+    m = c.mqtt
+    if not m.enabled:
+        return "Off — the frame announces nothing"
+    where = f"{m.host or 'no broker set'}:{m.port}"
+    return f"Announced as “{m.device_name}” · {where}"
+
+
+def _state_buttons(c) -> str:
+    i = c.input
+    pins = len(i.gpio_buttons or {})
+    on = [name for name, live in (("touchscreen", i.touch), ("keyboard", i.keyboard),
+                                  ("mouse", i.mouse),
+                                  (f"{pins} GPIO button{'' if pins == 1 else 's'}",
+                                   bool(pins))) if live]
+    tail = ("any press wakes the screen" if i.wake_on_input
+            else "a press does not wake the screen")
+    if not on:
+        return f"Nothing connected · {tail}"
+    return _cap(f"{_list(on, 4)} · {tail}")
+
+
+#: The caption elements, said in as few words as a summary line can spare.
+CAPTION_SHORT = {
+    "title": "Title", "caption": "Caption", "name": "File name",
+    "date": "Date taken", "location": "Place", "folder": "Folder",
+    "camera": "Camera", "exposure": "Exposure",
+}
+
+#: Enough of the languages Nominatim answers in to keep a summary readable.
+LANGUAGE_NAMES = {
+    "en": "English", "de": "German", "fr": "French", "it": "Italian",
+    "es": "Spanish", "pt": "Portuguese", "nl": "Dutch", "pl": "Polish",
+    "sv": "Swedish", "da": "Danish", "nb": "Norwegian", "fi": "Finnish",
+    "cs": "Czech", "tr": "Turkish", "ru": "Russian", "ja": "Japanese",
+    "zh": "Chinese",
+}
+
+
+#: One entry per card on the settings page, in the order they are shown.
+#: ``section`` is only where the "everything else in this area" link goes.
+JOBS = [
+    {"name": "pacing", "kicker": "Pacing", "title": "How fast pictures change",
+     "section": "slideshow", "state": _state_pacing,
+     "fields": ["slideshow.interval", "slideshow.transition",
+                "slideshow.transition_time", "slideshow.order"]},
+    {"name": "framing", "kicker": "Framing", "title": "How a picture sits on screen",
+     "section": "viewer", "state": _state_framing,
+     "fields": ["viewer.fit", "viewer.fit_choices", "viewer.mat_style",
+                "viewer.mat_outer_border", "viewer.mat_outer_color",
+                "viewer.mat_texture"]},
+    {"name": "captions", "kicker": "Captions", "title": "What is written over the picture",
+     "section": "viewer", "state": _state_captions,
+     "fields": ["viewer.show_text", "viewer.text_size", "viewer.text_seconds",
+                "viewer.text_justify", "viewer.date_format"]},
+    {"name": "library", "kicker": "Library", "title": "Where the photographs come from",
+     "section": "library", "state": _state_library,
+     "fields": ["library.picture_folders", "library.subfolder",
+                "library.include_videos", "library.watch"]},
+    {"name": "video", "kicker": "Video", "title": "How a video clip plays",
+     "section": "slideshow", "state": _state_video,
+     "fields": ["slideshow.video_max_seconds", "slideshow.video_loop",
+                "slideshow.video_mute"]},
+    {"name": "sleep", "kicker": "Sleep", "title": "When the screen turns off",
+     "section": "power", "state": _state_sleep,
+     "fields": ["power.enabled", "power.schedule", "power.dim_schedule"]},
+    {"name": "screen", "kicker": "Screen", "title": "The panel itself",
+     "section": "display", "state": _state_screen,
+     "fields": ["display.backend", "display.rotate", "display.brightness"]},
+    {"name": "places", "kicker": "Places", "title": "Naming where a photo was taken",
+     "section": "geo", "state": _state_places,
+     "fields": ["geo.enabled", "geo.contact", "geo.language", "geo.detail",
+                "geo.suppress"]},
+    {"name": "ha", "kicker": "Home Assistant", "title": "Control from elsewhere",
+     "section": "mqtt", "state": _state_ha,
+     "fields": ["mqtt.enabled", "mqtt.host", "mqtt.username", "mqtt.password",
+                "mqtt.device_name"]},
+    {"name": "buttons", "kicker": "Buttons", "title": "Touch, keys and GPIO",
+     "section": "input", "state": _state_buttons,
+     "fields": ["input.touch", "input.keyboard", "input.mouse",
+                "input.gpio_buttons", "input.wake_on_input"]},
+]
+
+
+def jobs(config) -> list[dict[str, Any]]:
+    """The cards on the front of the settings page, each with its own summary.
+
+    The summary is built here rather than in the browser so that one sentence
+    about, say, what ``fit: auto`` currently does cannot say one thing on the
+    page and another in the docs.
+    """
+    out = []
+    for job in JOBS:
+        try:
+            state = job["state"](config)
+        except Exception:                      # a summary must never break the page
+            state = ""
+        out.append({"name": job["name"], "kicker": job["kicker"],
+                    "title": job["title"], "section": job["section"],
+                    "fields": list(job["fields"]), "state": state})
+    return out
+
+
+
 def schema(config, extra_options: dict[str, Any] | None = None) -> dict[str, Any]:
     """Every setting, with enough about each to draw a control for it."""
     import typing
@@ -471,4 +736,4 @@ def schema(config, extra_options: dict[str, Any] | None = None) -> dict[str, Any
         })
     options = _options()
     options.update(extra_options or {})
-    return {"sections": sections, "options": options}
+    return {"sections": sections, "options": options, "jobs": jobs(config)}

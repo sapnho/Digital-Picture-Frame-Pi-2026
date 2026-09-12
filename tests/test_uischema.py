@@ -162,3 +162,81 @@ def test_an_unknown_key_is_treated_as_needing_a_restart():
     """Safer to over-warn than to leave someone waiting for a change that
     never comes."""
     assert uischema.needs_restart("something.new")
+
+
+# -- the front door: jobs, not fields --------------------------------------
+# The cards are a hand-written list over generated settings, which is exactly
+# the arrangement that rots: a field is renamed, the card still names the old
+# key, and the control silently disappears. These tests are what stops that.
+
+def test_every_job_names_settings_that_exist(built):
+    known = {f["key"] for s in built["sections"] for f in s["fields"]}
+    for job in built["jobs"]:
+        missing = [k for k in job["fields"] if k not in known]
+        assert missing == [], f"{job['name']}: {missing}"
+
+
+def test_no_setting_is_edited_from_two_cards():
+    """Two cards offering the same switch is two answers to one question."""
+    seen = {}
+    for job in uischema.JOBS:
+        for key in job["fields"]:
+            assert key not in seen, f"{key} is on both {seen.get(key)} and {job['name']}"
+            seen[key] = job["name"]
+
+
+def test_every_card_has_a_kicker_a_title_and_a_sentence(built):
+    for job in built["jobs"]:
+        assert job["kicker"] and job["title"], job["name"]
+        assert job["state"], f"{job['name']} says nothing about the current state"
+
+
+def test_every_card_points_at_a_real_section(built):
+    sections = {s["name"] for s in built["sections"]}
+    for job in built["jobs"]:
+        assert job["section"] in sections, job["name"]
+
+
+def test_the_sections_no_card_claims_are_the_rarely_needed_ones(built):
+    """Whatever is left over becomes a link of its own on the page, so this
+    test is really asking: is anything important left with no way in?"""
+    claimed = {job["section"] for job in built["jobs"]}
+    left = {s["name"] for s in built["sections"]} - claimed
+    assert left == {"http", "logging", "health", "network"}
+
+
+def test_a_summary_survives_an_awkward_configuration():
+    """Empty folders, no caption, a geocoder switched on with no contact: the
+    sentence may be sad but it must not be an exception."""
+    config = Config()
+    config.library.picture_folders = []
+    config.viewer.show_text = []
+    config.viewer.fit = "cover"
+    config.geo.enabled = True
+    config.geo.contact = ""
+    config.mqtt.enabled = True
+    config.mqtt.host = ""
+    config.input.touch = config.input.keyboard = config.input.mouse = False
+    config.power.enabled = True
+    config.power.schedule = {"all": ["22:30-07:00"], "sat": ["23:30-09:00"]}
+    for job in uischema.jobs(config):
+        assert job["state"], job["name"]
+
+
+def test_a_summary_says_what_the_frame_is_actually_doing():
+    config = Config()
+    config.slideshow.interval = 35
+    config.slideshow.transition_time = 10.5
+    config.display.brightness = 1.0
+    config.input.gpio_buttons = {"next": 17}
+    said = {job["name"]: job["state"] for job in uischema.jobs(config)}
+    assert "35 seconds each" in said["pacing"]
+    assert "10.5 s" in said["pacing"]
+    # A fraction reads as a fraction: "brightness 1", and it looks like a count.
+    assert "brightness 1.0" in said["screen"]
+    # `str.capitalize` would have made this "1 gpio button".
+    assert "1 GPIO button" in said["buttons"]
+
+
+def test_the_jobs_travel_with_the_schema_as_json(built):
+    assert json.loads(json.dumps(built["jobs"])) == built["jobs"]
