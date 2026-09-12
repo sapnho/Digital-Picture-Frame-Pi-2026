@@ -1,0 +1,24 @@
+// Lets the picture frame power the Pi off -- and nothing else.
+//
+// The Shutdown button in the web interface, and the same button in Home
+// Assistant, ask systemd for a power-off so the frame can be switched off
+// without an SSH session and the plug pulled without corrupting the card.
+// That normally wants root.  The frame's unit runs with NoNewPrivileges=yes,
+// so sudo is not an option even if it were a good one -- polkit is, and this
+// rule is as narrow as it gets: this user, logind's power-off action, nothing
+// else.  No reboot, no suspend, no other unit, no other user.
+//
+// Without the rule the frame still offers the button and still reports that
+// it could not, and comes back rather than leaving a dark screen.  Installed
+// by 'picframe3 setup' as /etc/polkit-1/rules.d/55-picframe3-power.rules with
+// @USER@ replaced.
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "@USER@") {
+        return undefined;
+    }
+    if (action.id === "org.freedesktop.login1.power-off" ||
+        action.id === "org.freedesktop.login1.power-off-multiple-sessions") {
+        return polkit.Result.YES;
+    }
+    return undefined;
+});

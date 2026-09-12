@@ -34,6 +34,7 @@ _log = logging.getLogger(__name__)
 SERVICE_NAME = "picframe3@{user}.service"
 SERVICE_UNIT = "/etc/systemd/system/picframe3@.service"
 POLKIT_RULE = "/etc/polkit-1/rules.d/50-picframe3-network.rules"
+POWER_POLKIT_RULE = "/etc/polkit-1/rules.d/55-picframe3-power.rules"
 UDEV_RULE = "/etc/udev/rules.d/99-picframe3.rules"
 SYNC_POLKIT_RULE = "/etc/polkit-1/rules.d/60-picframe3-syncthing.rules"
 SYNC_HELPER = "/usr/local/lib/picframe3/syncthing-helper"
@@ -717,6 +718,7 @@ def install_service(user: str, venv_bin: Path | None) -> bool:
          "takes the screen directly, so it starts before anyone logs in.")
     install_udev_rules()
     install_network_rule(user)
+    install_power_rule(user)
     install_sync_support(user)
     return True
 
@@ -778,6 +780,27 @@ def install_network_rule(user: str) -> bool:
     else:
         say(f"{YELLOW}   ! Could not write {POLKIT_RULE}; the frame will report "
             f"network outages but not mend them.{RESET}")
+    return ok
+
+
+def install_power_rule(user: str) -> bool:
+    """Let the frame power the Pi off, and nothing else.
+
+    The Shutdown button -- in the web interface and in Home Assistant -- asks
+    systemd for a power-off, which wants root.  Same reasoning as the network
+    rule, and an even narrower grant: this user, logind's power-off action, no
+    reboot and no suspend.  A failure here is a note rather than an error,
+    because the frame is perfectly usable without the button working.
+    """
+    if shutil.which("pkaction") is None and not os.path.isdir("/etc/polkit-1"):
+        return False                       # not a polkit system; nothing to do
+    ok = write_as_root(_rule_for(user, "55-picframe3-power.rules"),
+                       POWER_POLKIT_RULE)
+    if ok:
+        say(f"   {GREEN}✓{RESET} may power the Pi off when asked to")
+    else:
+        say(f"{YELLOW}   ! Could not write {POWER_POLKIT_RULE}; the Shutdown "
+            f"button will report that it could not power the Pi off.{RESET}")
     return ok
 
 

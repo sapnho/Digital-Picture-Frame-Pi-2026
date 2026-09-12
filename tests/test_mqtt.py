@@ -321,6 +321,11 @@ def test_the_restart_button_restarts_the_frame(bridge):
     assert _dispatch(bridge, "restart", "press") == [("restart", {})]
 
 
+def test_the_shutdown_button_powers_the_pi_off(bridge):
+    """Announced on purpose, unlike `quit`: it is the frame's power button."""
+    assert _dispatch(bridge, "shutdown", "press") == [("shutdown", {})]
+
+
 def test_every_announced_command_topic_is_one_the_bridge_subscribes_to(bridge):
     """`<prefix>/#` used to cover everything by accident. With two narrow
     filters, an entity announced on a topic outside them would be a control

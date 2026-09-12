@@ -16,8 +16,11 @@ the same folder as the files themselves:
 * and because it keeps the original full path, a removal can be undone -- the
   picture goes back exactly where it was, not into some generic inbox.
 
-Restoring rewrites the line rather than deleting it.  A journal that forgets
-the things it was asked to undo is not a journal.
+Restoring rewrites the line rather than deleting it, and so does emptying the
+trash.  A journal that forgets the things it was asked to undo -- or the things
+it was asked to delete for good -- is not a journal.  A purged line keeps every
+field it had and gains ``purged_at``: the file is gone, the record of what it
+was is not.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
@@ -88,6 +92,9 @@ class RemovalLog:
             "last_played_iso": _iso(record.last_played),
             "restored_at": None,
             "restored_to": None,
+            # Carried from the start so a line is self-describing: a reader
+            # with no schema can see that purging is a thing that happens.
+            "purged_at": None,
         }
         self._append(entry)
         return entry
@@ -162,10 +169,15 @@ class RemovalLog:
             # able to truncate it.
             with self._locked():
                 self._invalidate()          # do not trust a cache read before the lock
-                entries = self.entries(include_restored=True)
+                entries = self.entries(include_restored=True, include_purged=True)
                 hit = False
                 for entry in entries:
-                    if entry.get("stored_as") == stored_as and not entry.get("restored_at"):
+                    # Not a purged line: the file is gone for good, and a
+                    # journal that says a deleted picture was put back is
+                    # worse than one that says nothing.
+                    if (entry.get("stored_as") == stored_as
+                            and not entry.get("restored_at")
+                            and not entry.get("purged_at")):
                         entry["restored_at"] = stamp
                         entry["restored_iso"] = _iso(stamp)
                         entry["restored_to"] = restored_to
@@ -176,6 +188,43 @@ class RemovalLog:
             _log.error("cannot update the removal journal at %s: %s", self.path, exc)
             return False
         return hit
+
+    def mark_purged(self, names: str | Iterable[str],
+                    when: float | None = None) -> list[str]:
+        """Rewrite lines as purged -- the file is gone for good.
+
+        Takes a whole batch in one call on purpose.  Emptying a trash of four
+        hundred pictures one line at a time would rewrite the journal four
+        hundred times, and every one of those rewrites is a full read, a temp
+        file and an ``os.replace``.
+
+        Returns the names actually marked, so a caller can tell "deleted" from
+        "was never there".  A line already purged or already restored is left
+        alone: purging cannot undo a restore, and it cannot happen twice.
+        """
+        wanted = {names} if isinstance(names, str) else {str(n) for n in names}
+        if not wanted or not os.path.exists(self.path):
+            return []
+        stamp = when if when is not None else time.time()
+        done: list[str] = []
+        try:
+            os.makedirs(self.folder, exist_ok=True)
+            with self._locked():
+                self._invalidate()      # do not trust a cache read before the lock
+                entries = self.entries(include_restored=True, include_purged=True)
+                for entry in entries:
+                    name = entry.get("stored_as")
+                    if (name in wanted and not entry.get("restored_at")
+                            and not entry.get("purged_at")):
+                        entry["purged_at"] = stamp
+                        entry["purged_iso"] = _iso(stamp)
+                        done.append(str(name))
+                if done:
+                    self._rewrite(entries)
+        except OSError as exc:
+            _log.error("cannot update the removal journal at %s: %s", self.path, exc)
+            return []
+        return done
 
     def _rewrite(self, entries: list[dict[str, Any]]) -> None:
         """Replace the journal with *entries*.  Call it holding the lock."""
@@ -199,25 +248,46 @@ class RemovalLog:
 
     # -- reading -----------------------------------------------------------
     def entries(self, *, include_restored: bool = True,
+                include_purged: bool = False,
                 newest_first: bool = False) -> list[dict[str, Any]]:
+        """Journal lines, oldest first unless asked otherwise.
+
+        Purged lines are out by default: the question nearly every caller is
+        asking is "what is in the trash right now", and a purged picture is
+        not.  Pass ``include_purged`` to read the record of what was deleted --
+        and note that :meth:`_rewrite` callers *must* pass it, or a rewrite
+        would silently drop the lines it left out.
+        """
         rows = self._load()
         if not include_restored:
             rows = [r for r in rows if not r.get("restored_at")]
+        if not include_purged:
+            rows = [r for r in rows if not r.get("purged_at")]
         return list(reversed(rows)) if newest_first else list(rows)
+
+    def in_trash(self) -> list[dict[str, Any]]:
+        """The lines whose file should still be in the folder."""
+        return [r for r in self._load()
+                if not r.get("restored_at") and not r.get("purged_at")]
 
     def find(self, stored_as: str) -> dict[str, Any] | None:
         for entry in reversed(self._load()):
-            if entry.get("stored_as") == stored_as and not entry.get("restored_at"):
+            if (entry.get("stored_as") == stored_as and not entry.get("restored_at")
+                    and not entry.get("purged_at")):
                 return entry
         return None
 
     def count(self) -> int:
         """How many removed pictures are still sitting in the folder."""
-        return sum(1 for r in self._load() if not r.get("restored_at"))
+        return len(self.in_trash())
+
+    def purged_count(self) -> int:
+        """How many were deleted for good.  The journal still explains them."""
+        return sum(1 for r in self._load() if r.get("purged_at"))
 
     def latest(self) -> dict[str, Any] | None:
         for entry in reversed(self._load()):
-            if not entry.get("restored_at"):
+            if not entry.get("restored_at") and not entry.get("purged_at"):
                 return entry
         return None
 
@@ -226,6 +296,7 @@ class RemovalLog:
         last = self.latest()
         return {
             "count": self.count(),
+            "purged": self.purged_count(),
             "folder": self.folder,
             "journal": self.path,
             "last_basename": (last or {}).get("basename") or "",

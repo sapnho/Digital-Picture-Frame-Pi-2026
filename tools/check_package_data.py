@@ -26,6 +26,7 @@ REQUIRED = (
     "data/mat_texture.jpg",           # paper grain on the mat board
     "data/picframe3.service",         # the unit `picframe3 setup` installs
     "data/50-picframe3-network.rules",
+    "data/55-picframe3-power.rules",       # permission to power the Pi off
     "data/99-picframe3.rules",
     "data/60-picframe3-syncthing.rules",   # the Syncthing switch, as root
     "data/picframe3-syncthing-on@.service",

@@ -124,6 +124,9 @@ the Pi and nothing to rebuild when Mesa updates.
 - Keyboard, touchscreen gestures, mouse, and GPIO buttons — read from evdev, so
   they work with no desktop installed
 - Night-time screen-off and evening-dimming schedules
+- **Shuts itself down** — one button in the web interface and one in Home
+  Assistant power the Pi off, so the frame can be switched off from the sofa
+  and the plug pulled without corrupting the card
 - **Reports its own health** — CPU temperature, load, memory, free space and
   the Pi's undervoltage flag, in the web UI, in `doctor`, and as diagnostic
   sensors in Home Assistant

@@ -42,6 +42,7 @@ class Action(StrEnum):
     RESCAN = "rescan"
     RELOAD = "reload"
     RESTART = "restart"           # stop cleanly and come back up
+    SHUTDOWN = "shutdown"         # power the Pi off, so the plug can be pulled
     QUIT = "quit"
 
 
@@ -123,6 +124,10 @@ class State:
     unsaved_changes: bool = False
     #: Whether the frame can restart itself at all.
     can_restart: bool = True
+    #: Whether the frame can power the Pi off.  False where there is no
+    #: systemd to ask, so the web interface can leave out a button that
+    #: could only ever report that it did nothing.
+    can_shutdown: bool = True
     library: dict[str, Any] = field(default_factory=dict)
     #: The removal journal in miniature -- how many pictures have been
     #: taken out of the library and what the last one was.  Home Assistant

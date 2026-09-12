@@ -154,10 +154,11 @@
     <div class="page-head">
       <div>
         <span class="kicker">Removed</span>
-        <h1>Nothing is ever deleted</h1>
+        <h1>Nothing goes without a record</h1>
         <p class="lede" id="removed-intro">
           Every picture you remove is moved aside and written down here — when
-          it went, where it came from, and what it was.
+          it went, where it came from, and what it was. Put one back, or empty
+          the trash to get the disk space: the note stays either way.
         </p>
       </div>
     </div>
@@ -166,8 +167,12 @@
              placeholder="Search removed pictures…">
       <label class="inline"><input id="removed-restored" type="checkbox">
         Show ones I put back</label>
+      <label class="inline"><input id="removed-purged" type="checkbox">
+        Show ones I deleted for good</label>
       <a id="removed-journal" class="btn" href="/api/removed/journal"
          download="removals.jsonl">Download the journal</a>
+      <button id="trash-empty" class="btn btn-danger" type="button" disabled>
+        Empty the trash</button>
     </div>
     <div id="removed-list" class="removed"></div>
     <p id="removed-empty" class="empty" hidden>Nothing has been removed.</p>
@@ -216,6 +221,11 @@
       <nav class="rare">
         <span class="rare-label">Rarely needed</span>
         <span id="rare-links"></span>
+        <!-- Down here rather than in the save bar on purpose: it is the one
+             button nothing on the network can undo. -->
+        <button id="shutdown" class="linkish rare-danger" type="button"
+                title="Power the Pi off, so the plug can be pulled safely"
+                hidden>Shut the frame down</button>
       </nav>
     </div>
 

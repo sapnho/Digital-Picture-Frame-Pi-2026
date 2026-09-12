@@ -46,7 +46,9 @@ OFFLINE = "offline"
 #: Actions the broker may not give, whatever the payload says.  ``Command.parse``
 #: accepts every action there is, and a bridge subscribed to a broker that most
 #: houses run without per-client ACLs should not be a way to stop the frame --
-#: `restart` is announced and does the job anyone actually wants.
+#: `restart` is announced and does the job anyone actually wants, and
+#: `shutdown` powers the Pi off, which is a deliberate button rather than a
+#: process that quietly exits and leaves the screen dark.
 MQTT_REFUSED = frozenset({Action.QUIT})
 
 
@@ -333,7 +335,7 @@ class MqttBridge:
                 Action.SET_CONFIG, {"key": "viewer.show_text", "value": wanted},
                 source="mqtt"))
         elif name in ("next", "previous", "rescan", "delete", "restart",
-                      "info_show"):
+                      "shutdown", "info_show"):
             # Every one of these is an announced button.  `restart` was missing
             # here while being announced, so Home Assistant showed a Restart
             # button that did nothing at all and logged "unhandled topic".
@@ -995,6 +997,10 @@ class MqttBridge:
             ("previous", "Previous picture", "mdi:skip-previous"),
             ("rescan", "Rescan library", "mdi:folder-refresh"),
             ("restart", "Restart the frame", "mdi:restart"),
+            # Announced, unlike `quit`: powering the frame down from the sofa
+            # is a thing people want, and it is the frame's own power button
+            # rather than a way to leave the screen dark with no explanation.
+            ("shutdown", "Shut the frame down", "mdi:power"),
             ("delete", "Remove current picture", "mdi:delete"),
             ("clear_filters", "Show everything again", "mdi:filter-remove"),
         ) + tuple(
@@ -1013,7 +1019,8 @@ class MqttBridge:
                 "command_topic": self.entity_topic(action),
                 "payload_press": "press",
                 "icon": icon,
-                "entity_category": "config" if action in ("rescan", "restart") else None,
+                "entity_category": ("config" if action in
+                                    ("rescan", "restart", "shutdown") else None),
             }))
 
         return entities

@@ -348,3 +348,245 @@ async def test_restoring_something_unknown_is_a_404(client):
 @pytest.mark.asyncio
 async def test_the_state_document_carries_the_count(frame, one_removed):
     assert frame.state().as_dict()["removed"]["count"] == 1
+
+
+# -- emptying the trash ----------------------------------------------------
+# Deleting for good is the one thing on this tab that really deletes, and the
+# thing being protected is the same as everywhere else in this file: the file
+# goes, the line about it does not.  A journal that forgets what it was asked
+# to delete would answer "what happened to that photograph?" with silence,
+# which is the failure the journal exists to prevent.
+
+def test_purging_marks_the_line_and_leaves_it_in_the_file(log, record):
+    log.record(record, "a.jpg")
+    assert log.mark_purged("a.jpg") == ["a.jpg"]
+
+    assert log.count() == 0                  # not in the trash any more
+    assert log.entries() == []               # and out of the way by default
+    kept = log.entries(include_purged=True)
+    assert len(kept) == 1 and kept[0]["purged_at"]
+    assert kept[0]["title"] == "Alpine morning"    # the provenance survived
+    assert kept[0]["purged_iso"]
+    assert log.purged_count() == 1
+    assert json.loads(open(log.path, encoding="utf-8").read().strip())["purged_at"]
+
+
+def test_purging_is_not_something_that_happens_twice(log, record):
+    log.record(record, "a.jpg")
+    first = log.mark_purged("a.jpg")
+    assert log.mark_purged("a.jpg") == []
+    stamp = log.entries(include_purged=True)[0]["purged_at"]
+    log.mark_purged("a.jpg", when=stamp + 500)
+    assert log.entries(include_purged=True)[0]["purged_at"] == stamp
+    assert first == ["a.jpg"]
+
+
+def test_something_put_back_cannot_then_be_purged(log, record):
+    """The file is back in the library; purging must not claim otherwise."""
+    log.record(record, "a.jpg")
+    log.mark_restored("a.jpg", "/pictures/2024/a.jpg")
+    assert log.mark_purged("a.jpg") == []
+    entry = log.entries(include_restored=True)[0]
+    assert entry["restored_at"] and not entry.get("purged_at")
+
+
+def test_a_purged_picture_is_not_offered_for_restoring(log, record):
+    log.record(record, "a.jpg")
+    log.mark_purged("a.jpg")
+    assert log.find("a.jpg") is None
+    assert log.mark_restored("a.jpg", "/pictures/anywhere.jpg") is False
+
+
+def test_a_whole_batch_is_one_rewrite(log, record):
+    """Four hundred pictures must not mean four hundred journal rewrites."""
+    names = [f"p{n}.jpg" for n in range(5)]
+    for name in names:
+        log.record(record, name)
+    rewrites = []
+    original = log._rewrite
+    log._rewrite = lambda entries: (rewrites.append(1), original(entries))[1]
+    assert sorted(log.mark_purged(names)) == sorted(names)
+    assert len(rewrites) == 1
+    assert log.count() == 0 and log.purged_count() == 5
+
+
+def test_a_rewrite_does_not_drop_the_lines_it_is_not_changing(log, record):
+    """entries() hides purged lines by default; a rewrite must not obey that."""
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        log.record(record, name)
+    log.mark_purged("a.jpg")
+    log.mark_restored("b.jpg", "/pictures/2024/b.jpg")
+    log.mark_purged("c.jpg")
+
+    everything = log.entries(include_restored=True, include_purged=True)
+    assert len(everything) == 3
+    by_name = {e["stored_as"]: e for e in everything}
+    assert by_name["a.jpg"]["purged_at"] and by_name["c.jpg"]["purged_at"]
+    assert by_name["b.jpg"]["restored_at"]
+
+
+def test_summary_counts_the_trash_and_what_left_it(log, record):
+    log.record(record, "a.jpg")
+    log.record(record, "b.jpg")
+    log.mark_purged("a.jpg")
+    summary = log.summary()
+    assert summary["count"] == 1 and summary["purged"] == 1
+    assert summary["last_basename"] == record.basename
+
+
+def test_purging_nothing_is_not_an_error(log, record):
+    assert log.mark_purged([]) == []
+    assert log.mark_purged("never-existed.jpg") == []
+
+
+# -- the app ---------------------------------------------------------------
+
+@pytest.fixture
+async def two_removed(frame, photo_dir):
+    """Two pictures in the trash, from two different folders."""
+    out = []
+    for folder, name in (("2023", "img00.jpg"), ("2024", "exif.jpg")):
+        frame.current = [frame.library.by_path(str(photo_dir / folder / name))]
+        await frame._delete_current(source="http")
+        out.append(frame.removals.latest())
+    return out
+
+
+@pytest.mark.asyncio
+async def test_purging_one_deletes_the_file_and_keeps_the_note(frame, two_removed):
+    first = two_removed[0]
+    on_disk = os.path.join(frame.removals.folder, first["stored_as"])
+    assert os.path.exists(on_disk)
+
+    result = await frame._purge_removed(first["stored_as"], source="http")
+    assert result["ok"] and result["deleted"] == 1 and result["freed"] > 0
+    assert not os.path.exists(on_disk)
+    assert frame.removals.count() == 1                  # the other one is still there
+
+    kept = [e for e in frame.removals.entries(include_purged=True)
+            if e["stored_as"] == first["stored_as"]]
+    assert len(kept) == 1 and kept[0]["purged_at"]
+    assert kept[0]["original_path"] == first["original_path"]
+
+    # And it cannot be put back afterwards, which is the honest answer.
+    assert (await frame._restore_removed(first["stored_as"]))["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_emptying_the_trash_takes_every_file_and_no_line(frame, two_removed):
+    result = await frame._empty_trash(source="http")
+    assert result["ok"] and result["purged"] == 2 and result["deleted"] == 2
+    assert result["freed"] > 0 and result["missing"] == 0 and not result["failed"]
+
+    assert frame.removals.count() == 0
+    assert frame.removals.purged_count() == 2
+    for entry in two_removed:
+        assert not os.path.exists(os.path.join(frame.removals.folder, entry["stored_as"]))
+    lines = [ln for ln in open(frame.removals.path, encoding="utf-8") if ln.strip()]
+    assert len(lines) == 2                              # nothing was thrown away
+    assert all(json.loads(ln)["original_path"] for ln in lines)
+
+
+@pytest.mark.asyncio
+async def test_emptying_an_empty_trash_is_a_no_op(frame):
+    result = await frame._empty_trash(source="http")
+    assert result["ok"] and result["purged"] == 0 and result["deleted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_file_already_deleted_by_hand_still_gets_its_row_tidied(
+        frame, two_removed):
+    """Somebody emptied the folder with rm.  The ghost row is the mess this
+    feature is meant to clear, so purging it must work, not refuse."""
+    first = two_removed[0]
+    os.unlink(os.path.join(frame.removals.folder, first["stored_as"]))
+    result = await frame._purge_removed(first["stored_as"], source="http")
+    assert result["ok"] and result["missing"] is True and result["deleted"] == 0
+    assert frame.removals.find(first["stored_as"]) is None
+
+
+@pytest.mark.asyncio
+async def test_a_file_the_frame_did_not_put_there_is_counted_not_deleted(
+        frame, two_removed):
+    """``deleted_folder`` is a setting, and a setting can point at the wrong
+    place.  Nothing here unlinks a file the journal cannot account for."""
+    stray = os.path.join(frame.removals.folder, "somebody-elses.jpg")
+    with open(stray, "w", encoding="utf-8") as fh:
+        fh.write("not ours")
+
+    result = await frame._empty_trash(source="http")
+    assert result["left_alone"] == 1
+    assert os.path.exists(stray)
+
+
+@pytest.mark.asyncio
+async def test_the_delete_switch_covers_deleting_for_good_too(frame, two_removed):
+    """Deleting for good cannot be easier than removing."""
+    frame.config.http.allow_delete = False
+    name = two_removed[0]["stored_as"]
+
+    assert (await frame._purge_removed(name, source="http"))["ok"] is False
+    assert (await frame._empty_trash(source="mqtt"))["ok"] is False
+    assert os.path.exists(os.path.join(frame.removals.folder, name))
+
+    # Somebody standing at the frame is never refused, here as everywhere.
+    assert (await frame._purge_removed(name, source="keyboard"))["ok"] is True
+
+
+# -- through the API -------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_purging_through_the_api_keeps_the_row_and_marks_it(
+        client, frame, one_removed):
+    name = one_removed["stored_as"]
+    assert client.post(f"/api/removed/{name}/purge").status_code == 200
+    assert client.get("/api/removed").json() == []
+    kept = client.get("/api/removed?include_purged=true").json()
+    assert len(kept) == 1
+    assert kept[0]["purged_at"] and kept[0]["purged_iso"]
+    assert kept[0]["on_disk"] is False
+    assert kept[0]["original_path"] == one_removed["original_path"]
+
+
+@pytest.mark.asyncio
+async def test_emptying_the_trash_through_the_api(client, frame, one_removed):
+    response = client.post("/api/removed/empty")
+    assert response.status_code == 200
+    assert response.json()["deleted"] == 1
+    assert frame.removals.count() == 0
+    assert "/api/removed/empty" not in str(frame.removals.entries(include_purged=True))
+    assert client.get("/api/removed/journal").status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_empty_is_a_route_not_a_file_name(client, frame, one_removed):
+    """``/api/removed/empty`` must not be read as a picture called "empty"."""
+    assert client.post("/api/removed/empty").status_code == 200
+    assert client.post("/api/removed/empty/restore").status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_purging_something_unknown_is_a_404(client, one_removed):
+    assert client.post("/api/removed/ghost.jpg/purge").status_code == 404
+    for attempt in ("../../etc/passwd", "..%2F..%2Fetc%2Fpasswd"):
+        # 405: the path normalises to one with no POST route at all, which is
+        # a refusal too -- what matters is that nothing is unlinked.
+        assert client.post(
+            f"/api/removed/{attempt}/purge").status_code in (404, 405, 422)
+
+
+@pytest.mark.asyncio
+async def test_the_api_refuses_to_delete_for_good_when_removal_is_off(
+        client, frame, one_removed):
+    frame.config.http.allow_delete = False
+    name = one_removed["stored_as"]
+    assert client.post(f"/api/removed/{name}/purge").status_code == 403
+    assert client.post("/api/removed/empty").status_code == 403
+    assert os.path.exists(os.path.join(frame.removals.folder, name))
+
+
+@pytest.mark.asyncio
+async def test_the_state_document_carries_what_was_purged(frame, one_removed):
+    await frame._purge_removed(one_removed["stored_as"], source="http")
+    removed = frame.state().as_dict()["removed"]
+    assert removed["count"] == 0 and removed["purged"] == 1

@@ -592,6 +592,33 @@ class HttpServer:
             return {"ok": True, "saved": saved,
                     "supervised": self.app.under_systemd()}
 
+        @api.post("/api/shutdown", dependencies=guard)
+        async def shutdown(save: bool = Query(True)):
+            """Power the Pi off, so the plug can be pulled safely.
+
+            Not a restart: nothing brings the frame back until somebody
+            switches the power on again.  Saving first is the default for the
+            same reason it is on a restart -- the settings would otherwise be
+            lost -- and it has a handler of its own rather than going through
+            the shorthand route so that ``save`` is actually read.
+
+            Whether the frame can do it at all is in the state document
+            (``can_shutdown``), so the answer here and the button in the web
+            interface cannot disagree.
+            """
+            if not self.app.state().can_shutdown:
+                raise HTTPException(
+                    503,
+                    "this frame has no systemd to ask for a power-off; "
+                    "shut the Pi down at the command line instead.",
+                )
+            saved = False
+            if save and self.app.state().unsaved_changes:
+                self.app.save_config()
+                saved = True
+            self.app.bus.submit(Command(Action.SHUTDOWN, source="http"))
+            return {"ok": True, "saved": saved}
+
         # -- syncthing -------------------------------------------------
         # Syncthing is another program with its own web interface, and this is
         # not an attempt to reimplement it: it is the four things somebody
@@ -725,17 +752,43 @@ class HttpServer:
         # it belongs back in.
         @api.get("/api/removed", dependencies=guard)
         async def removed(include_restored: bool = Query(False),
+                          include_purged: bool = Query(False),
                           limit: int = Query(200, le=2000)):
             log = self.app.removals
             if log is None:
                 return []
-            entries = log.entries(include_restored=include_restored, newest_first=True)
+            entries = log.entries(include_restored=include_restored,
+                                  include_purged=include_purged, newest_first=True)
             return [_removal(e, log.folder) for e in entries[:limit]]
 
         @api.get("/api/removed/summary", dependencies=guard)
         async def removed_summary():
             log = self.app.removals
             return log.summary() if log is not None else {}
+
+        @api.post("/api/removed/empty", dependencies=guard)
+        async def empty_trash():
+            """Delete everything in the trash for good.  The journal stays.
+
+            Declared above the ``{stored_as}`` routes on purpose: FastAPI
+            matches in order, and a literal segment registered afterwards can
+            be swallowed by the placeholder in front of it.
+            """
+            result = await self.app._empty_trash(source="http")
+            if not result.get("ok"):
+                raise HTTPException(403, result.get("error", "cannot empty the trash"))
+            return result
+
+        @api.post("/api/removed/{stored_as}/purge", dependencies=guard)
+        async def purge(stored_as: str):
+            """Delete one removed picture for good.  Its journal line stays."""
+            entry, _ = _removed_file(self.app, stored_as)
+            if entry is None:
+                raise HTTPException(404, "not found")
+            result = await self.app._purge_removed(entry["stored_as"], source="http")
+            if not result.get("ok"):
+                raise HTTPException(403, result.get("error", "cannot delete it"))
+            return result
 
         @api.get("/api/removed/{stored_as}/thumb", dependencies=guard)
         async def removed_thumb(stored_as: str):
@@ -1185,6 +1238,8 @@ def _removal(entry: dict, folder: str) -> dict:
         "restored_at": entry.get("restored_at"),
         "restored_iso": entry.get("restored_iso") or "",
         "restored_to": entry.get("restored_to") or "",
+        "purged_at": entry.get("purged_at"),
+        "purged_iso": entry.get("purged_iso") or "",
         "on_disk": os.path.exists(os.path.join(folder, stored_as)) if stored_as else False,
     }
 

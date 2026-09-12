@@ -21,7 +21,7 @@ from .gfx.textstyle import TextStyle
 from .health import Health
 from .library.db import Library, Record
 from .library.playlist import ANY_OTHER, Filters, Playlist
-from .library.removed import RemovalLog
+from .library.removed import JOURNAL_NAME, RemovalLog
 from .library.scanner import Scanner
 from .media import PrepareOptions, SlideLoader
 from .media import geocode as geocode_module
@@ -90,6 +90,11 @@ class PicFrame:
         self._config_dirty = False
         #: Set by the restart command; the CLI reads it after the loop ends.
         self.restart_requested = False
+        #: Set by the shutdown command.  The CLI powers the Pi off once the
+        #: loop has ended -- after the screen has been handed back, so the
+        #: last thing on the wall is a picture rather than a half-torn-down
+        #: frame.
+        self.power_off_requested = False
         #: Set by the quit command.  The CLI turns it into a distinct exit
         #: status, because under systemd a clean exit is not a stop: with
         #: Restart=always, "quit" used to mean "black for five seconds".
@@ -933,6 +938,8 @@ class PicFrame:
             self._reload_config()
         elif action is Action.RESTART:
             self.request_restart()
+        elif action is Action.SHUTDOWN:
+            self.request_power_off()
         elif action is Action.QUIT:
             # Under systemd a clean exit is not a stop -- Restart=always brings
             # the frame straight back -- so say plainly that this was a quit and
@@ -1163,6 +1170,117 @@ class PicFrame:
         return {"ok": True, "path": destination,
                 "moved": destination != entry.get("original_path")}
 
+    async def _purge_removed(self, stored_as: str, source: str = "") -> dict[str, Any]:
+        """Delete one removed picture for good, and keep saying it existed.
+
+        The file is unlinked; the journal line is marked ``purged_at`` rather
+        than deleted.  That is the whole point of the journal -- it was written
+        so that "what happened to that photograph?" has an answer, and an
+        answer that disappears the moment somebody empties the trash is not
+        one.  So the Removed tab keeps the row, says the file is gone, and
+        stops offering to put it back.
+        """
+        if self.removals is None:
+            return {"ok": False, "error": "no removal journal"}
+        if not self.config.http.allow_delete and source in ("http", "mqtt"):
+            # Same rule as removing: if removal over the network is off, so is
+            # deleting for good.  The weaker action cannot be the guarded one.
+            _log.warning("refusing to purge %s: removal from the network is off",
+                         stored_as)
+            return {"ok": False, "error": "removal from the network is off"}
+        entry = self.removals.find(str(stored_as or ""))
+        if entry is None:
+            return {"ok": False, "error": f"nothing removed is called {stored_as!r}"}
+        name = str(entry.get("stored_as") or "")
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, self._unlink_removed, [name])
+        self.removals.mark_purged([name])
+        self.invalidate_stats()
+        self._dirty = True
+        missing = name in result["missing"]
+        if result["failed"]:
+            return {"ok": False, "error": result["failed"][name]}
+        _log.info("purged %s%s", name, " (file was already gone)" if missing else "")
+        return {"ok": True, "stored_as": name, "deleted": 0 if missing else 1,
+                "missing": missing, "freed": result["freed"]}
+
+    async def _empty_trash(self, source: str = "") -> dict[str, Any]:
+        """Delete everything in the trash for good, in one pass.
+
+        One journal rewrite for the whole batch rather than one per picture,
+        and the unlinking happens off the event loop: the deleted folder is
+        often a stick or a share, where four hundred unlinks is seconds, and
+        the picture on the wall must not stop while it happens.
+
+        Files in the folder that the frame did not put there are counted and
+        left alone.  ``deleted_folder`` is a setting, and a setting can point
+        at the wrong place; nothing here deletes a file the journal cannot
+        account for.
+        """
+        if self.removals is None:
+            return {"ok": False, "error": "no removal journal"}
+        if not self.config.http.allow_delete and source in ("http", "mqtt"):
+            _log.warning("refusing to empty the trash: removal from the network is off")
+            return {"ok": False, "error": "removal from the network is off"}
+        names = [str(e.get("stored_as") or "") for e in self.removals.in_trash()]
+        names = [n for n in names if n]
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, self._unlink_removed, names)
+        purged = self.removals.mark_purged(names)
+        self.invalidate_stats()
+        self._dirty = True
+        left = await asyncio.get_running_loop().run_in_executor(
+            None, self._unaccounted_in_trash)
+        _log.info("emptied the trash: %d file(s) deleted, %d already gone, %d left alone",
+                  len(purged) - len(result["missing"]), len(result["missing"]), left)
+        return {"ok": True, "purged": len(purged),
+                "deleted": len(purged) - len(result["missing"]),
+                "missing": len(result["missing"]), "freed": result["freed"],
+                "failed": result["failed"], "left_alone": left}
+
+    def _unlink_removed(self, names: list[str]) -> dict[str, Any]:
+        """Unlink journal-known files from the deleted folder.  Off the loop.
+
+        ``basename`` on every name and a journal that vouched for it: the names
+        come from the journal, but they also come off a URL, and this is the
+        one place in the frame that unlinks a file a request asked it to.
+        """
+        folder = os.path.expanduser(self.config.library.deleted_folder)
+        freed, missing, failed = 0, [], {}
+        for name in names:
+            bare = os.path.basename(name)
+            if not bare or bare != name:
+                failed[name] = "not a name this frame wrote"
+                continue
+            path = os.path.join(folder, bare)
+            try:
+                freed += os.path.getsize(path)
+            except OSError:
+                pass
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                # Already gone -- somebody emptied the folder by hand, which is
+                # exactly the state this feature exists to tidy up.  Marking
+                # the line purged is still the right outcome.
+                missing.append(name)
+            except OSError as exc:
+                _log.error("cannot delete %s: %s", path, exc)
+                failed[name] = str(exc)
+        return {"freed": freed, "missing": missing, "failed": failed}
+
+    def _unaccounted_in_trash(self) -> int:
+        """Files in the deleted folder that no journal line explains."""
+        folder = os.path.expanduser(self.config.library.deleted_folder)
+        known = {str(e.get("stored_as") or "") for e in self.removals.in_trash()}
+        skip = {JOURNAL_NAME, JOURNAL_NAME + ".lock", JOURNAL_NAME + ".tmp"}
+        try:
+            with os.scandir(folder) as it:
+                return sum(1 for e in it
+                           if e.is_file() and e.name not in skip and e.name not in known)
+        except OSError:
+            return 0
+
     # ------------------------------------------------------------------
     # Display power
     # ------------------------------------------------------------------
@@ -1370,6 +1488,7 @@ class PicFrame:
             restart_required=sorted(self._restart_needed),
             unsaved_changes=self._config_dirty,
             can_restart=True,
+            can_shutdown=self.can_power_off(),
             library=self._library_stats(),
             removed=self._removed_summary(),
             current=self._current_payload(record),
@@ -1432,6 +1551,29 @@ class PicFrame:
         _log.info("restart requested")
         self.restart_requested = True
         self._stop.set()
+
+    def request_power_off(self) -> None:
+        """Stop cleanly, then power the Pi off.
+
+        Not a restart with nothing after it: the frame shuts the slideshow
+        down the way it always does and the CLI asks systemd for a power-off
+        once the loop has ended, so the Pi is switched off properly and the
+        card is never written to after that.  Nothing brings the frame back
+        until somebody switches the power on again.
+        """
+        _log.info("shutdown requested")
+        self.power_off_requested = True
+        self._stop.set()
+
+    @staticmethod
+    def can_power_off() -> bool:
+        """Whether there is a systemd here to ask for a power-off.
+
+        Started by hand on a desktop for a demo there is not, and a Shutdown
+        button that can only ever report a failure is worse than no button:
+        the state document carries this so the web interface can leave it out.
+        """
+        return shutil.which("systemctl") is not None
 
     @staticmethod
     def under_systemd() -> bool:

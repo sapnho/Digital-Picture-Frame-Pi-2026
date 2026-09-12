@@ -91,6 +91,7 @@ packages = ["src/picframe3"]
 [tool.hatch.build.targets.wheel.force-include]
 "packaging/picframe3.service" = "picframe3/data/picframe3.service"
 "packaging/50-picframe3-network.rules" = "picframe3/data/50-picframe3-network.rules"
+"packaging/55-picframe3-power.rules" = "picframe3/data/55-picframe3-power.rules"
 "packaging/99-picframe3.rules" = "picframe3/data/99-picframe3.rules"
 "packaging/60-picframe3-syncthing.rules" = "picframe3/data/60-picframe3-syncthing.rules"
 "packaging/picframe3-syncthing-on@.service" = "picframe3/data/picframe3-syncthing-on@.service"

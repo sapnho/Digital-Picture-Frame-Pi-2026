@@ -19,6 +19,7 @@ Every control surface produces the same command. The actions are:
 | `rescan` | — | walk the picture folders now |
 | `reload` | — | re-read the config file |
 | `restart` | — | stop and come back up with a fresh process |
+| `shutdown` | — | stop, then power the Pi off |
 | `quit` | — | stop the process, and leave it stopped |
 
 Filter payload: `subfolder`, `tags_any`, `tags_all`, `tags_none`, `date_window`,
@@ -43,6 +44,7 @@ authentication as everything else — point any OpenAPI client at it.
 | PATCH | `/api/config?persist=true` | `{"slideshow.interval": 90}` |
 | POST | `/api/geo/preview` | what a `detail` / `key_order` would write under the current picture |
 | POST | `/api/restart` | stop cleanly and come back up; `?save=false` to skip saving first |
+| POST | `/api/shutdown` | stop cleanly, then power the Pi off; `?save=false` to skip saving first |
 | GET | `/api/filters` | the filter in force, plus the folders, tags and places to choose from |
 | POST | `/api/filters` | change one or more filters; absent keys are left alone |
 | POST | `/api/filters/preview` | how many pictures a filter *would* select, applying nothing |
@@ -52,11 +54,13 @@ authentication as everything else — point any OpenAPI client at it.
 | GET | `/api/library/photo/{id}` | one record |
 | GET | `/api/library/photo/{id}/thumb` | JPEG thumbnail, cacheable |
 | GET | `/api/library/photo/{id}/file` | the original file |
-| GET | `/api/removed?include_restored=&limit=` | the removal journal, newest first |
+| GET | `/api/removed?include_restored=&include_purged=&limit=` | the removal journal, newest first |
 | GET | `/api/removed/summary` | how many are in the deleted folder and what they weigh |
 | GET | `/api/removed/{stored_as}/thumb` | JPEG thumbnail of a removed picture |
 | GET | `/api/removed/{stored_as}/file` | the removed file itself |
 | POST | `/api/removed/{stored_as}/restore` | put it back where it came from, and say where that was |
+| POST | `/api/removed/{stored_as}/purge` | delete that file for good; its journal line stays |
+| POST | `/api/removed/empty` | empty the trash: delete every file in it for good |
 | GET | `/api/removed/journal` | the raw journal as `removals.jsonl` (NDJSON) |
 | GET | `/api/current?size=` | **a JPEG of the photograph on the frame right now** |
 | GET | `/api/screenshot` | **a PNG of what is on the frame's screen right now** |
@@ -99,6 +103,18 @@ Removing over the network is off unless `http.allow_delete` is set: without it
 `delete` is refused with 403 and a picture can only be removed at the frame
 itself, with a button or a key. `POST /api/removed/{stored_as}/restore` puts a
 picture back whatever that setting says.
+
+Emptying the trash is the one thing here that does delete. `POST
+/api/removed/{stored_as}/purge` unlinks one file and `POST /api/removed/empty`
+unlinks all of them; both then **mark** the journal line `purged_at` rather
+than removing it, so the record of what the picture was, when it went and
+where it came from outlives the JPEG — and the Removed tab keeps the row,
+says the file is gone and stops offering to put it back. Both obey
+`http.allow_delete`: deleting for good cannot be easier than removing. Only
+names the journal accounts for are ever unlinked, so a file somebody else put
+in the deleted folder is counted (`left_alone` in the reply) and left where it
+is. `/api/removed/empty` is registered **before** the `{stored_as}` routes;
+declared after them, `empty` would be read as a file name.
 
 ### What answers, and from where
 
@@ -240,7 +256,7 @@ Discovered automatically under one device:
 - `light.<name>_display` — on/off and brightness
 - `switch.<name>_pause`
 - `button.<name>_next_picture`, `_previous_picture`, `_rescan_library`,
-  `_restart_the_frame`, `_remove_current_picture`
+  `_restart_the_frame`, `_shut_the_frame_down`, `_remove_current_picture`
 - `number.<name>_seconds_per_picture`
 - `select.<name>_transition`, `select.<name>_order`
 - `image.<name>_picture` — **the photograph on the frame**, sent as a JPEG on
@@ -321,6 +337,7 @@ costs no extra traffic.
 | `PATCH /api/config` | `{"slideshow.interval": 90}`; add `?persist=true` to write the config file |
 | `POST /api/geo/preview` | `{"detail": "custom", "key_order": [["village","town"],["country"]]}` → what that would write under the picture currently on screen, plus the address keys that picture's own reply carries. Reads the geocache only; never makes a network request |
 | `POST /api/restart` | stop cleanly and come back up; saves the configuration first unless `?save=false` |
+| `POST /api/shutdown` | stop cleanly, then ask systemd to power the Pi off; saves the configuration first unless `?save=false`. Answers `503` where there is no systemd to ask, which is also what `state.can_shutdown` says |
 | `POST /api/quit` | stop, and stay stopped: the process exits 143, and `RestartPreventExitStatus=143` in the unit keeps systemd from starting it again. `sudo systemctl start picframe3@<user>` brings it back |
 
 Writing the mask `••••••••` back to a password changes nothing, so reading the
@@ -337,6 +354,22 @@ Under systemd the restart is a clean exit: `Restart=always` starts a fresh unit
 a few seconds later, in a new cgroup, with the DRM device released by the
 kernel rather than by code unwinding while it still owns the screen. Started by
 hand, the process re-executes itself once the event loop has finished.
+
+### Shutting the frame down
+
+**Shut the frame down**, in the *Rarely needed* strip at the foot of the
+Settings tab and as a button in Home Assistant, powers the **Pi** off — so the
+frame can be switched off from the sofa and the plug pulled without corrupting
+the card. It is not a restart with nothing after it: only the power switch
+brings the frame back.
+
+The frame stops the slideshow the way it always does and then asks systemd for
+the power-off, once the event loop has ended and the screen has been handed
+back. Doing that as an ordinary user needs one narrow polkit rule —
+`/etc/polkit-1/rules.d/55-picframe3-power.rules`, this user and logind's
+`power-off` action, nothing else — which `picframe3 setup` installs and
+`picframe3 doctor` checks. Without it the Pi stays on, the frame comes back
+rather than leaving a dark screen, and the journal says why.
 
 ## Light and dark
 

@@ -103,6 +103,11 @@ def cmd_run(args) -> int:
         _log.exception("picframe3 stopped with an error")
         return 1
 
+    # Checked before the restart flag because the two are exclusive and this
+    # one is the more final: a frame asked to shut down must not be brought
+    # back by the restart path.
+    if getattr(frame, "power_off_requested", False):
+        return _power_off()
     if frame.restart_requested:
         return _restart(frame)
     # `quit` means stop, and under systemd a clean exit does not stop anything:
@@ -116,6 +121,44 @@ def cmd_run(args) -> int:
                   QUIT_EXIT_CODE)
         return QUIT_EXIT_CODE
     return code
+
+
+def _power_off() -> int:
+    """Power the Pi off, now that the screen has been handed back.
+
+    The frame asks systemd rather than calling ``poweroff`` itself: the unit
+    runs as an ordinary user with ``NoNewPrivileges=yes``, so the permission
+    comes from one narrow polkit rule -- logind's ``power-off`` action for this
+    user and nothing else -- which `picframe3 setup` installs as
+    /etc/polkit-1/rules.d/55-picframe3-power.rules.
+
+    A refusal leaves the Pi running, and this returns 1 rather than 143 for
+    that case: a fault is what ``Restart=always`` turns back into a picture on
+    the wall, whereas 143 would leave a dark screen and nothing explaining it
+    except the journal.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("systemctl") is None:
+        _log.error("no systemctl here, so nothing to ask for a power-off; "
+                   "the frame stays up")
+        return 1
+    _log.info("shutdown requested; asking systemd to power the Pi off")
+    try:
+        result = subprocess.run(["systemctl", "poweroff"],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log.error("could not power off (%s); the frame will come back", exc)
+        return 1
+    if result.returncode != 0:
+        _log.error("could not power off (%s); the frame will come back. Run "
+                   "'picframe3 setup' to install the polkit rule that permits "
+                   "it.", (result.stderr or "").strip() or result.returncode)
+        return 1
+    # The job is queued; systemd stops this unit as part of the shutdown.
+    # Exiting 143 keeps it from being restarted in the seconds in between.
+    return QUIT_EXIT_CODE
 
 
 def _restart(frame) -> int:
@@ -454,6 +497,14 @@ def cmd_doctor(args) -> int:
             if config.network.repair:
                 check("may mend its own connection", *_repair_permission())
 
+    # -- the Shutdown button
+    #
+    # Powering the Pi off needs a polkit rule in the same way mending the
+    # network does, and the moment to find out that it is missing is here --
+    # not from the sofa, when the button reports that it could not.
+    if _has("systemctl"):
+        check("may power the Pi off", *_power_off_permission())
+
     # -- Syncthing, when the frame is meant to be running it
     #
     # A frame whose pictures arrive over Syncthing has a second thing that can
@@ -551,31 +602,54 @@ def cmd_doctor(args) -> int:
     return 0 if ok else 1
 
 
+def _has(program: str) -> bool:
+    import shutil
+
+    return shutil.which(program) is not None
+
+
+def _polkit_knows(action_id: str) -> bool:
+    """Whether polkit itself has heard of the action a rule is written for.
+
+    A rule file on disk says nothing about whether anything will ever read it:
+    on a system with no polkit daemon -- which a minimal image may well be --
+    the file sits there forever while every request is refused.
+    """
+    import subprocess
+
+    if not _has("pkaction"):
+        return False
+    try:
+        return subprocess.run(["pkaction", "--action-id", action_id],
+                              capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _power_off_permission() -> tuple[bool, str, str]:
+    """Can the frame really power the Pi off when the button is pressed?"""
+    rule = "/etc/polkit-1/rules.d/55-picframe3-power.rules"
+    if os.path.exists(rule) and _polkit_knows("org.freedesktop.login1.power-off"):
+        return True, "polkit rule installed and polkit knows the action", ""
+    if not os.path.exists(rule):
+        return (False, "polkit rule missing",
+                "run 'picframe3 setup' to install it. Without it the Shutdown "
+                "button reports that it could not power the Pi off.")
+    return (False, "polkit is not available, so the rule is never read",
+            "install polkitd; the frame can then power itself off.")
+
+
 def _repair_permission() -> tuple[bool, str, str]:
     """Can the frame really mend its own network connection?
 
     Two things have to be true and only one of them was checked. The rule file
-    being on disk says nothing about whether anything will ever read it: on a
-    system with no polkit daemon -- which a minimal image may well be -- the
-    file sits there forever and the frame's repair is refused every time,
-    while doctor reported a tick. Asking polkit itself whether it knows the
-    action we depend on is the other half.
+    being on disk says nothing about whether anything will ever read it, which
+    is what ``_polkit_knows`` asks about; doctor used to report a tick for a
+    rule nothing would ever read.
     """
-    import shutil
-    import subprocess
-
     rule = "/etc/polkit-1/rules.d/50-picframe3-network.rules"
     have_rule = os.path.exists(rule)
-    have_polkit = False
-    if shutil.which("pkaction"):
-        try:
-            have_polkit = subprocess.run(
-                ["pkaction", "--action-id",
-                 "org.freedesktop.NetworkManager.network-control"],
-                capture_output=True, timeout=5,
-            ).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            have_polkit = False
+    have_polkit = _polkit_knows("org.freedesktop.NetworkManager.network-control")
 
     if have_rule and have_polkit:
         return True, "polkit rule installed and polkit knows the action", ""
@@ -725,6 +799,7 @@ def cmd_uninstall(args) -> int:
 
     from .wizard import (
         POLKIT_RULE,
+        POWER_POLKIT_RULE,
         SAMBA_BEGIN,
         SAMBA_CONF,
         SAMBA_END,
@@ -750,6 +825,9 @@ def cmd_uninstall(args) -> int:
     if os.path.exists(POLKIT_RULE):
         run_root(["rm", "-f", POLKIT_RULE])
         say(f"removed {POLKIT_RULE} (permission to mend the network)")
+    if os.path.exists(POWER_POLKIT_RULE):
+        run_root(["rm", "-f", POWER_POLKIT_RULE])
+        say(f"removed {POWER_POLKIT_RULE} (permission to power the Pi off)")
     if os.path.exists(UDEV_RULE):
         run_root(["rm", "-f", UDEV_RULE])
         if shutil.which("udevadm"):

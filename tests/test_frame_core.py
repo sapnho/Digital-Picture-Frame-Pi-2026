@@ -239,6 +239,29 @@ def test_quit_says_it_was_a_quit():
     assert frame._stop.is_set()
 
 
+# -- shutting the Pi down ---------------------------------------------------
+
+def test_shutdown_stops_the_loop_and_asks_for_a_power_off():
+    """The flag the CLI reads once the loop has ended -- and it has to be a
+    different one from `restart_requested`, or a frame asked to shut down is
+    started straight back up."""
+    frame = PicFrame(Config())
+    asyncio.run(frame.handle(_command("shutdown")))
+    assert frame.power_off_requested is True
+    assert frame.restart_requested is False
+    assert frame._stop.is_set()
+
+
+def test_the_state_says_whether_the_frame_can_power_itself_off(monkeypatch):
+    """The web interface hides the button on this, so it must follow whether
+    there is a systemd to ask rather than being a hopeful `True`."""
+    frame = PicFrame(Config())
+    monkeypatch.setattr("picframe3.app.shutil.which", lambda name: None)
+    assert frame.can_power_off() is False
+    monkeypatch.setattr("picframe3.app.shutil.which", lambda name: "/bin/" + name)
+    assert frame.can_power_off() is True
+
+
 def _command(action: str):
     from picframe3.events import Command
 

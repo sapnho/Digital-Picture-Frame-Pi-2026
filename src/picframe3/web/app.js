@@ -171,6 +171,9 @@ function render(next) {
   $("#progress-bar").style.width = `${pct}%`;
 
   renderRestartNotice();
+  // No systemd, no power-off: a button that could only ever report a failure
+  // is worse than no button.
+  $("#shutdown").hidden = state.can_shutdown === false;
 
   const filters = state.filters || {};
   if (filterHasLanded(filters)) {
@@ -441,25 +444,42 @@ async function loadLibrary() {
 }
 
 /* -------------------------------------------------------------- removed */
-/* Nothing here deletes anything — the frame moves a picture aside and writes
-   a line about it.  This page reads those lines back, which is the whole
-   point: a folder of loose JPEGs cannot tell you why any of them is there. */
+/* Removing moves a picture aside and writes a line about it; this page reads
+   those lines back, which is the whole point — a folder of loose JPEGs cannot
+   tell you why any of them is there.  Emptying the trash is the one thing here
+   that does delete, and it deletes the file only: the line stays, marked, so
+   the answer to "what happened to that photograph?" outlives the JPEG. */
 let removedTimer = null;
 $("#removed-search").addEventListener("input", () => {
   clearTimeout(removedTimer);
   removedTimer = setTimeout(loadRemoved, 250);
 });
 $("#removed-restored").addEventListener("change", loadRemoved);
+$("#removed-purged").addEventListener("change", loadRemoved);
+$("#trash-empty").addEventListener("click", emptyTrash);
 
 async function loadRemoved() {
   const withRestored = $("#removed-restored").checked;
+  const withPurged = $("#removed-purged").checked;
   const query = $("#removed-search").value.trim().toLowerCase();
-  let rows = await api(`/api/removed?include_restored=${withRestored}`);
+  let rows = await api(
+    `/api/removed?include_restored=${withRestored}&include_purged=${withPurged}`);
   if (query) {
     rows = rows.filter((r) =>
       [r.basename, r.title, r.caption, r.location, r.folder, (r.tags || []).join(" ")]
         .join(" ").toLowerCase().includes(query));
   }
+  /* The button says how much it would delete, and is off when that is
+     nothing — a destructive button that does nothing when pressed teaches
+     people to press destructive buttons. */
+  const summary = await api("/api/removed/summary");
+  const waiting = summary.count || 0;
+  const button = $("#trash-empty");
+  button.disabled = waiting === 0;
+  button.textContent = waiting
+    ? `Empty the trash (${fmt(waiting)})`
+    : "The trash is empty";
+
   const list = $("#removed-list");
   list.innerHTML = "";
   $("#removed-empty").hidden = rows.length > 0;
@@ -471,12 +491,14 @@ async function loadRemoved() {
 
 function removalRow(r) {
   const row = document.createElement("article");
-  row.className = "removal" + (r.restored_at ? " is-restored" : "");
+  row.className = "removal" + (r.restored_at ? " is-restored" : "")
+    + (r.purged_at ? " is-purged" : "");
 
   const shot = r.on_disk
     ? `<span class="shot"><img loading="lazy" alt=""
          src="/api/removed/${encodeURIComponent(r.stored_as)}/thumb"></span>`
-    : `<span class="shot"><span class="gone">file gone</span></span>`;
+    : `<span class="shot"><span class="gone">${
+         r.purged_at ? "deleted" : "file gone"}</span></span>`;
 
   /* What it was, then when it went, then where it belongs. Tags and place are
      the two that make a picture recognisable months later, so they come before
@@ -501,13 +523,42 @@ function removalRow(r) {
               ? ` as ${escapeHtml(r.restored_to.split("/").pop())}`
               : ""}</div>`
         : "") +
+      (r.purged_at
+        ? `<div class="line for-good">File deleted for good ${
+            escapeHtml(when_text(r.purged_iso))} — this note is what is left</div>`
+        : "") +
     `</div>` +
     `<div class="actions"></div>`;
 
   const img = row.querySelector("img");
   if (img) img.onload = (e) => e.target.classList.add("ready");
 
-  if (!r.restored_at && r.on_disk) {
+  if (!r.restored_at && !r.purged_at) {
+    const forGood = document.createElement("button");
+    forGood.className = "btn btn-danger";
+    forGood.textContent = "Delete for good";
+    forGood.title = `Delete ${r.stored_as} from the disk. The note stays.`;
+    forGood.onclick = async () => {
+      if (!confirm(
+        `Delete ${r.basename} from the disk for good?\n\n` +
+        "It cannot be put back afterwards. The journal keeps what it was, " +
+        "when it went and where it came from.")) return;
+      forGood.disabled = true;
+      forGood.textContent = "Deleting…";
+      try {
+        await api(`/api/removed/${encodeURIComponent(r.stored_as)}/purge`,
+                  { method: "POST" });
+      } catch (err) {
+        alert(`Could not delete it: ${err.message}`);
+      }
+      /* The stats row and its Removed tile redraw themselves: the frame
+         pushes a new state document because the count changed. */
+      loadRemoved();
+    };
+    row.querySelector(".actions").appendChild(forGood);
+  }
+
+  if (!r.restored_at && !r.purged_at && r.on_disk) {
     const button = document.createElement("button");
     button.className = "btn";
     button.textContent = "Put it back";
@@ -530,6 +581,37 @@ function removalRow(r) {
     row.querySelector(".actions").appendChild(button);
   }
   return row;
+}
+
+/* Two sentences and a count before anything is unlinked.  The second one is
+   the one that matters: the pictures go, the record of them does not. */
+async function emptyTrash() {
+  const summary = await api("/api/removed/summary");
+  const waiting = summary.count || 0;
+  if (!waiting) return;
+  if (!confirm(
+    `Delete ${waiting} picture${waiting === 1 ? "" : "s"} from the disk for good?\n\n` +
+    "They cannot be put back afterwards. The journal keeps every line: what " +
+    "each one was, when it went and where it came from.")) return;
+  const button = $("#trash-empty");
+  button.disabled = true;
+  button.textContent = "Emptying…";
+  try {
+    const res = await api("/api/removed/empty", { method: "POST" });
+    const parts = [`${fmt(res.deleted)} deleted`];
+    if (res.freed) parts.push(`${bytes(res.freed)} freed`);
+    if (res.missing) parts.push(`${fmt(res.missing)} already gone`);
+    if (res.left_alone) {
+      parts.push(`${fmt(res.left_alone)} file${res.left_alone === 1 ? "" : "s"} ` +
+                 "the frame did not put there left alone");
+    }
+    const failed = Object.keys(res.failed || {}).length;
+    if (failed) parts.push(`${fmt(failed)} could not be deleted`);
+    alert(`Trash emptied: ${parts.join(", ")}.`);
+  } catch (err) {
+    alert(`Could not empty the trash: ${err.message}`);
+  }
+  loadRemoved();
 }
 
 function sourceName(source) {
@@ -1248,6 +1330,7 @@ $("#reload").onclick = async () => {
 };
 $("#restart").onclick = () => restartFrame();
 $("#restart-now").onclick = () => restartFrame();
+$("#shutdown").onclick = () => shutDownFrame();
 
 /* ------------------------------------------------------------------ restart
    Several settings — the MQTT broker, the HTTP port, which folders are
@@ -1296,6 +1379,39 @@ async function waitForTheFrame(attempt = 0) {
   } catch (err) { /* still down */ }
   $("#saved").textContent = `Restarting the frame… (${(attempt + 1) * 2}s)`;
   waitForTheFrame(attempt + 1);
+}
+
+/* ----------------------------------------------------------------- shutdown
+   Not a restart with nothing after it: the Pi powers off and only the power
+   switch brings it back, which is why this one does not wait for the frame to
+   return and why it sits in the "rarely needed" strip rather than beside
+   Save. Saving first, as a restart does — the settings would otherwise go with
+   it. */
+async function shutDownFrame() {
+  const unsaved = state && state.unsaved_changes;
+  if (!confirm(
+    (unsaved ? "Save the settings and shut the frame down?\n\n"
+             : "Shut the frame down?\n\n") +
+    "The Pi powers off. Wait for the screen to go dark before pulling the " +
+    "plug — and the frame comes back only when the power is switched on again."
+  )) return;
+
+  const button = $("#shutdown");
+  button.disabled = true;
+  button.textContent = "Shutting down…";
+  $("#saved").textContent = "Shutting the frame down…";
+  try {
+    const res = await fetch("/api/shutdown?save=true", { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      $("#saved").textContent = body.detail || "The frame could not shut down.";
+      button.disabled = false;
+      button.textContent = "Shut the frame down";
+      return;
+    }
+  } catch (err) { /* it went down mid-reply, which is the point */ }
+  $("#saved").textContent =
+    "Powering off. Wait for the screen to go dark before pulling the plug.";
 }
 
 function renderRestartNotice() {

@@ -162,3 +162,25 @@ def test_the_panel_follows_a_filter_set_from_somewhere_else():
 def test_the_dropdowns_are_filled_from_the_library():
     assert "/api/filters" in APP_JS
     assert 'id="f-tag-list"' in HTML and 'id="f-place-list"' in HTML
+
+
+# -- emptying the trash from the page ---------------------------------------
+
+def test_the_removed_tab_can_empty_the_trash():
+    assert 'id="trash-empty"' in HTML
+    assert 'id="removed-purged"' in HTML
+    assert "/api/removed/empty" in APP_JS
+    assert "/purge" in APP_JS
+
+
+def test_the_destructive_buttons_ask_first():
+    """Both of them: one picture and all of them are equally unrecoverable."""
+    body = APP_JS[APP_JS.index("async function emptyTrash"):]
+    assert "confirm(" in body[:body.index("function sourceName")]
+    row = APP_JS[APP_JS.index("Delete for good"):]
+    assert "confirm(" in row[:400]
+
+
+def test_the_removed_tab_no_longer_claims_nothing_is_ever_deleted():
+    """It can delete now.  A page that says otherwise is a page that lies."""
+    assert "Nothing is ever deleted" not in HTML

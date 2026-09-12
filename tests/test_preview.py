@@ -170,6 +170,33 @@ def test_restart_reaches_the_restart_handler_and_saves_first():
     assert [c.action.value for c in frame.bus.commands] == ["restart"]
 
 
+def test_shutdown_reaches_its_own_handler_and_saves_first():
+    """Same trap as the restart route: registered below `POST /api/{action}`
+    it would land in the shortcut handler, `save` would never be read, and
+    powering the frame off would take the unsaved settings with it."""
+    frame, client = _server()
+    reply = client.post("/api/shutdown?save=true")
+    assert reply.status_code == 200
+    assert reply.json()["saved"] is True, "the shortcut handler cannot answer this"
+    assert frame.saves == 1
+    assert [c.action.value for c in frame.bus.commands] == ["shutdown"]
+
+
+def test_shutdown_can_still_be_asked_not_to_save():
+    frame, client = _server()
+    assert client.post("/api/shutdown?save=false").json()["saved"] is False
+    assert frame.saves == 0
+
+
+def test_a_frame_that_cannot_power_itself_off_says_so_rather_than_pretending():
+    frame, client = _server()
+    frame._state.can_shutdown = False
+    reply = client.post("/api/shutdown")
+    assert reply.status_code == 503
+    assert "systemd" in reply.json()["detail"]
+    assert frame.bus.commands == []
+
+
 def test_restart_can_still_be_asked_not_to_save():
     frame, client = _server()
     assert client.post("/api/restart?save=false").json()["saved"] is False
