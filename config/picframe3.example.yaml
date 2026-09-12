@@ -144,9 +144,15 @@ geo:
                           # the index, from the geocache — no new lookups.
   suppress: []            # place names never to show, e.g. ["France"]
   key_order:              # only used when detail is "custom".
-                          # One tier per line; within a tier the first key
-                          # Nominatim returned wins, which is what makes one
-                          # setting behave the same in France and in Germany.
+                          # One tier per line, and within a line the keys you
+                          # would accept for that tier, best first: the first
+                          # one this particular address actually has is the one
+                          # written, and the rest of the line is skipped.
+                          # That is what makes one setting behave the same in
+                          # France and in Germany — a French hamlet comes back
+                          # as "village", a German one as "isolated_dwelling".
+                          # The Settings tab has an editor for this, with a
+                          # live preview against the picture on screen.
     - [tourism, attraction, amenity, isolated_dwelling]
     - [neighbourhood, suburb, village, town]
     - [city, municipality, county]

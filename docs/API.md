@@ -93,7 +93,7 @@ Discovered automatically under one device:
 - `light.<name>_display` — on/off and brightness
 - `switch.<name>_pause`
 - `button.<name>_next_picture`, `_previous_picture`, `_rescan_library`,
-  `_remove_current_picture`
+  `_restart_the_frame`, `_remove_current_picture`
 - `number.<name>_seconds_per_picture`
 - `select.<name>_transition`, `select.<name>_order`
 - `sensor.<name>_current_picture` — filename, with all metadata as attributes
@@ -111,6 +111,8 @@ Discovered automatically under one device:
 - `sensor.<name>_shuffle_round`, `sensor.<name>_left_in_this_round` — how far
   through the current pass over the library the frame is (diagnostic)
 - `binary_sensor.<name>_scanning`
+- `binary_sensor.<name>_restart_needed` — on when a setting has been changed
+  that only a fresh process will pick up, with the list as an attribute
 
 All of them read one retained JSON document on `…/state`, so adding entities
 costs no extra traffic.
@@ -122,9 +124,23 @@ costs no extra traffic.
 | `GET /api/config` | the whole configuration as JSON, with passwords masked as `••••••••` |
 | `GET /api/config/schema` | every setting with its type, label, explanation, legal values, default, and whether it takes effect without a restart — generated from the dataclasses, and what the Settings tab draws itself from |
 | `PATCH /api/config` | `{"slideshow.interval": 90}`; add `?persist=true` to write the config file |
+| `POST /api/geo/preview` | `{"detail": "custom", "key_order": [["village","town"],["country"]]}` → what that would write under the picture currently on screen, plus the address keys that picture's own reply carries. Reads the geocache only; never makes a network request |
+| `POST /api/restart` | stop cleanly and come back up; saves the configuration first unless `?save=false` |
 
 Writing the mask `••••••••` back to a password changes nothing, so reading the
 configuration, editing one key and sending it all back cannot blank a secret.
+
+Most settings apply the moment they are set. The ones that cannot — the MQTT
+broker, the HTTP port, which folders are indexed — are listed in
+`state.restart_required`, badged **restart** on the settings page, and marked
+*(takes effect on restart)* in the [configuration reference](CONFIG.md). The
+Settings tab shows a notice naming them with a **Save & restart** button, and
+there is a **Restart the frame** button alongside Save and Reload.
+
+Under systemd the restart is a clean exit: `Restart=always` starts a fresh unit
+a few seconds later, in a new cgroup, with the DRM device released by the
+kernel rather than by code unwinding while it still owns the screen. Started by
+hand, the process re-executes itself once the event loop has finished.
 
 ## Light and dark
 

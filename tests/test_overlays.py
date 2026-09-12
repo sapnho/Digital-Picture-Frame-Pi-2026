@@ -152,3 +152,47 @@ def test_every_offered_place_name_preset_resolves():
 
     for name in geocode.DETAIL_LABELS:
         assert geocode.key_order_for(name), name
+
+
+def test_format_address_is_first_key_present_per_tier():
+    """The rule the tiers editor teaches, pinned."""
+    from picframe3.media.geocode import EXAMPLE_ADDRESS, format_address
+
+    assert format_address(EXAMPLE_ADDRESS, [["tourism"], ["village"], ["country"]]) \
+        == "Plage de Hattainville, Baubigny, France"
+    # The rest of a line is skipped once one key in it has matched.
+    assert format_address(EXAMPLE_ADDRESS, [["village", "town", "city"]]) == "Baubigny"
+    # A key the address does not have simply falls through to the next.
+    assert format_address(EXAMPLE_ADDRESS, [["isolated_dwelling", "village"]]) == "Baubigny"
+    # Nothing matched anywhere: no caption rather than an empty one.
+    assert format_address(EXAMPLE_ADDRESS, [["nothing_like_this"]]) is None
+    # A value already written is not repeated by a later tier.
+    assert format_address({"village": "Baubigny", "town": "Baubigny"},
+                          [["village"], ["town"]]) == "Baubigny"
+    assert format_address(EXAMPLE_ADDRESS, [["village"], ["country"]],
+                          suppress=["France"]) == "Baubigny"
+
+
+def test_every_key_the_editor_offers_is_a_real_nominatim_key():
+    """The chips have to be usable, not decorative."""
+    from picframe3.media import geocode
+
+    offered = {key for _, keys in geocode.NOMINATIM_KEYS for key in keys}
+    assert len(offered) == sum(len(keys) for _, keys in geocode.NOMINATIM_KEYS), \
+        "a key is listed under two groups"
+    # Every key any preset relies on must be offered, or a preset could not be
+    # rebuilt by hand.
+    for name in geocode.DETAIL_PRESETS:
+        for tier in geocode.key_order_for(name):
+            assert set(tier) <= offered, (name, set(tier) - offered)
+
+
+def test_the_example_address_exercises_the_rule():
+    """It is what the settings page shows before any picture has been on
+    screen, so it has to have both a hit and a miss in it."""
+    from picframe3.media import geocode
+
+    assert "village" in geocode.EXAMPLE_ADDRESS
+    assert "isolated_dwelling" not in geocode.EXAMPLE_ADDRESS
+    assert geocode.format_address(geocode.EXAMPLE_ADDRESS,
+                                  geocode.key_order_for("full"))

@@ -122,14 +122,14 @@ NOTES = {
     "library.rescan_interval": "Full walk as a backstop behind inotify, in seconds. 0 disables it.",
     "library.scan_on_start": "Index at startup. Off is faster to start but new files wait for the watch.",
     "library.deleted_folder": "Where “Remove” moves a picture. Nothing is ever unlinked.",
-    "library.subfolder": "Show only pictures under a folder whose path contains this. Empty shows everything.",
+    "library.subfolder": "Show only pictures whose path contains this. Pick one of your folders, or type any part of a path. Empty shows everything.",
     "geo.enabled": "Reverse-geocode GPS coordinates into place names.",
     "geo.contact": "**Required when enabled.** Nominatim's usage policy needs a way to reach you.",
     "geo.language": "Two-letter code: the language place names come back in.",
     "geo.cache": "Nominatim's replies, kept forever. Re-wording place names never costs a request.",
     "geo.detail": "How much of an address a caption shows. Changing it rewrites the names already in the index, from the cache.",
     "geo.suppress": "Place names never to show — your own country, say.",
-    "geo.key_order": "Only used when detail is `custom`. One tier per line; within a tier the first key Nominatim returned wins, which is what makes one setting behave the same in France and in Germany.",
+    "geo.key_order": "Used when **How much of the address** is set to Custom. **One tier per line**, and within a line the keys you would accept for that tier, best first — the first one this particular address actually has is the one written, and the rest of the line is skipped. That is what makes a single setting behave the same in France and in Germany: a French hamlet comes back as `village`, a German one as `isolated_dwelling`, and a line reading `village, isolated_dwelling, town` catches both.",
     "mqtt.enabled": "Announce the frame to Home Assistant and accept commands.",
     "mqtt.host": "Your broker. Home Assistant's built-in Mosquitto is usually the Home Assistant host itself.",
     "mqtt.port": "1883 plain, 8883 with TLS.",
@@ -226,6 +226,18 @@ LIVE_KEYS = {
     "library.subfolder", "logging.level",
 }
 
+def needs_restart(key: str) -> bool:
+    """True when only a fresh process will pick this setting up.
+
+    One answer, used by the running frame to decide what to put in
+    ``restart_required``, by the settings page to badge the control, and by the
+    reference to mark the row -- so the three can never disagree about which
+    settings a restart is for.
+    """
+    section = key.split(".", 1)[0]
+    return not (section in LIVE_SECTIONS or key in LIVE_KEYS)
+
+
 #: Explicit control choices, where the type alone cannot say.
 CHOICES: dict[str, list[str]] = {
     "display.backend": ["auto", "kms", "headless"],
@@ -245,6 +257,8 @@ DYNAMIC: dict[str, str] = {
     "viewer.show_text": "caption-fields",
     "viewer.text_separator": "separator",
     "geo.detail": "geo-detail",
+    "geo.key_order": "address-keys",
+    "library.subfolder": "folders",
     "display.rotate": "rotate",
 }
 
@@ -255,7 +269,7 @@ ADVANCED = {
     "viewer.text_margin_x", "viewer.text_margin_y", "viewer.text_opacity",
     "viewer.overlay_image", "viewer.clock_extra_file", "viewer.blur_zoom",
     "library.database", "library.deleted_folder", "library.follow_links",
-    "geo.cache", "geo.key_order",
+    "geo.cache",
     "mqtt.discovery_prefix", "mqtt.topic_prefix", "mqtt.tls_ca",
     "mqtt.tls_insecure", "mqtt.publish_interval",
     "http.host", "http.cors_origins",
@@ -311,7 +325,7 @@ def _options() -> dict[str, list[dict[str, str]]]:
     from .gfx import transitions
     from .gfx.overlays import CAPTION_FIELDS
     from .library.playlist import ORDER_MODES
-    from .media.geocode import DETAIL_LABELS
+    from .media.geocode import DETAIL_LABELS, NOMINATIM_KEYS
     from .media.mat import STYLE_LABELS, STYLES
     from .media.prepare import AUTO_FITS
 
@@ -345,10 +359,15 @@ def _options() -> dict[str, list[dict[str, str]]]:
         "separator": pairs([("  ·  ", "Dot  ·"), (" – ", "Dash  –"),
                             (", ", "Comma  ,"), ("\n", "One per line")]),
         "rotate": pairs([("0", "Upright"), ("180", "Upside down")]),
+        # Every address key Nominatim is known to return, grouped the way the
+        # tiers editor offers them.
+        "address-keys": [{"name": key, "label": f"{key} — {group.lower()}"}
+                         for group, keys in NOMINATIM_KEYS for key in keys],
+        "folders": [],
     }
 
 
-def schema(config) -> dict[str, Any]:
+def schema(config, extra_options: dict[str, Any] | None = None) -> dict[str, Any]:
     """Every setting, with enough about each to draw a control for it."""
     import typing
 
@@ -373,13 +392,17 @@ def schema(config) -> dict[str, Any]:
                 kind = "pick-string"
             elif widget == "order":
                 kind = "select"
+            elif widget == "address-keys":
+                kind = "tiers"
+            elif widget == "folders":
+                kind = "datalist"
             if dotted in SECRETS:
                 kind = "secret"
 
             default = f.default
             if default is MISSING and f.default_factory is not MISSING:  # type: ignore[misc]
                 default = f.default_factory()                            # type: ignore[misc]
-            live = section.name in LIVE_SECTIONS or dotted in LIVE_KEYS
+            live = not needs_restart(dotted)
             entries.append({
                 "key": dotted,
                 "name": f.name,
@@ -402,4 +425,6 @@ def schema(config) -> dict[str, Any]:
             "prose": SECTION_PROSE.get(section.name, ""),
             "fields": entries,
         })
-    return {"sections": sections, "options": _options()}
+    options = _options()
+    options.update(extra_options or {})
+    return {"sections": sections, "options": options}

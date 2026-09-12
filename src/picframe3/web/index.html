@@ -97,10 +97,20 @@
       <label class="inline"><input id="settings-advanced" type="checkbox">
         Show advanced</label>
     </div>
+    <div id="restart-notice" class="notice" hidden>
+      <div>
+        <strong id="restart-headline"></strong>
+        <p id="restart-detail" class="muted"></p>
+      </div>
+      <button id="restart-now" class="btn btn-primary" type="button">Save &amp; restart</button>
+    </div>
+
     <form id="settings"></form>
     <div class="controls">
       <button id="save" class="btn btn-primary" type="button">Save to config file</button>
       <button id="reload" class="btn" type="button">Reload from file</button>
+      <button id="restart" class="btn" type="button"
+              title="Stop the frame and start it again">Restart the frame</button>
     </div>
     <pre id="saved" class="muted"></pre>
   </section>

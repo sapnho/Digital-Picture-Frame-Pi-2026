@@ -56,6 +56,56 @@ DETAIL_PRESETS: dict[str, tuple[tuple[str, ...], ...]] = {
     "country": (("country",),),
 }
 
+#: The address keys Nominatim actually returns, loosely finest-first.  Not
+#: every key comes back for every place -- a French hamlet has ``village``, a
+#: German one ``isolated_dwelling``, a US suburb neither -- which is exactly
+#: why a tier is a *list* rather than a single key.
+NOMINATIM_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Named place", ("tourism", "attraction", "amenity", "leisure", "historic",
+                     "building", "isolated_dwelling", "farm")),
+    ("Street", ("house_number", "road", "pedestrian", "footway")),
+    ("Neighbourhood", ("neighbourhood", "quarter", "suburb", "city_district",
+                       "hamlet", "croft")),
+    ("Town", ("village", "town", "city", "municipality", "borough")),
+    ("Region", ("county", "state_district", "state", "province", "region")),
+    ("Country", ("postcode", "country", "country_code", "continent")),
+)
+
+#: A real reply, kept so the settings page can show what a set of tiers would
+#: produce before a single photograph is on screen.
+EXAMPLE_ADDRESS = {
+    "tourism": "Plage de Hattainville",
+    "road": "Route de la Mer",
+    "hamlet": "Hattainville",
+    "village": "Baubigny",
+    "county": "Cherbourg",
+    "state": "Normandy",
+    "postcode": "50270",
+    "country": "France",
+    "country_code": "fr",
+}
+
+
+def format_address(address: dict, key_order: Sequence[Sequence[str]],
+                   suppress: Sequence[str] = ()) -> str | None:
+    """One place name from one Nominatim reply.
+
+    Per tier, the first key that is present wins; a value already used is not
+    repeated.  A module function rather than a method so the settings page can
+    preview a set of tiers without a cache, a network or a Geocoder.
+    """
+    parts: list[str] = []
+    for group in key_order:
+        for key in group:
+            value = address.get(key)
+            if value and value not in parts:
+                parts.append(str(value))
+                break
+    for bad in suppress:
+        parts = [p for p in parts if p != bad]
+    return ", ".join(parts) or None
+
+
 #: What the settings page calls them.
 DETAIL_LABELS = {
     "full": "Everything — landmark, town, region, country",
@@ -178,16 +228,21 @@ class Geocoder:
             return None
 
     def _format(self, address: dict) -> str | None:
-        parts: list[str] = []
-        for group in self.key_order:
-            for key in group:
-                value = address.get(key)
-                if value and value not in parts:
-                    parts.append(str(value))
-                    break
-        for bad in self.suppress:
-            parts = [p for p in parts if p != bad]
-        return ", ".join(parts) or None
+        return format_address(address, self.key_order, self.suppress)
+
+    def cached_address(self, lat: float | None, lon: float | None) -> dict | None:
+        """The raw reply for a point, if it is already cached.  Never fetches.
+
+        The settings page previews place names against a photograph the frame
+        has actually shown, which is far more use than a canned example: you
+        see your own caption change as you edit the tiers.
+        """
+        if lat is None or lon is None:
+            return None
+        with self._lock:
+            row = self._db.execute("SELECT payload FROM geocache WHERE key=?",
+                                   (self._key(lat, lon),)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def set_style(self, key_order: Sequence[Sequence[str]],
                   suppress: Sequence[str] = ()) -> None:

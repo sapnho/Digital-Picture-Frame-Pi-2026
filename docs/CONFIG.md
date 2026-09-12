@@ -108,7 +108,7 @@ Where the photographs are and how they are indexed.
 | `rescan_interval` | number | `3600.0` | Full walk as a backstop behind inotify, in seconds. 0 disables it. *(takes effect on restart)* |
 | `scan_on_start` | boolean | `True` | Index at startup. Off is faster to start but new files wait for the watch. *(takes effect on restart)* |
 | `deleted_folder` | string | `'~/.local/share/picframe3/deleted'` | Where “Remove” moves a picture. Nothing is ever unlinked. *(takes effect on restart)* *(advanced)* |
-| `subfolder` | string | *(empty)* | Show only pictures under a folder whose path contains this. Empty shows everything. |
+| `subfolder` | string | *(empty)* | Show only pictures whose path contains this. Pick one of your folders, or type any part of a path. Empty shows everything. |
 
 ## `geo`
 
@@ -122,7 +122,7 @@ Turning GPS coordinates into place names for captions.
 | `cache` | string | `'~/.local/share/picframe3/geocache.db3'` | Nominatim's replies, kept forever. Re-wording place names never costs a request. *(advanced)* |
 | `detail` | string | `'full'` | How much of an address a caption shows. Changing it rewrites the names already in the index, from the cache. |
 | `suppress` | list of strings | `[]` | Place names never to show — your own country, say. |
-| `key_order` | list[list[str]] | `[['tourism', 'attraction', 'amenity', 'isolated_dwelling'], ['neighbourhood', 'suburb', 'village', 'town'], ['city', 'municipality', 'county'], ['state', 'province', 'region'], ['country']]` | Only used when detail is `custom`. One tier per line; within a tier the first key Nominatim returned wins, which is what makes one setting behave the same in France and in Germany. *(advanced)* |
+| `key_order` | list[list[str]] | `[['tourism', 'attraction', 'amenity', 'isolated_dwelling'], ['neighbourhood', 'suburb', 'village', 'town'], ['city', 'municipality', 'county'], ['state', 'province', 'region'], ['country']]` | Used when **How much of the address** is set to Custom. **One tier per line**, and within a line the keys you would accept for that tier, best first — the first one this particular address actually has is the one written, and the rest of the line is skipped. That is what makes a single setting behave the same in France and in Germany: a French hamlet comes back as `village`, a German one as `isolated_dwelling`, and a line reading `village, isolated_dwelling, town` catches both. |
 
 ## `mqtt`
 

@@ -155,6 +155,8 @@ function render(next) {
     ? 100 * (1 - Math.min(1, (state.next_change_in || 0) / state.interval)) : 0;
   $("#progress-bar").style.width = `${pct}%`;
 
+  renderRestartNotice();
+
   const lib = state.library || {};
   $("#stats").innerHTML = [
     ["Pictures", fmt(lib.files)],
@@ -273,6 +275,7 @@ function drawSettings() {
   }
   form.querySelectorAll("[data-key]").forEach(wireControl);
   form.querySelectorAll("[data-pick-list]").forEach(wirePickList);
+  form.querySelectorAll("[data-tiers]").forEach(wireTiers);
 }
 
 function optionList(name) {
@@ -282,7 +285,7 @@ function optionList(name) {
 function fieldControl(f) {
   const wrap = document.createElement("div");
   wrap.className = "field";
-  const wide = ["pick", "pick-string", "json"].includes(f.kind);
+  const wide = ["pick", "pick-string", "json", "tiers"].includes(f.kind);
   if (wide) wrap.classList.add("field-wide");
 
   let control;
@@ -319,6 +322,24 @@ function fieldControl(f) {
       control = pickList(f.key, String(f.value || "").toLowerCase().split(/[\s,]+/)
                                  .filter(Boolean), optionList(f.options), false, false);
       break;
+    case "datalist": {
+      // A real dropdown of what is actually in the library, but still a text
+      // box: the setting matches any part of a path, so typing "2024" to catch
+      // every folder from that year has to keep working.
+      const id = `list-${f.key.replace(/\W/g, "-")}`;
+      const opts = optionList(f.options);
+      control = `<input type="text" list="${id}" data-key="${f.key}" ` +
+                `data-kind="text" value="${escapeHtml(f.value ?? "")}" ` +
+                `placeholder="${opts.length ? "any folder" : ""}">` +
+                `<datalist id="${id}">` +
+                opts.map((o) => `<option value="${escapeHtml(o.name)}">` +
+                                `${escapeHtml(o.label)}</option>`).join("") +
+                `</datalist>`;
+      break;
+    }
+    case "tiers":
+      control = tiersEditor(f);
+      break;
     case "csv":
       control = `<input type="text" data-key="${f.key}" data-kind="csv" ` +
                 `value="${escapeHtml((f.value || []).join(", "))}" ` +
@@ -341,10 +362,101 @@ function fieldControl(f) {
 
   const badge = f.live ? "" : `<span class="badge-restart" ` +
     `title="Saved now; the frame picks it up when it restarts">restart</span>`;
-  wrap.innerHTML = `<label>${escapeHtml(f.label)}${badge}</label>${control}` +
-                   `<div class="hint">${markdownish(f.note)}</div>` +
+  const note = `<div class="hint">${markdownish(f.note)}</div>`;
+  // A control nobody has met before needs its explanation before it, not
+  // under it: by the time you have read the tiers box you have already
+  // guessed wrong about what it wants.
+  const explainFirst = f.kind === "tiers";
+  wrap.innerHTML = `<label>${escapeHtml(f.label)}${badge}</label>` +
+                   (explainFirst ? note : "") + control +
+                   (explainFirst ? "" : note) +
                    `<div class="hint key">${f.key}</div>`;
   return wrap;
+}
+
+/* ---- address tiers -------------------------------------------------------
+   geo.key_order is a list of lists, which as raw JSON is unreadable and as a
+   row of checkboxes is wrong — the order inside a line is what does the work.
+   One line per tier, keys separated by commas, with a live preview of what
+   the current picture's own address would come out as. */
+function tiersEditor(f) {
+  const text = (f.value || []).map((tier) => (tier || []).join(", ")).join("\n");
+  const keys = optionList(f.options);
+  return `<div data-tiers data-key="${f.key}" data-kind="list">
+    <textarea rows="${Math.max(3, (f.value || []).length)}" spellcheck="false"
+              class="tiers-text">${escapeHtml(text)}</textarea>
+    <div class="tiers-preview">
+      <span class="tiers-out">…</span>
+      <span class="tiers-source muted"></span>
+    </div>
+    <details class="tiers-keys">
+      <summary>Keys you can use</summary>
+      <p class="muted">Click one to add it to the last line. Not every address
+        has every key — that is why a line lists alternatives.</p>
+      <div class="tiers-chips">${keys.map((k) =>
+        `<button type="button" data-add="${k.name}" title="${escapeHtml(k.label)}"
+                 class="${k.available ? "have" : ""}">${k.name}</button>`).join("")}</div>
+    </details>
+  </div>`;
+}
+
+function parseTiers(text) {
+  return text.split("\n")
+    .map((line) => line.split(",").map((k) => k.trim().toLowerCase()).filter(Boolean))
+    .filter((tier) => tier.length);
+}
+
+function wireTiers(box) {
+  const area = box.querySelector(".tiers-text");
+  const out = box.querySelector(".tiers-out");
+  const source = box.querySelector(".tiers-source");
+  let timer = null;
+
+  const preview = async () => {
+    try {
+      const res = await fetch("/api/geo/preview", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detail: "custom", key_order: parseTiers(area.value) }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      out.textContent = data.text || "(nothing — none of these keys is in the address)";
+      source.textContent = `from ${data.source}`;
+      // Mark the keys this particular address actually has, so the chips teach
+      // rather than just list.
+      const have = new Set(data.available || []);
+      box.querySelectorAll("[data-add]").forEach((chip) =>
+        chip.classList.toggle("have", have.has(chip.dataset.add)));
+    } catch (err) { /* the frame is busy or down; the preview is optional */ }
+  };
+
+  const commit = () => {
+    const value = parseTiers(area.value);
+    send("set_config", { key: box.dataset.key, value });
+    $("#saved").textContent =
+      `${box.dataset.key} = ${value.length} tier${value.length === 1 ? "" : "s"}` +
+      "  (not yet written to the config file)";
+  };
+
+  area.oninput = () => {
+    clearTimeout(timer);
+    timer = setTimeout(preview, 250);
+  };
+  area.onchange = commit;
+  box.onclick = (e) => {
+    const chip = e.target.closest("[data-add]");
+    if (!chip) return;
+    const lines = area.value.split("\n");
+    const last = lines.length - 1;
+    lines[last] = lines[last].trim()
+      ? `${lines[last].replace(/,\s*$/, "")}, ${chip.dataset.add}`
+      : chip.dataset.add;
+    area.value = lines.join("\n");
+    commit();
+    preview();
+  };
+  preview();
 }
 
 function jsonRows(value) {
@@ -481,6 +593,81 @@ $("#reload").onclick = async () => {
   await loadSettings();
   $("#saved").textContent = "Reloaded from the config file.";
 };
+$("#restart").onclick = () => restartFrame();
+$("#restart-now").onclick = () => restartFrame();
+
+/* ------------------------------------------------------------------ restart
+   Several settings — the MQTT broker, the HTTP port, which folders are
+   indexed — can only be picked up by a fresh process.  Saving first is the
+   default, because a restart would otherwise throw away the very changes it
+   is being asked to apply. */
+let restarting = false;
+
+async function restartFrame() {
+  if (restarting) return;
+  const unsaved = state && state.unsaved_changes;
+  const question = unsaved
+    ? "Save the settings and restart the frame?\n\nThe picture goes dark for a few seconds."
+    : "Restart the frame?\n\nThe picture goes dark for a few seconds.";
+  if (!confirm(question)) return;
+
+  restarting = true;
+  for (const id of ["#restart", "#restart-now"]) {
+    $(id).disabled = true;
+    $(id).textContent = "Restarting…";
+  }
+  $("#saved").textContent = "Restarting the frame…";
+  try {
+    // The frame stops answering as soon as it acts on this, so a failed fetch
+    // here is the expected case, not an error.
+    await fetch("/api/restart?save=true", { method: "POST" });
+  } catch (err) { /* it went down mid-reply */ }
+  waitForTheFrame();
+}
+
+async function waitForTheFrame(attempt = 0) {
+  if (attempt > 60) {                     // two minutes
+    $("#saved").textContent =
+      "The frame has not come back. Check: journalctl -u picframe3@pi -n 40";
+    restarting = false;
+    $("#restart").disabled = false;
+    $("#restart").textContent = "Restart the frame";
+    $("#restart-now").disabled = false;
+    $("#restart-now").textContent = "Save & restart";
+    return;
+  }
+  await new Promise((done) => setTimeout(done, 2000));
+  try {
+    const res = await fetch("/api/health", { cache: "no-store" });
+    if (res.ok) return location.reload();
+  } catch (err) { /* still down */ }
+  $("#saved").textContent = `Restarting the frame… (${(attempt + 1) * 2}s)`;
+  waitForTheFrame(attempt + 1);
+}
+
+function renderRestartNotice() {
+  const notice = $("#restart-notice");
+  if (!state) return;
+  const pending = state.restart_required || [];
+  const unsaved = !!state.unsaved_changes;
+  if (!pending.length && !unsaved) { notice.hidden = true; return; }
+  notice.hidden = false;
+  if (pending.length) {
+    $("#restart-headline").textContent = pending.length === 1
+      ? "One setting needs a restart"
+      : `${pending.length} settings need a restart`;
+    $("#restart-detail").textContent =
+      pending.join(", ") +
+      (unsaved ? " — these will be saved to the config file first." : "");
+    $("#restart-now").hidden = false;
+  } else {
+    $("#restart-headline").textContent = "Unsaved changes";
+    $("#restart-detail").textContent =
+      "Everything you changed is live on the frame, but not yet in the config " +
+      "file — it would go back to the old values on the next restart.";
+    $("#restart-now").hidden = true;
+  }
+}
 
 /* --------------------------------------------------------------- utils */
 function escapeHtml(s) {

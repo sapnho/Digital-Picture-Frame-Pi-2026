@@ -58,6 +58,12 @@ class PicFrame:
         self.current: list[Record] = []
         #: How the picture on screen was laid out (cover/contain/blur/mat).
         self._current_fit = ""
+        #: Settings changed that only a fresh process will pick up, and whether
+        #: anything has been changed but not yet written to the config file.
+        self._restart_needed: set[str] = set()
+        self._config_dirty = False
+        #: Set by the restart command; the CLI reads it after the loop ends.
+        self.restart_requested = False
         self.paused = bool(config.slideshow.paused)
         self.show_info = True
         self.display_on = True
@@ -722,6 +728,8 @@ class PicFrame:
             asyncio.create_task(self._rescan())
         elif action is Action.RELOAD:
             self._reload_config()
+        elif action is Action.RESTART:
+            self.request_restart()
         elif action is Action.QUIT:
             self._stop.set()
         self._publish()
@@ -737,7 +745,10 @@ class PicFrame:
             _log.warning("cannot set %s=%r: %s", key, value, exc)
             return
         _log.info("config %s = %r", key, applied)
+        self._config_dirty = True
         section = key.split(".")[0]
+        if uischema.needs_restart(key):
+            self._restart_needed.add(key)
         if section == "viewer":
             self.loader.options = self._prepare_options()
             self._clock_minute = None
@@ -784,6 +795,8 @@ class PicFrame:
             _log.error("cannot reload config: %s", exc)
             return
         self.config = fresh
+        self._restart_needed.clear()
+        self._config_dirty = False
         self.loader.options = self._prepare_options()
         self.power = PowerSchedule(fresh.power.schedule, fresh.power.dim_schedule)
         self.renderer.transition_name = fresh.slideshow.transition
@@ -978,6 +991,9 @@ class PicFrame:
             playlist_round=self.playlist.round if self.playlist else 1,
             playlist_remaining=self.playlist.remaining if self.playlist else 0,
             scanning=self._scanning,
+            restart_required=sorted(self._restart_needed),
+            unsaved_changes=self._config_dirty,
+            can_restart=True,
             library=self.library.stats() if self.library else {},
             current=self._current_payload(record),
             next_change_in=round(max(0.0, self._next_change_at - now), 1),
@@ -1025,8 +1041,31 @@ class PicFrame:
         self.bus.publish(self.state())
 
     # ------------------------------------------------------------------
+    def save_config(self, path: str | None = None) -> str:
+        """Write the running configuration to disk and clear the dirty flag."""
+        target = self.config.save(path) if path else self.config.save()
+        self._config_dirty = False
+        _log.info("configuration written to %s", target or self.config.source_path)
+        return target or self.config.source_path or ""
+
     def request_stop(self) -> None:
         self._stop.set()
+
+    def request_restart(self) -> None:
+        """Come back up with a fresh process.
+
+        Under systemd this is simply a clean exit -- ``Restart=always`` brings
+        the unit back a few seconds later, in a fresh cgroup, which is more
+        thorough than anything the process could do to itself while holding
+        DRM master.  Started by hand, the CLI re-executes instead.
+        """
+        _log.info("restart requested")
+        self.restart_requested = True
+        self._stop.set()
+
+    @staticmethod
+    def under_systemd() -> bool:
+        return bool(os.environ.get("INVOCATION_ID") or os.environ.get("JOURNAL_STREAM"))
 
     def shutdown(self) -> None:
         _log.info("shutting down")

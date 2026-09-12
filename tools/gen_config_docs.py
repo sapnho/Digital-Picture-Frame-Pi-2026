@@ -12,12 +12,11 @@ from dataclasses import fields, is_dataclass
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from picframe3.config import Config  # noqa: E402
-from picframe3.uischema import (  # noqa: E402  # noqa: E402
+from picframe3.uischema import (  # noqa: E402
     ADVANCED,
-    LIVE_KEYS,
-    LIVE_SECTIONS,
     NOTES,
     SECRETS,
+    needs_restart,
 )
 from picframe3.uischema import SECTION_PROSE as PROSE  # noqa: E402
 
@@ -75,9 +74,8 @@ def main() -> None:
             default = "`" + repr(value).replace("|", "\\|") + "`" if value != "" else "*(empty)*"
             if dotted in SECRETS:
                 default = "*(empty)*"
-            live = section.name in LIVE_SECTIONS or dotted in LIVE_KEYS
             note = NOTES.get(dotted, "")
-            if not live:
+            if needs_restart(dotted):
                 note = (note + " " if note else "") + "*(takes effect on restart)*"
             if dotted in ADVANCED:
                 note = (note + " " if note else "") + "*(advanced)*"

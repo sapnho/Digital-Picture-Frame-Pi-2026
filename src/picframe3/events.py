@@ -39,6 +39,7 @@ class Action(StrEnum):
     SET_FILTERS = "set_filters"
     RESCAN = "rescan"
     RELOAD = "reload"
+    RESTART = "restart"           # stop cleanly and come back up
     QUIT = "quit"
 
 
@@ -100,6 +101,15 @@ class State:
     playlist_round: int = 1
     playlist_remaining: int = 0
     scanning: bool = False
+    #: Settings changed since startup that the running frame cannot pick up.
+    #: The settings page turns this into "restart to apply", so nobody is left
+    #: wondering why a new MQTT broker changed nothing.
+    restart_required: list[str] = field(default_factory=list)
+    #: Settings changed but not yet written to the config file.  A restart
+    #: would lose them, so the page says so before offering the button.
+    unsaved_changes: bool = False
+    #: Whether the frame can restart itself at all.
+    can_restart: bool = True
     library: dict[str, Any] = field(default_factory=dict)
     current: dict[str, Any] = field(default_factory=dict)
     next_change_in: float = 0.0

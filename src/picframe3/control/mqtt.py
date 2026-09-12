@@ -401,6 +401,23 @@ class MqttBridge:
                 "icon": "mdi:shuffle-variant",
                 "entity_category": "diagnostic",
             }),
+            ("binary_sensor", "restart_required", {
+                **base,
+                "name": "Restart needed",
+                "unique_id": f"picframe3_{uid}_restart_required",
+                # Some settings — the broker, the HTTP port, which folders are
+                # indexed — only a fresh process can pick up.  Saying so out
+                # loud beats leaving someone to wonder why nothing changed.
+                "value_template":
+                    "{{ 'ON' if value_json.restart_required else 'OFF' }}",
+                "payload_on": "ON", "payload_off": "OFF",
+                "device_class": "problem",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ {'settings': value_json.restart_required, "
+                    "'unsaved': value_json.unsaved_changes} | tojson }}",
+                "entity_category": "diagnostic",
+            }),
             ("sensor", "remaining", {
                 **base,
                 "name": "Left in this round",
@@ -423,6 +440,7 @@ class MqttBridge:
             ("next", "Next picture", "mdi:skip-next"),
             ("previous", "Previous picture", "mdi:skip-previous"),
             ("rescan", "Rescan library", "mdi:folder-refresh"),
+            ("restart", "Restart the frame", "mdi:restart"),
             ("delete", "Remove current picture", "mdi:delete"),
         ):
             entities.append(("button", action, {
@@ -433,7 +451,7 @@ class MqttBridge:
                 "command_topic": self.entity_topic(action),
                 "payload_press": "press",
                 "icon": icon,
-                "entity_category": "config" if action == "rescan" else None,
+                "entity_category": "config" if action in ("rescan", "restart") else None,
             }))
 
         return entities

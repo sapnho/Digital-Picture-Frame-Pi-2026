@@ -92,3 +92,46 @@ def test_hidden_elements_really_are_hidden():
     """`.stage img { display: block }` beat the UA's [hidden] rule and left a
     260px ghost across the stage; the override is what stops that returning."""
     assert "[hidden] { display: none !important; }" in CSS
+
+
+# -- restarting from the page ----------------------------------------------
+
+APP_JS = (WEB / "app.js").read_text(encoding="utf-8")
+
+
+def test_the_settings_page_can_restart_the_frame():
+    assert 'id="restart"' in HTML
+    assert "/api/restart" in APP_JS
+
+
+def test_a_restart_saves_first():
+    """A restart that threw away the changes it was asked to apply would be
+    worse than no button at all."""
+    assert "save=true" in APP_JS
+
+
+def test_the_page_waits_for_the_frame_to_come_back():
+    """The frame stops answering the moment it acts, so the page has to poll
+    rather than treat the failed request as an error."""
+    assert "waitForTheFrame" in APP_JS
+    assert "/api/health" in APP_JS
+
+
+def test_the_notice_tells_you_which_settings_are_waiting():
+    assert 'id="restart-notice"' in HTML
+    assert "restart_required" in APP_JS
+    assert "unsaved_changes" in APP_JS
+
+
+# -- the address tiers editor ----------------------------------------------
+
+def test_the_tiers_editor_previews_against_the_real_formatter():
+    """Re-implementing the first-key-per-tier rule in JavaScript would drift
+    from the one the frame actually uses, so the page asks the frame."""
+    assert "/api/geo/preview" in APP_JS
+    assert "parseTiers" in APP_JS
+
+
+def test_the_subfolder_field_offers_the_folders_that_exist():
+    assert 'case "datalist"' in APP_JS
+    assert "<datalist" in APP_JS

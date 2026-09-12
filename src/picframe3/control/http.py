@@ -148,6 +148,40 @@ class HttpServer:
 
             return redact(self.app.config.as_dict())
 
+        @api.post("/api/geo/preview", dependencies=guard)
+        async def geo_preview(body: dict):
+            """What a set of address tiers would write under a photograph.
+
+            Previewed against a picture the frame has actually shown whenever
+            its address is in the geocache, because seeing your own caption
+            change as you edit teaches the rule in one go; otherwise against a
+            stored example reply. Never makes a network request.
+            """
+            from ..media.geocode import (
+                EXAMPLE_ADDRESS,
+                format_address,
+                key_order_for,
+            )
+
+            address, source = EXAMPLE_ADDRESS, "an example"
+            record = self.app.current[0] if self.app.current else None
+            if record is not None and self.app.geocoder is not None:
+                found = self.app.geocoder.cached_address(record.latitude, record.longitude)
+                if found:
+                    address, source = found, record.basename
+
+            detail = str(body.get("detail") or "full")
+            tiers = body.get("key_order") or self.app.config.geo.key_order
+            order = key_order_for(detail, tiers)
+            suppress = body.get("suppress")
+            if suppress is None:
+                suppress = self.app.config.geo.suppress
+            return {
+                "text": format_address(address, order, suppress) or "",
+                "source": source,
+                "available": sorted(k for k, v in address.items() if v),
+            }
+
         @api.get("/api/config/schema", dependencies=guard)
         async def config_schema():
             """Every setting, with enough about each one to draw a control.
@@ -158,7 +192,12 @@ class HttpServer:
             """
             from ..uischema import schema
 
-            return schema(self.app.config)
+            # Option lists that can only come from the running frame: the
+            # folders that are actually in the library, and the address keys
+            # this photograph's own reply happens to carry.
+            folders = [{"name": path, "label": f"{path}  ({count})"}
+                       for path, count in self.app.library.folders()]
+            return schema(self.app.config, extra_options={"folders": folders})
 
         @api.patch("/api/config", dependencies=guard)
         async def patch_config(body: dict, persist: bool = Query(False)):
@@ -170,8 +209,25 @@ class HttpServer:
                 applied[key] = value
             if persist:
                 await asyncio.sleep(0.2)     # let the settings land first
-                self.app.config.save()
+                self.app.save_config()
             return {"ok": True, "applied": applied, "saved": persist}
+
+        @api.post("/api/restart", dependencies=guard)
+        async def restart(save: bool = Query(True)):
+            """Stop cleanly and come back up.
+
+            Several settings -- the MQTT broker, the HTTP port, which folders
+            are indexed -- can only be picked up by a fresh process.  Saving
+            first is the default because a restart would otherwise throw away
+            the very changes it is being asked to apply.
+            """
+            saved = False
+            if save and self.app.state().unsaved_changes:
+                self.app.save_config()
+                saved = True
+            self.app.bus.submit(Command(Action.RESTART, source="http"))
+            return {"ok": True, "saved": saved,
+                    "supervised": self.app.under_systemd()}
 
         # -- library ---------------------------------------------------
         @api.get("/api/library", dependencies=guard)

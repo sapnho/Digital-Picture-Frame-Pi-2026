@@ -81,12 +81,42 @@ def cmd_run(args) -> int:
         return await frame.run()
 
     try:
-        return asyncio.run(main())
+        code = asyncio.run(main())
     except KeyboardInterrupt:
         return 0
     except Exception:
         _log.exception("picframe3 stopped with an error")
         return 1
+
+    if frame.restart_requested:
+        return _restart(frame)
+    return code
+
+
+def _restart(frame) -> int:
+    """Come back up after a restart request.
+
+    Under systemd, exiting cleanly is the whole job: ``Restart=always`` starts
+    a fresh unit a few seconds later, in a new cgroup, with the DRM device and
+    every GL and GStreamer resource released by the kernel rather than by code
+    unwinding itself while it still owns the screen.
+
+    Started by hand there is no supervisor, so the process re-executes itself
+    with the arguments it was given.  This happens after the event loop has
+    finished and ``shutdown()`` has run, so nothing is still holding the card.
+    """
+    if frame.under_systemd():
+        _log.info("exiting for restart; systemd will start picframe3 again")
+        return 0
+    executable = sys.argv[0]
+    _log.info("restarting: %s %s", executable, " ".join(sys.argv[1:]))
+    try:
+        os.execv(executable, sys.argv)
+    except OSError as exc:      # pragma: no cover - depends on how it was started
+        _log.error("could not restart automatically (%s); start picframe3 again "
+                   "by hand", exc)
+        return 1
+    return 0                    # unreachable: execv does not return
 
 
 def cmd_scan(args) -> int:
