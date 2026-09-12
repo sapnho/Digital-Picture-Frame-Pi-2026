@@ -1,0 +1,44 @@
+[Unit]
+Description=picframe3 digital picture frame
+Documentation=https://github.com/picframe3/picframe3
+# The DRM device has to exist before we can take over the screen.
+After=systemd-user-sessions.service network-online.target
+Wants=network-online.target
+ConditionPathExistsGlob=/dev/dri/card*
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+SupplementaryGroups=video render input
+Environment=PYTHONUNBUFFERED=1
+# Mesa on the Pi picks the right driver on its own; this only silences the
+# software-rasteriser fallback warning when no GPU node is present.
+Environment=MESA_LOADER_DRIVER_OVERRIDE=
+WorkingDirectory=/home/%i
+ExecStart=/home/%i/.local/share/picframe3/venv/bin/picframe3 run
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=5
+# Give up restarting only if it fails constantly, so a bad config does not
+# spin forever, but a transient HDMI glitch always recovers.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# The frame reads photographs and writes an index; it does not need anything else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# DRM master and evdev need the real device nodes, so DevicePolicy stays open.
+
+# A picture frame should not be the reason the Pi runs out of memory.
+MemoryMax=75%
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target

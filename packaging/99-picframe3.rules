@@ -1,0 +1,6 @@
+# Allow members of the "input" group to read input devices without a seat
+# manager.  Raspberry Pi OS Lite has no logind seat for a non-login service,
+# so the default uaccess rules do not apply.
+SUBSYSTEM=="input", GROUP="input", MODE="0660"
+KERNEL=="card[0-9]*", SUBSYSTEM=="drm", GROUP="video", MODE="0660"
+KERNEL=="renderD[0-9]*", SUBSYSTEM=="drm", GROUP="render", MODE="0660"

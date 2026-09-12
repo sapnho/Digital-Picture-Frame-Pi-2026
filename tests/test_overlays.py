@@ -1,0 +1,84 @@
+"""Caption and clock layout — the text the frame writes over a picture."""
+
+from picframe3.gfx import overlays
+from picframe3.gfx.textstyle import TextStyle
+from picframe3.media.metadata import PhotoMeta
+
+STYLE = TextStyle(size=24)
+SCREEN = (1280, 720)
+
+
+def test_single_caption_sits_at_the_bottom():
+    placement = overlays.info_bar(["Ordesa", "14 July 2024"], SCREEN, STYLE)
+    assert placement is not None
+    assert placement.x == 0
+    assert placement.y + placement.image.height == SCREEN[1]
+    assert placement.image.width == SCREEN[0]
+
+
+def test_a_portrait_pair_gets_one_caption_each():
+    """picframe wrote a caption under each half of a pair; so must this."""
+    import numpy as np
+
+    placement = overlays.info_bar(
+        [["Left picture", "2024"], ["Right picture", "2025"]], SCREEN, STYLE,
+        scrim_opacity=0,          # measure the text, not the gradient behind it
+    )
+    assert placement is not None
+    alpha = np.asarray(placement.image)[..., 3]
+    left = alpha[:, : SCREEN[0] // 2].max()
+    right = alpha[:, SCREEN[0] // 2 :].max()
+    assert left > 200 and right > 200, "text missing from one half"
+
+    # and each caption is centred in its own half, not spread across the middle
+    columns = np.where(alpha.max(axis=0) > 128)[0]
+    assert columns.min() > 40
+    assert columns.max() < SCREEN[0] - 40
+
+
+def test_empty_captions_draw_nothing():
+    assert overlays.info_bar([], SCREEN, STYLE) is None
+    assert overlays.info_bar([[], []], SCREEN, STYLE) is None
+
+
+def test_one_empty_side_still_renders_the_other():
+    placement = overlays.info_bar([["Only this one"], []], SCREEN, STYLE)
+    assert placement is not None
+
+
+def test_clock_positions():
+    for position, (left, top) in {
+        "TL": (True, True), "TR": (False, True),
+        "BL": (True, False), "BR": (False, False),
+    }.items():
+        p = overlays.clock(SCREEN, TextStyle(size=60), position=position)
+        assert p is not None
+        assert (p.x < SCREEN[0] / 2) is left, position
+        assert (p.y < SCREEN[1] / 2) is top, position
+
+
+def test_clock_extra_line_makes_it_taller():
+    plain = overlays.clock(SCREEN, TextStyle(size=60), fmt="%H:%M")
+    with_extra = overlays.clock(SCREEN, TextStyle(size=60), fmt="%H:%M",
+                                extra="12°C · rain later")
+    assert with_extra.image.height > plain.image.height
+
+
+def test_info_lines_pick_the_requested_fields():
+    meta = PhotoMeta(path="/photos/trip/DSC_0042.jpg", title="Ordesa",
+                     make="Canon", model="Canon EOS R6", f_number=2.8,
+                     exposure_time="1/250s", iso=400, focal_length=50.0,
+                     taken_at=1720974125.0)
+    lines = overlays.format_info_lines(
+        meta, ["title", "name", "folder", "camera", "exposure"],
+    )
+    assert lines[0] == "Ordesa"
+    assert "DSC_0042" in lines[1]
+    assert lines[2] == "trip"
+    assert lines[3] == "Canon EOS R6", "the doubled maker name should collapse"
+    assert lines[4] == "f/2.8 1/250s ISO 400 50mm"
+
+
+def test_paused_is_appended():
+    meta = PhotoMeta(path="/a/b.jpg", title="X")
+    assert overlays.format_info_lines(meta, ["title"], paused=True)[-1] == "PAUSED"

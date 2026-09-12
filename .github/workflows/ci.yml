@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The renderer tests are real GLES: Mesa's llvmpipe provides a
+      # surfaceless EGL context, so every shader is compiled and every frame is
+      # read back, on a runner with no GPU and no display server.
+      - name: Install graphics and media libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgles2 libgbm1 libdrm2 mesa-utils libgl1-mesa-dri \
+            fonts-dejavu-core libraqm0
+
+      - run: pip install -e ".[dev,web]"
+      - run: ruff check src tests tools
+      - run: pytest -q
+
+      - name: Render the transition contact sheet
+        run: |
+          python tools/render_transitions.py transitions.png
+          python -m picframe3 demo -o demo.png --width 640 --height 360
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rendered-frames-py${{ matrix.python-version }}
+          path: |
+            transitions.png
+            demo.png
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e .
+      - name: Configuration reference must match the code
+        run: |
+          python tools/gen_config_docs.py
+          git diff --exit-code docs/CONFIG.md

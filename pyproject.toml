@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "picframe3"
+version = "3.2.1"
+description = "A digital picture frame for current Raspberry Pi OS: OpenGL ES on DRM/KMS, no desktop required"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "picframe3 contributors" }]
+keywords = ["raspberry-pi", "picture-frame", "photo-frame", "kms", "drm",
+            "opengl-es", "gstreamer", "home-assistant", "slideshow"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: X11 Applications",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Graphics :: Viewers",
+]
+
+# The core runtime needs remarkably little: EGL, GLES, libdrm and libgbm are
+# reached through ctypes, so there is no compiled Python extension to build on
+# the Pi and nothing to rebuild when Mesa is updated.
+dependencies = [
+  "Pillow>=10.3",
+  "numpy>=1.26",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+web   = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+mqtt  = ["aiomqtt>=2.0"]
+input = ["evdev>=1.7"]
+gpio  = ["gpiozero>=2.0", "lgpio>=0.2"]
+heif  = ["pillow-heif>=0.16"]
+video = ["PyGObject>=3.46"]
+all   = [
+  "fastapi>=0.110", "uvicorn[standard]>=0.29",
+  "aiomqtt>=2.0", "evdev>=1.7", "pillow-heif>=0.16",
+]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
+
+[project.scripts]
+picframe3 = "picframe3.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/picframe3/picframe3"
+Issues = "https://github.com/picframe3/picframe3/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/picframe3"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "packaging", "config", "docs", "tests", "tools", "README.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]

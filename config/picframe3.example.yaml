@@ -1,0 +1,144 @@
+# picframe3 configuration
+# ------------------------------------------------------------------------
+# Every key below is optional: anything you leave out uses the built-in
+# default, and unknown keys are warned about rather than fatal.  Copy this to
+# ~/.config/picframe3/config.yaml (or run `picframe3 config --init`).
+#
+# Changes made from the web UI or MQTT apply immediately; press "Save to
+# config file" in the web UI (or `picframe3 config --set key=value`) to make
+# them survive a restart.
+
+display:
+  backend: auto           # auto | kms | headless.  "auto" uses the screen if
+                          # there is one and renders offscreen if there is not.
+  device: null            # /dev/dri/card1 — only needed if autodetection picks wrong
+  connector: null         # HDMI-A-1, HDMI-A-2, DSI-1 … null = first connected output
+  rotate: 0               # 0 or 180.  For a quarter turn, rotate in the kernel:
+                          #   video=HDMI-A-1:1080x1920M@60,rotate=90  in cmdline.txt
+  vsync: true             # page-flip on the vblank; turn off only when debugging
+  fps_limit: 30.0         # cap while something is moving
+  background: [0.0, 0.0, 0.0, 1.0]   # shown around a picture that does not fill the screen
+  brightness: 1.0         # 0.0–1.0
+
+slideshow:
+  interval: 180.0         # seconds each picture stays on screen
+  transition: fade        # a name from `picframe3 transitions`, or "random"
+  transition_time: 2.5    # seconds
+  order: shuffle          # shuffle | random | date_desc | date_asc | name |
+                          # folder | recent | least_played
+  recent_days: 7          # pictures newer than this jump the queue
+  reshuffle_after: 1      # complete passes before reshuffling
+  portrait_pairs: false   # show two upright photos side by side
+  kenburns: false         # slow pan and zoom
+  kenburns_zoom: 1.12
+  video_mute: true
+  video_loop: false
+  video_max_seconds: 0    # 0 = play each video to the end
+
+viewer:
+  fit: auto               # auto | cover | contain | blur | mat
+                          #   auto  — mat when the shapes disagree, else fill
+                          #   cover — crop to fill the screen
+                          #   contain — letterbox on the background colour
+                          #   blur  — letterbox on a blurred copy of the picture
+                          #   mat   — always frame it in a passepartout
+  mat_style: single       # single | single_bevel | double | double_bevel |
+                          # float | float_shadow | float_wrap | polaroid
+                          # "random" or "" for any; several names separated by
+                          # spaces means "choose from these", as picframe did.
+                          # picframe's own names (float_polaroid,
+                          # float_color_wrap, double_flat) are accepted too.
+  mat_tolerance: 0.01     # how different the shapes must be before "auto" mats
+  mat_outer_color: null   # [r, g, b]; null derives it from the photograph
+  mat_inner_color: null
+  mat_outer_border: 75    # px at 1080p, scaled to your panel
+  mat_inner_border: 22
+  mat_texture: true       # paper grain on the outer board
+  mat_inner_texture: false  # usually smooth card against the textured board
+  mat_auto_inner_color: true  # false = a darker shade of the outer mat
+  mat_bevel_width: 5      # px at 1080p, for the *_bevel styles
+
+  blur_amount: 20.0
+  blur_zoom: 1.06
+  blur_dim: 0.55          # 0 = black edges, 1 = full-strength blurred copy
+  upscale_limit: 2.5      # never enlarge a small picture more than this; beyond it
+                          # the frame blur-fills instead of showing it soft
+
+  font: null              # path to a .ttf; null finds DejaVu / Noto / Liberation
+  show_text: [title, caption, date, location]
+                          # any of: title caption name date location folder
+                          #         camera exposure
+  text_size: 34
+  text_seconds: 16.0      # how long the caption stays up after each change
+  text_justify: L         # L | C | R
+  text_scrim: 0.5         # darkening behind the caption, 0–1
+  date_format: "%-d %B %Y"
+
+  show_clock: false
+  clock_format: "%H:%M"
+  clock_size: 120
+  clock_position: TR      # TL TC TR BL BC BR
+  clock_opacity: 0.9
+  clock_extra_file: /dev/shm/picframe-clock.txt
+                          # if this file exists, its contents appear under the
+                          # time — a hook for a weather line, a countdown, …
+                          # (picframe's /dev/shm/clock.txt is read too)
+
+  overlay_image: /dev/shm/picframe-overlay.png
+                          # if this PNG exists it is drawn over the picture —
+                          # a hook for weather, calendars, anything you like
+
+library:
+  picture_folders:
+    - ~/Pictures
+  database: ~/.local/share/picframe3/library.db3
+  follow_links: false
+  include_videos: true
+  ignore_hidden: true
+  exclude: ["@eaDir", ".thumbnails", "#recycle"]
+  watch: true             # inotify: new photos appear within seconds
+  rescan_interval: 3600   # full walk as a backstop, in seconds (0 disables)
+  scan_on_start: true
+  subfolder: ""           # live filter; also settable from MQTT and the web UI
+  deleted_folder: ~/.local/share/picframe3/deleted
+
+geo:
+  enabled: false          # turn GPS coordinates into place names
+  contact: ""             # REQUIRED when enabled: your email address.
+                          # Nominatim's usage policy needs a way to reach you.
+  language: en
+  suppress: []            # strings to drop from the resulting place name
+
+mqtt:
+  enabled: false
+  host: ""
+  port: 1883
+  username: ""
+  password: ""
+  tls_ca: ""              # path to a CA certificate for TLS (port 8883)
+  device_id: picframe
+  device_name: Picture Frame
+  discovery_prefix: homeassistant
+
+http:
+  enabled: true
+  host: 0.0.0.0
+  port: 9000
+  auth_user: ""           # set both to require HTTP basic auth
+  auth_password: ""
+
+input:
+  keyboard: true
+  touch: true
+  mouse: false
+  wake_on_input: true     # any key or touch turns the screen back on
+  gpio_buttons: {}        # e.g. {next: 17, pause: 27, display_toggle: 22}  (BCM pins)
+
+power:
+  enabled: true
+  schedule: {}            # {all: ["22:30-07:00"]} — screen off overnight
+  dim_schedule: {}        # {"19:00-22:30": 0.45} — dim in the evening
+
+logging:
+  level: INFO             # DEBUG | INFO | WARNING | ERROR
+  file: ""                # also write to this file (rotated)

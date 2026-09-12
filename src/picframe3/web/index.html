@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101114">
+<title>Picture Frame</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <span class="dot" id="live"></span>
+    <strong>Picture&nbsp;Frame</strong>
+    <span class="muted" id="display-info"></span>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" data-view="now">Now playing</button>
+    <button class="tab" data-view="library">Library</button>
+    <button class="tab" data-view="settings">Settings</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ---------------------------------------------------------- Now -->
+  <section id="view-now" class="view is-active">
+    <div class="stage">
+      <img id="preview" alt="" hidden>
+      <div id="preview-empty" class="empty">No picture yet</div>
+      <div class="progress"><span id="progress-bar"></span></div>
+      <span id="live-badge" class="badge-live" hidden>live screen</span>
+    </div>
+
+    <div class="meta">
+      <h1 id="title">—</h1>
+      <p id="subtitle" class="muted"></p>
+      <ul id="exif" class="chips"></ul>
+    </div>
+
+    <div class="controls">
+      <button id="prev" class="btn" title="Previous (←)">‹ Prev</button>
+      <button id="pause" class="btn btn-primary">Pause</button>
+      <button id="next" class="btn" title="Next (→)">Next ›</button>
+      <button id="power" class="btn">Screen off</button>
+      <button id="shot" class="btn" title="Capture what is actually on the frame's screen">Screenshot</button>
+      <button id="del" class="btn btn-danger" title="Move this picture out of the library">Remove</button>
+    </div>
+
+    <div class="sliders">
+      <label>Brightness <output id="brightness-out">100%</output>
+        <input id="brightness" type="range" min="5" max="100" value="100">
+      </label>
+      <label>Seconds per picture <output id="interval-out">180</output>
+        <input id="interval" type="range" min="5" max="900" step="5" value="180">
+      </label>
+    </div>
+
+    <dl class="stats" id="stats"></dl>
+  </section>
+
+  <!-- ------------------------------------------------------ Library -->
+  <section id="view-library" class="view">
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search titles, captions, tags, places…" autocomplete="off">
+      <select id="folder"><option value="">All folders</option></select>
+      <button id="rescan" class="btn">Rescan</button>
+    </div>
+    <div id="grid" class="grid"></div>
+    <p id="grid-empty" class="empty" hidden>Nothing matches.</p>
+  </section>
+
+  <!-- ----------------------------------------------------- Settings -->
+  <section id="view-settings" class="view">
+    <form id="settings" class="form"></form>
+    <div class="controls">
+      <button id="save" class="btn btn-primary" type="button">Save to config file</button>
+      <button id="reload" class="btn" type="button">Reload from file</button>
+    </div>
+    <pre id="saved" class="muted"></pre>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
