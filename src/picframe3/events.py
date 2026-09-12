@@ -28,6 +28,7 @@ class Action(StrEnum):
     TOGGLE_PAUSE = "toggle_pause"
     JUMP = "jump"                 # payload: {"id": int} or {"path": str}
     DELETE = "delete"             # move the current picture out of the library
+    RESTORE = "restore"           # payload: {"stored_as": str} -- undo a removal
     DISPLAY_ON = "display_on"
     DISPLAY_OFF = "display_off"
     DISPLAY_TOGGLE = "display_toggle"
@@ -100,6 +101,12 @@ class State:
     #: working through the library evenly.
     playlist_round: int = 1
     playlist_remaining: int = 0
+    #: Which pictures are in the running: folder, tags, place, dates.  Part of
+    #: the state document rather than a separate topic because every surface
+    #: has to be able to *show* the filter it is offering to change -- a text
+    #: box in Home Assistant that forgets what it is filtering on is worse
+    #: than no box at all.
+    filters: dict[str, Any] = field(default_factory=dict)
     scanning: bool = False
     #: Settings changed since startup that the running frame cannot pick up.
     #: The settings page turns this into "restart to apply", so nobody is left
@@ -111,10 +118,18 @@ class State:
     #: Whether the frame can restart itself at all.
     can_restart: bool = True
     library: dict[str, Any] = field(default_factory=dict)
+    #: The removal journal in miniature -- how many pictures have been
+    #: taken out of the library and what the last one was.  Home Assistant
+    #: and the web UI both read it from here rather than the file.
+    removed: dict[str, Any] = field(default_factory=dict)
     current: dict[str, Any] = field(default_factory=dict)
     next_change_in: float = 0.0
     video: dict[str, Any] = field(default_factory=dict)
     display: dict[str, Any] = field(default_factory=dict)
+    #: What the Pi itself is doing -- temperature, load, memory, free space and
+    #: the power supply.  Empty when the reporting is switched off.
+    health: dict[str, Any] = field(default_factory=dict)
+    network: dict[str, Any] = field(default_factory=dict)
     version: str = ""
     uptime: float = 0.0
     fps: float = 0.0

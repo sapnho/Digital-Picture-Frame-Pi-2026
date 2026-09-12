@@ -1,0 +1,28 @@
+// Lets the picture frame mend its own network connection -- and nothing else.
+//
+// The frame watches whether it can still reach the default gateway, and after
+// several failed checks in a row reconnects the wireless device, or restarts
+// NetworkManager if that was not enough.  Both of those normally want root.
+// Rather than giving the frame sudo (which its systemd unit forbids anyway,
+// with NoNewPrivileges=yes), this grants its user exactly two verbs:
+//
+//   * NetworkManager's own network-control action -- "reconnect this device",
+//     the same permission a desktop user has over their own Wi-Fi;
+//   * start/stop/restart on NetworkManager.service, and no other unit.
+//
+// Anything else -- another service, another machine, another user -- falls
+// through to the normal rules.  Installed by 'picframe3 setup' as
+// /etc/polkit-1/rules.d/50-picframe3-network.rules with @USER@ replaced.
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "@USER@") {
+        return undefined;
+    }
+    if (action.id === "org.freedesktop.NetworkManager.network-control") {
+        return polkit.Result.YES;
+    }
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "NetworkManager.service") {
+        return polkit.Result.YES;
+    }
+    return undefined;
+});

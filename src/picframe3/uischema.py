@@ -33,6 +33,8 @@ SECTION_PROSE = {
     "http": "The web interface and REST API.",
     "input": "Keyboard, touchscreen, mouse and GPIO buttons.",
     "power": "When the screen is on, off, or dimmed.",
+    "health": "What the frame reports about the Pi it runs on \u2014 temperature, load, memory, free space and the power supply.",
+    "network": "Watching the frame\u2019s own link to the house, and mending it when it breaks.",
     "logging": "Where log output goes.",
 }
 
@@ -46,6 +48,8 @@ SECTION_LABELS = {
     "http": "Web interface",
     "input": "Buttons, keyboard and touch",
     "power": "Screen on and off",
+    "health": "Health and temperature",
+    "network": "Network watchdog",
     "logging": "Logging",
 }
 
@@ -112,6 +116,7 @@ NOTES = {
     "viewer.clock_offset_pct": "How far in from the corner, as a percentage of the screen: across, then down.",
     "viewer.clock_extra_file": "If this file exists its contents are written under the time, much smaller — a weather line, a countdown, anything that writes to it.",
     "viewer.overlay_image": "If this PNG exists it is drawn over the picture, under the caption. A hook for anything.",
+    "viewer.no_files_img": "Shown when there is nothing to show. Empty is the picture that ships with the frame; a path is your own; `none` draws a plain screen naming the folders it looked in.",
     "library.picture_folders": "One per line. `~` is your home directory.",
     "library.database": "The index. Moving it starts an empty library.",
     "library.follow_links": "Follow symbolic links while scanning.",
@@ -121,7 +126,7 @@ NOTES = {
     "library.watch": "inotify: new photographs appear within seconds.",
     "library.rescan_interval": "Full walk as a backstop behind inotify, in seconds. 0 disables it.",
     "library.scan_on_start": "Index at startup. Off is faster to start but new files wait for the watch.",
-    "library.deleted_folder": "Where “Remove” moves a picture. Nothing is ever unlinked.",
+    "library.deleted_folder": "Where “Remove” moves a picture. Nothing is ever unlinked, and every removal is written to removals.jsonl in this folder — when it went, where it came from, and what it was. The Removed tab reads that file and can put a picture back.",
     "library.subfolder": "Show only pictures whose path contains this. Pick one of your folders, or type any part of a path. Empty shows everything.",
     "geo.enabled": "Reverse-geocode GPS coordinates into place names.",
     "geo.contact": "**Required when enabled.** Nominatim's usage policy needs a way to reach you.",
@@ -142,6 +147,9 @@ NOTES = {
     "mqtt.discovery_prefix": "`homeassistant` unless you changed it there.",
     "mqtt.topic_prefix": "The frame publishes under `<prefix>/<device_id>/…`.",
     "mqtt.publish_interval": "Heartbeat, in seconds. State is also published the moment anything changes.",
+    "mqtt.publish_image": "Send the picture itself to Home Assistant, so a dashboard can show what is on the frame. The photograph, not the screen \u2014 it is there even while the display is off.",
+    "mqtt.image_width": "Longest edge of that picture, in pixels. 1280 looks right on a dashboard and on a phone; larger costs more on every change.",
+    "mqtt.image_quality": "JPEG quality for it, 1\u2013100.",
     "http.enabled": "This web interface and the REST API.",
     "http.host": "`0.0.0.0` listens on every network; `127.0.0.1` only on the frame itself.",
     "http.port": "The port this page is served on.",
@@ -159,6 +167,19 @@ NOTES = {
     "power.enabled": "Named `enabled`, not `on`: YAML reads a bare `on:` key as a boolean.",
     "power.schedule": "`{\"all\": [\"22:30-07:00\"]}` — ranges may cross midnight, and weekday names work in place of `all`.",
     "power.dim_schedule": "`{\"19:00-22:30\": 0.45}` — brightness, not on/off.",
+    "network.enabled": "Check every so often that the frame can still reach the house, and say so in Home Assistant.",
+    "network.target": "Empty means your router, found automatically. Never put an address on the internet here — the frame would mend a link that is not broken.",
+    "network.interface": "Empty means whichever interface the frame actually uses.",
+    "network.failures": "Three checks a minute apart is several minutes of real silence, not one lost packet.",
+    "network.repair": "Off watches and reports but never touches the connection.",
+    "network.interval": "Seconds between checks. A minute is plenty \u2014 the frame is looking for an outage, not measuring latency.",
+    "network.attempts": "Ping runs per check. One lost packet is not an outage; needing all of them to fail is what makes a failed check mean something.",
+    "network.timeout": "How long to wait for a reply before that run counts as lost.",
+    "network.settle": "After mending, wait this long before checking again \u2014 a link that has just come back needs a moment to finish coming back.",
+    "network.cooldown": "The safety catch: however bad it looks, never mend more than once in this window.",
+    "health.enabled": "Measure the Pi’s temperature, load, memory and free space, and report them to Home Assistant and this page.",
+    "health.interval": "Seconds between readings. Taken on a background thread, so it never interrupts a transition.",
+    "health.disk_path": "Which disk the free-space reading is about. Empty means your first picture folder — the one that actually fills up.",
     "logging.level": "DEBUG · INFO · WARNING · ERROR",
     "logging.file": "Empty logs to the journal only.",
     "logging.journald": "Log through systemd, so `journalctl -u picframe3@pi` works.",
@@ -195,6 +216,22 @@ LABELS = {
     "detail": "How much of the address",
     "suppress": "Never show these names",
     "dim_schedule": "Dimming schedule",
+    "network.enabled": "Watch the connection",
+    "network.target": "Ping this address",
+    "network.interface": "Interface to reconnect",
+    "network.interval": "Seconds between checks",
+    "network.attempts": "Ping runs per check",
+    "network.timeout": "Seconds to wait for a reply",
+    "network.failures": "Failed checks before repairing",
+    "network.repair": "Repair the connection",
+    "network.cooldown": "Seconds between repairs",
+    "network.settle": "Seconds to settle after a repair",
+    "health.interval": "Seconds between readings",
+    "health.disk_path": "Free space reported for",
+    "health.enabled": "Report the Pi\u2019s health",
+    "mqtt.publish_image": "Send the current picture",
+    "mqtt.image_width": "Picture width sent (px)",
+    "mqtt.image_quality": "Picture quality sent",
 }
 
 #: Free-text fields whose value is a secret and must never be echoed back.
@@ -220,10 +257,13 @@ def redact(data: dict) -> dict:
 #: Settings the running frame picks up at once.  Everything else is written to
 #: the config file and takes effect when the frame restarts, and the page says
 #: so rather than leaving the owner to wonder why nothing happened.
-LIVE_SECTIONS = {"viewer", "slideshow", "geo", "power"}
+LIVE_SECTIONS = {"viewer", "slideshow", "geo", "power", "health", "network"}
 LIVE_KEYS = {
     "display.brightness", "display.rotate", "display.background",
     "library.subfolder", "logging.level",
+    # Read when the picture is published rather than when the bridge starts,
+    # so changing any of them takes effect on the next picture.
+    "mqtt.publish_image", "mqtt.image_width", "mqtt.image_quality",
 }
 
 def needs_restart(key: str) -> bool:
@@ -272,9 +312,13 @@ ADVANCED = {
     "geo.cache",
     "mqtt.discovery_prefix", "mqtt.topic_prefix", "mqtt.tls_ca",
     "mqtt.tls_insecure", "mqtt.publish_interval",
+    "mqtt.image_width", "mqtt.image_quality",
     "http.host", "http.cors_origins",
     "input.gpio_pull_up", "input.keymap",
     "logging.file", "logging.journald",
+    "health.interval", "health.disk_path",
+    "network.interface", "network.attempts", "network.timeout",
+    "network.settle", "network.cooldown",
 }
 
 

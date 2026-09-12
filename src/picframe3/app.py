@@ -17,13 +17,16 @@ from .events import Action, Bus, Command, State
 from .gfx import Renderer, Slide, Texture, create_backend, transitions
 from .gfx import overlays as overlay_builders
 from .gfx.textstyle import TextStyle
+from .health import Health
 from .library.db import Library, Record
-from .library.playlist import Filters, Playlist
+from .library.playlist import ANY_OTHER, Filters, Playlist
+from .library.removed import RemovalLog
 from .library.scanner import Scanner
-from .media import PrepareOptions, SlideLoader, placeholder
+from .media import PrepareOptions, SlideLoader, no_files_screen
 from .media import geocode as geocode_module
 from .media.geocode import Geocoder
 from .media.mat import MatStyle
+from .network import NetworkWatch
 
 _log = logging.getLogger(__name__)
 
@@ -47,6 +50,7 @@ class PicFrame:
         self.backend = None
         self.renderer: Renderer | None = None
         self.library: Library | None = None
+        self.removals: RemovalLog | None = None
         self.scanner: Scanner | None = None
         self.playlist: Playlist | None = None
         self.loader: SlideLoader | None = None
@@ -54,6 +58,23 @@ class PicFrame:
         self.video = None
         self.backlight = BacklightControl()
         self.power = PowerSchedule(config.power.schedule, config.power.dim_schedule)
+        self.health = Health(
+            interval=config.health.interval,
+            disk_path=self._health_disk_path(),
+            enabled=config.health.enabled,
+        )
+        self.network = NetworkWatch(
+            enabled=config.network.enabled,
+            target=config.network.target,
+            interface=config.network.interface,
+            interval=config.network.interval,
+            failures=config.network.failures,
+            attempts=config.network.attempts,
+            timeout=config.network.timeout,
+            cooldown=config.network.cooldown,
+            settle=config.network.settle,
+            repair=config.network.repair,
+        )
 
         self.current: list[Record] = []
         #: How the picture on screen was laid out (cover/contain/blur/mat).
@@ -84,6 +105,19 @@ class PicFrame:
         self._capture_request: asyncio.Future | None = None
         self._location_backfill_at = 0.0
 
+    def _health_disk_path(self) -> str:
+        """Which filesystem the free-space reading is about.
+
+        The photographs', not the root filesystem: on a frame fed from a USB
+        stick or a network share those are different disks, and the one that
+        fills up is the one with the pictures on it.
+        """
+        configured = self.config.health.disk_path
+        if configured:
+            return os.path.expanduser(configured)
+        folders = self.config.library.picture_folders
+        return os.path.expanduser(folders[0]) if folders else ""
+
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
@@ -108,6 +142,8 @@ class PicFrame:
             cfg.slideshow.transition_choices)
 
         self.library = Library(cfg.library.database)
+        self.removals = RemovalLog(cfg.library.deleted_folder)
+        self.health.snapshot()   # kicks off the first reading on its own thread
         if cfg.geo.enabled:
             self.geocoder = Geocoder(
                 os.path.expanduser(cfg.geo.cache),
@@ -219,6 +255,10 @@ class PicFrame:
                 tasks.append(asyncio.create_task(watcher.run(), name="input"))
             except Exception as exc:
                 _log.info("input devices unavailable: %s", exc)
+        # Always started, even when the watcher is off: it checks nothing
+        # while disabled, and switching it on in the settings then takes effect
+        # at the next check rather than at the next restart.
+        tasks.append(asyncio.create_task(self.network.run(), name="network"))
         if cfg.input.gpio_buttons:
             try:
                 from .control.gpio import GpioButtons
@@ -357,9 +397,6 @@ class PicFrame:
             return
 
         self._placeholder_shown = False
-        self._location_pending: set[int] = set()
-        self._capture_request: asyncio.Future | None = None
-        self._location_backfill_at = 0.0
         self.current = group
         self._current_fit = prepared.fit
         kb = self.config.slideshow.kenburns and not prepared.is_video
@@ -500,16 +537,24 @@ class PicFrame:
         return max(0.0, limit)
 
     def _show_placeholder(self) -> None:
-        if self._placeholder_shown or self.renderer is None:
+        # A filter that matches nothing is the one way a working frame goes
+        # blank, and "No pictures yet" would send its owner looking at the
+        # folder, the scan and the SD card.  Say which it is.
+        filtered = (self.playlist is not None and self.playlist.filters.active
+                    and (self.library.stats().get("files", 0) if self.library else 0))
+        message = "Nothing matches the filter" if filtered else "No pictures yet"
+        subtitle = (self.playlist.filters.describe() if filtered
+                    else "Looking in " + ", ".join(self.config.library.picture_folders))
+        if self._placeholder_shown == (message, subtitle) or self.renderer is None:
             return
-        folders = ", ".join(self.config.library.picture_folders)
-        image = placeholder(
+        image = no_files_screen(
             (self.backend.width, self.backend.height),
-            "No pictures yet",
-            f"Looking in {folders}",
+            self.config.viewer.no_files_img,
+            message=message,
+            subtitle=subtitle,
         )
         self.renderer.show(Slide(Texture.from_image(image, srgb=True)), transition="fade")
-        self._placeholder_shown = True
+        self._placeholder_shown = (message, subtitle)
         self.current = []
         self._dirty = True
 
@@ -797,7 +842,9 @@ class PicFrame:
         elif action is Action.JUMP:
             await self._jump(payload)
         elif action is Action.DELETE:
-            await self._delete_current()
+            await self._delete_current(source=command.source)
+        elif action is Action.RESTORE:
+            await self._restore_removed(command.payload.get("stored_as", ""))
         elif action in (Action.DISPLAY_ON, Action.DISPLAY_OFF, Action.DISPLAY_TOGGLE):
             want = (
                 True if action is Action.DISPLAY_ON
@@ -822,7 +869,7 @@ class PicFrame:
         elif action is Action.SET_CONFIG:
             self._apply_setting(payload.get("key", ""), payload.get("value"))
         elif action is Action.SET_FILTERS:
-            self.playlist.set_filters(Filters.from_dict(payload))
+            self.set_filters(payload)
             await self._advance()
         elif action is Action.RESCAN:
             asyncio.create_task(self._rescan())
@@ -833,6 +880,79 @@ class PicFrame:
         elif action is Action.QUIT:
             self._stop.set()
         self._publish()
+
+    # ------------------------------------------------------------------
+    # Which pictures are in the running
+    # ------------------------------------------------------------------
+    def set_filters(self, patch: dict[str, Any]) -> None:
+        """Apply a filter patch from any surface, and keep the rest in step.
+
+        The payload is a patch, not a replacement: Home Assistant sends one
+        text box at a time.  ``{"reset": true}`` clears the lot.
+
+        The folder is the one filter that is also a setting
+        (``library.subfolder``), because it is the one people want to survive
+        a restart.  Writing it back here is what stops the settings page and
+        the filter panel from showing two different answers.
+        """
+        if self.playlist is None:
+            return
+        new = self.playlist.filters.merged(patch)
+        self.playlist.set_filters(new)
+        if new.subfolder != self.config.library.subfolder:
+            self.config.library.subfolder = new.subfolder
+            self._config_dirty = True
+        _log.info("filter: %s (%d pictures)", new.describe(), self.playlist.size)
+
+    def folder_choices(self) -> list[str]:
+        """The folders a dropdown may offer, relative to the picture roots.
+
+        Relative, because ``/home/pi/Pictures/2024/Italy`` is unreadable in a
+        Home Assistant select and matches exactly the same pictures as
+        ``2024/Italy`` -- the filter looks for the text anywhere in the path.
+        """
+        if self.library is None:
+            return []
+        roots = [os.path.expanduser(p).rstrip("/")
+                 for p in self.config.library.picture_folders]
+        out: list[str] = []
+        for path, _count in self.library.folders():
+            relative = path
+            for root in roots:
+                if path == root:
+                    relative = ""
+                    break
+                if path.startswith(root + "/"):
+                    relative = path[len(root) + 1:]
+                    break
+            if relative and relative not in out:
+                out.append(relative)
+        return sorted(out)
+
+    def _filters_payload(self) -> dict[str, Any]:
+        if self.playlist is None:
+            return {}
+        payload = self.playlist.filters.as_dict()
+        # A Home Assistant select warns on every state it has no option for,
+        # so it is told plainly when the folder was set from somewhere else.
+        subfolder = payload.get("subfolder") or ""
+        payload["folder_choice"] = (
+            subfolder if not subfolder or subfolder in self._folder_options
+            else ANY_OTHER
+        )
+        payload["matching"] = self.playlist.size
+        return payload
+
+    @property
+    def _folder_options(self) -> list[str]:
+        """Cached: the state document is rebuilt several times a second, and
+        walking the folder table each time to answer one dropdown would be a
+        database query per frame."""
+        now = time.monotonic()
+        if now - getattr(self, "_folder_cache_at", -1e9) > 30.0:
+            self._folder_cache_at = now
+            self._folder_cache = self.folder_choices()
+        return getattr(self, "_folder_cache", [])
 
     def _apply_setting(self, key: str, value: Any) -> None:
         if not key:
@@ -878,6 +998,27 @@ class PicFrame:
             self._clock_minute = None
             if self.current:
                 self._build_info_overlay(self.current)
+        elif section == "health":
+            self.health.enabled = self.config.health.enabled
+            self.health.interval = max(5.0, float(self.config.health.interval))
+            self.health.disk_path = self._health_disk_path()
+            if self.health.enabled:
+                self.health.snapshot()
+        elif section == "network":
+            # The loop reads these attributes on every pass, so every one of
+            # them -- the watcher itself included -- takes effect at the next
+            # check without a restart.
+            cfg_net = self.config.network
+            self.network.target = cfg_net.target
+            self.network.interface = cfg_net.interface
+            self.network.interval = max(10.0, float(cfg_net.interval))
+            self.network.failures = max(1, int(cfg_net.failures))
+            self.network.attempts = max(1, int(cfg_net.attempts))
+            self.network.timeout = max(1.0, float(cfg_net.timeout))
+            self.network.cooldown = max(0.0, float(cfg_net.cooldown))
+            self.network.settle = max(0.0, float(cfg_net.settle))
+            self.network.repair = cfg_net.repair
+            self.network.enabled = cfg_net.enabled
         elif section == "power":
             self.power = PowerSchedule(self.config.power.schedule,
                                        self.config.power.dim_schedule)
@@ -932,7 +1073,7 @@ class PicFrame:
                 self._info_until = self._slide_started + self.config.viewer.text_seconds
                 self._dirty = True
 
-    async def _delete_current(self) -> None:
+    async def _delete_current(self, source: str = "") -> None:
         if not self.current:
             return
         record = self.current[0]
@@ -950,9 +1091,58 @@ class PicFrame:
             _log.error("cannot move %s aside: %s", record.path, exc)
             return
         _log.info("moved %s to %s", record.path, destination)
+        # Before forget(), never after: the database row is the only place the
+        # title, the date taken, the place name and the tags exist, and
+        # forget() deletes it.  Journal first and a removal stays explicable
+        # even if the picture is never restored.
+        self.removals.record(record, os.path.basename(destination), source=source)
         self.library.forget([record.path])
         self.playlist.refresh()
         await self._advance()
+
+    async def _restore_removed(self, stored_as: str) -> dict[str, Any]:
+        """Put a removed picture back where it came from.
+
+        The journal keeps the original full path, so this is a real undo and
+        not a drop into some generic inbox: the picture reappears in the
+        folder it was taken from, and the next scan indexes it there.
+        """
+        entry = self.removals.find(str(stored_as or ""))
+        if entry is None:
+            return {"ok": False, "error": f"nothing removed is called {stored_as!r}"}
+        folder = os.path.expanduser(self.config.library.deleted_folder)
+        source_path = os.path.join(folder, entry["stored_as"])
+        if not os.path.exists(source_path):
+            return {"ok": False,
+                    "error": f"{entry['stored_as']} is no longer in {folder}"}
+        destination = entry.get("original_path") or ""
+        if not destination:
+            return {"ok": False, "error": "the journal has no original path"}
+        # The folder may have been tidied away in the meantime, and something
+        # else may have taken the name since.  Neither is a reason to refuse;
+        # both are a reason to say where the picture actually ended up.
+        os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
+        n = 1
+        while os.path.exists(destination):
+            stem, ext = os.path.splitext(entry.get("original_path") or "")
+            destination = f"{stem}-restored-{n}{ext}" if n > 1 else f"{stem}-restored{ext}"
+            n += 1
+        try:
+            shutil.move(source_path, destination)
+        except OSError as exc:
+            _log.error("cannot restore %s: %s", source_path, exc)
+            return {"ok": False, "error": str(exc)}
+        self.removals.mark_restored(entry["stored_as"], destination)
+        _log.info("restored %s to %s", entry["stored_as"], destination)
+        if self.scanner is not None:
+            await asyncio.get_running_loop().run_in_executor(
+                None, self.scanner.rescan_paths, [destination]
+            )
+        if self.playlist is not None:
+            self.playlist.refresh()
+        self._dirty = True
+        return {"ok": True, "path": destination,
+                "moved": destination != entry.get("original_path")}
 
     # ------------------------------------------------------------------
     # Display power
@@ -1090,11 +1280,13 @@ class PicFrame:
             playlist_position=self.playlist.position if self.playlist else 0,
             playlist_round=self.playlist.round if self.playlist else 1,
             playlist_remaining=self.playlist.remaining if self.playlist else 0,
+            filters=self._filters_payload(),
             scanning=self._scanning,
             restart_required=sorted(self._restart_needed),
             unsaved_changes=self._config_dirty,
             can_restart=True,
             library=self.library.stats() if self.library else {},
+            removed=self.removals.summary() if self.removals else {},
             current=self._current_payload(record),
             next_change_in=self._next_change_in(now),
             video=self._video_payload(),
@@ -1105,6 +1297,8 @@ class PicFrame:
                 "height": self.backend.height if self.backend else 0,
                 "refresh_hz": round(self.backend.info.refresh_hz, 2) if self.backend else 0,
             },
+            health=self.health.snapshot(),
+            network=self.network.snapshot(),
             version=__version__,
             uptime=round(now - self.started, 1),
             fps=round(self._fps, 2),

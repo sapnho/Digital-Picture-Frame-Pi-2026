@@ -178,6 +178,45 @@ def test_placeholder_is_drawn():
     assert img.size == (640, 480)
 
 
+def test_the_empty_screen_is_a_picture_by_default():
+    """An empty picture frame should still have a picture in it."""
+    assert prepare.NO_FILES_FILE.exists(), "the shipped no_pictures.jpg is missing"
+    shown = prepare.no_files_screen((640, 480))
+    assert shown.size == (640, 480)
+    assert list(shown.getdata()) != list(prepare.placeholder((640, 480)).getdata())
+
+
+def test_the_empty_screen_can_be_your_own_picture(tmp_path):
+    mine = tmp_path / "mine.jpg"
+    _photo(1600, 1200, (12, 200, 60)).save(mine)
+    shown = prepare.no_files_screen((640, 480), str(mine))
+    assert shown.size == (640, 480)
+    assert shown.getpixel((320, 240))[1] > 150            # the green is what is on screen
+
+
+def test_the_empty_screen_letterboxes_rather_than_crops(tmp_path):
+    """Whatever you point it at, the whole of it is visible."""
+    mine = tmp_path / "tall.jpg"
+    _photo(600, 1200, (200, 30, 30)).save(mine)
+    shown = prepare.no_files_screen((640, 480), str(mine))
+    assert shown.getpixel((5, 240)) == (0, 0, 0)          # black bar, not a cropped photo
+    assert shown.getpixel((320, 240))[0] > 150
+
+
+def test_the_empty_screen_can_be_turned_off():
+    drawn = prepare.placeholder((640, 480), "No pictures yet", "Looking in ~/Pictures")
+    off = prepare.no_files_screen((640, 480), "none",
+                                  message="No pictures yet", subtitle="Looking in ~/Pictures")
+    assert list(off.getdata()) == list(drawn.getdata())
+
+
+def test_an_unreadable_empty_screen_falls_back_to_the_drawing(tmp_path):
+    """A typo in the path must not leave the frame black."""
+    shown = prepare.no_files_screen((640, 480), str(tmp_path / "nope.jpg"))
+    drawn = prepare.placeholder((640, 480), "No pictures yet")
+    assert list(shown.getdata()) == list(drawn.getdata())
+
+
 def test_prepare_records_how_the_picture_was_laid_out(tmp_path):
     """So the frame can answer "why was that one cropped?" out loud."""
     path = tmp_path / "p.jpg"

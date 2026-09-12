@@ -452,6 +452,23 @@ class Library:
             )
         ]
 
+    def locations(self) -> list[tuple[str, int]]:
+        """Every place name in the index, commonest first.
+
+        What the location filter offers as suggestions.  Grouped by the whole
+        name rather than by town, because the filter matches any part of it:
+        picking "Carteret, Normandy, France" and then shortening it by hand to
+        "France" is how somebody widens a filter without knowing the schema.
+        """
+        return [
+            (r["location"], r["n"])
+            for r in self.connect().execute(
+                "SELECT location, COUNT(*) AS n FROM files "
+                "WHERE hidden=0 AND location IS NOT NULL AND location != '' "
+                "GROUP BY location ORDER BY n DESC, location"
+            )
+        ]
+
     def locations_missing(self, limit: int = 100) -> list[tuple[int, float, float]]:
         """Rows that have coordinates but no place name yet.
 

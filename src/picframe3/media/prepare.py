@@ -12,6 +12,7 @@ import logging
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from PIL import Image, ImageFile, ImageFilter, ImageOps
 
@@ -222,9 +223,41 @@ def prepare(
     return out
 
 
+#: The picture shown when the library is empty.  A picture frame with nothing
+#: in it should still have something in it; the drawn screen below is the
+#: fallback, not the default.  ``viewer.no_files_img`` replaces this file.
+NO_FILES_FILE = Path(__file__).resolve().parents[1] / "data" / "no_pictures.jpg"
+
+#: Values of ``viewer.no_files_img`` that mean "draw the plain screen instead".
+NO_FILES_OFF = frozenset({"none", "off", "-"})
+
+
+def no_files_screen(screen_size: tuple[int, int], source: str = "", *,
+                    message: str = "No pictures yet",
+                    subtitle: str = "") -> Image.Image:
+    """The empty-library screen at ``screen_size``.
+
+    ``source`` is ``viewer.no_files_img``: empty uses the picture that ships
+    with the frame, a path uses that file, ``none`` draws the plain screen.  A
+    file that cannot be read falls back to the drawing rather than to black --
+    an empty frame showing nothing at all just looks broken.
+    """
+    wanted = str(source or "").strip()
+    if wanted.lower() not in NO_FILES_OFF:
+        path = Path(wanted).expanduser() if wanted else NO_FILES_FILE
+        image = open_oriented(str(path))
+        if image is not None:
+            try:
+                return _fit_contain(image.convert("RGB"), screen_size, (0, 0, 0))
+            finally:
+                image.close()
+        _log.info("no_files_img %s unreadable; drawing the empty screen instead", path)
+    return placeholder(screen_size, message, subtitle)
+
+
 def placeholder(screen_size: tuple[int, int], message: str = "No pictures found",
                 subtitle: str = "") -> Image.Image:
-    """Shown when the library is empty -- no shipped JPEG needed."""
+    """The drawn empty screen -- the fallback when there is no picture to show."""
     from PIL import ImageDraw
 
     from ..gfx import textstyle  # local import keeps media/ importable headless

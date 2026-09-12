@@ -32,6 +32,7 @@
   <nav class="tabs" role="tablist">
     <button class="tab is-active" data-view="now">Now playing</button>
     <button class="tab" data-view="library">Library</button>
+    <button class="tab" data-view="removed">Removed</button>
     <button class="tab" data-view="settings">Settings</button>
     <select id="theme" title="Light or dark" aria-label="Theme">
       <option value="auto">Auto</option>
@@ -80,13 +81,85 @@
 
   <!-- ------------------------------------------------------ Library -->
   <section id="view-library" class="view">
+    <!-- The filter is the frame, not the browser: everything here changes
+         what goes on the wall, which is why it sits above the grid and says
+         so in its heading. -->
+    <section class="filter" id="filter">
+      <div class="filter-head">
+        <h2>What the frame is showing</h2>
+        <span class="pill" id="filter-count">—</span>
+      </div>
+      <div class="form">
+        <div class="field">
+          <label for="f-folder">Folder</label>
+          <select id="f-folder" data-filter="folder">
+            <option value="">All folders</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="f-tags">Tags</label>
+          <input id="f-tags" type="text" data-filter="tags" list="f-tag-list"
+                 placeholder="any tag" autocomplete="off">
+          <datalist id="f-tag-list"></datalist>
+          <label class="inline"><input id="f-tags-all" type="checkbox"
+                 data-filter="tags_match_all"> Match all of them</label>
+          <div class="hint">Several, separated by commas. Any one of them
+            counts unless you tick the box.</div>
+        </div>
+        <div class="field">
+          <label for="f-place">Place</label>
+          <input id="f-place" type="text" data-filter="location" list="f-place-list"
+                 placeholder="anywhere" autocomplete="off">
+          <datalist id="f-place-list"></datalist>
+          <div class="hint">Any part of a place name: <code>France</code>
+            catches every town in it.</div>
+        </div>
+        <div class="field">
+          <label for="f-from">Taken from</label>
+          <input id="f-from" type="date" data-filter="date_from">
+        </div>
+        <div class="field">
+          <label for="f-to">Taken until</label>
+          <input id="f-to" type="date" data-filter="date_to">
+        </div>
+      </div>
+      <div class="filter-quick">
+        <span class="muted">Recent:</span>
+        <button class="btn" data-days="7" type="button">7 days</button>
+        <button class="btn" data-days="30" type="button">30 days</button>
+        <button class="btn" data-days="365" type="button">A year</button>
+        <button class="btn" data-days="1095" type="button">3 years</button>
+        <button class="btn" id="f-reset" type="button">Show everything</button>
+      </div>
+    </section>
+
     <div class="toolbar">
       <input id="search" type="search" placeholder="Search titles, captions, tags, places…" autocomplete="off">
       <select id="folder"><option value="">All folders</option></select>
+      <label class="inline"><input id="only-selected" type="checkbox">
+        Only the ones the frame is showing</label>
       <button id="rescan" class="btn">Rescan</button>
     </div>
     <div id="grid" class="grid"></div>
     <p id="grid-empty" class="empty" hidden>Nothing matches.</p>
+  </section>
+
+  <!-- ------------------------------------------------------ Removed -->
+  <section id="view-removed" class="view">
+    <p class="muted" id="removed-intro">
+      Nothing is ever deleted. Every picture you remove is moved aside and
+      written down here — when it went, where it came from, and what it was.
+    </p>
+    <div class="toolbar">
+      <input id="removed-search" type="search" autocomplete="off"
+             placeholder="Search removed pictures…">
+      <label class="inline"><input id="removed-restored" type="checkbox">
+        Show ones I put back</label>
+      <a id="removed-journal" class="btn" href="/api/removed/journal"
+         download="removals.jsonl">Download the journal</a>
+    </div>
+    <div id="removed-list" class="removed"></div>
+    <p id="removed-empty" class="empty" hidden>Nothing has been removed.</p>
   </section>
 
   <!-- ----------------------------------------------------- Settings -->

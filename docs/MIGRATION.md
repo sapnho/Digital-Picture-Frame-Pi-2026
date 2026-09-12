@@ -19,7 +19,8 @@ database file and leaves `pictureframe.db3` alone, so you can go back.
 Picture folders, interval, fade time, shuffle and reshuffle settings, portrait
 pairing, recent-days weighting, the caption fields and their size, justification
 and opacity, the date format, mat colours and borders, blur settings, Ken
-Burns, the clock, the deleted-pictures folder, geocoding, and the MQTT and HTTP
+Burns, the clock, the deleted-pictures folder, geocoding, your empty-library
+picture (`no_files_img` → `viewer.no_files_img`), and the MQTT and HTTP
 settings.
 
 ## What does not, and why
@@ -32,7 +33,6 @@ settings.
 | `shader`, `blend_type` | transitions are built in: `picframe3 transitions` lists fifteen. `blend`→`fade`, `burn`→`burn`, `bump`→`bump` |
 | `fps` | the loop is adaptive — full rate while something moves, **no frames at all** while a still picture is up |
 | `mat_resource_folder` | mats are generated, including the paper grain. Nothing to install |
-| `no_files_img` | the empty-library screen is drawn |
 | `image_attr` | all metadata is published; there is no allow-list to maintain |
 | `sort_cols` | `slideshow.order`: `shuffle`, `random`, `date_desc`, `date_asc`, `name`, `folder`, `recent`, `least_played` |
 | `update_interval` | inotify notices new files in seconds; `library.rescan_interval` is only a backstop |
@@ -82,6 +82,36 @@ Hebrew and Indic scripts correctly; pi3d's `FixedString` could not.
 
 **Videos crossfade.** The video is the slide texture, so it fades in and out
 like a photograph and the captions stay on top. There is no separate VLC window.
+
+## If you added a Wi-Fi watchdog of your own
+
+Many picframe installations grew a little `check_wifi.py` under systemd or cron,
+because a frame that silently falls off the network is the one fault the frame
+itself never reports. picframe3 does that job now — `network:` in the config —
+so **turn the old one off**:
+
+```bash
+sudo systemctl disable --now check_wifi.service    # or remove the cron line
+```
+
+Leaving both running is worse than either alone: two watchdogs restart the
+network independently, each one making the other's next check fail.
+
+It is worth reading the old script before deleting it, because most of them
+share two flaws that make the cure worse than the disease. They ping an address
+on the internet (8.8.8.8, usually), so the router's nightly reconnect looks
+identical to broken Wi-Fi; and they act on a single failed ping with no cooldown,
+so the restart they trigger makes the next check fail too, and the frame spends
+the night restarting its network every few minutes until someone pulls the plug.
+picframe3 pings the gateway, needs three failed checks in a row, and will not
+touch the connection twice within half an hour.
+
+The one thing it needs that a root cron job did not: permission. The frame runs
+as an ordinary user with `NoNewPrivileges=yes`, so `picframe3 setup` installs a
+polkit rule (`/etc/polkit-1/rules.d/50-picframe3-network.rules`) granting that
+user exactly two things — reconnecting a network device, and restarting
+`NetworkManager.service`. Without the rule the frame still reports outages; it
+just cannot mend them.
 
 ## Home Assistant
 

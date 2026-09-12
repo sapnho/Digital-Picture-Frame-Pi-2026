@@ -24,7 +24,7 @@ Which screen to use and how hard to drive it.
 | `connector` | str | None | `None` | `HDMI-A-1`, `HDMI-A-2`, `DSI-1`… Empty takes the first connected output. *(takes effect on restart)* *(advanced)* |
 | `rotate` | integer | `0` | 0 or 180. For a quarter turn rotate in the kernel (`video=HDMI-A-1:1080x1920M@60,rotate=90`) so the Pi reports a portrait mode. |
 | `vsync` | boolean | `True` | Page-flip on the vertical blank. Turning it off tears; it exists for debugging. *(takes effect on restart)* *(advanced)* |
-| `fps_limit` | number | `60.0` | Only applies while something is animating; a still picture draws no frames. With `vsync` on, the panel's refresh rate is the real ceiling. *(takes effect on restart)* |
+| `fps_limit` | number | `60.0` | Only applies while something is animating; a still picture draws no frames. *(takes effect on restart)* |
 | `background` | list of numbers | `[0.0, 0.0, 0.0, 1.0]` | Red, green, blue, alpha, each 0–1. Shown around a picture that does not fill the screen. *(advanced)* |
 | `brightness` | number | `1.0` | 0–1, applied in the shader and to the backlight if there is one. |
 
@@ -91,6 +91,7 @@ How a picture is composed on screen, and what is written over it.
 | `clock_offset_pct` | list of numbers | `[3.0, 3.0]` | How far in from the corner, as a percentage of the screen: across, then down. |
 | `clock_extra_file` | string | `'/dev/shm/picframe-clock.txt'` | If this file exists its contents are written under the time, much smaller — a weather line, a countdown, anything that writes to it. *(advanced)* |
 | `overlay_image` | string | `'/dev/shm/picframe-overlay.png'` | If this PNG exists it is drawn over the picture, under the caption. A hook for anything. *(advanced)* |
+| `no_files_img` | string | *(empty)* | Shown when there is nothing to show. Empty is the picture that ships with the frame; a path is your own; `none` draws a plain screen naming the folders it looked in. |
 
 ## `library`
 
@@ -107,7 +108,7 @@ Where the photographs are and how they are indexed.
 | `watch` | boolean | `True` | inotify: new photographs appear within seconds. *(takes effect on restart)* |
 | `rescan_interval` | number | `3600.0` | Full walk as a backstop behind inotify, in seconds. 0 disables it. *(takes effect on restart)* |
 | `scan_on_start` | boolean | `True` | Index at startup. Off is faster to start but new files wait for the watch. *(takes effect on restart)* |
-| `deleted_folder` | string | `'~/.local/share/picframe3/deleted'` | Where “Remove” moves a picture. Nothing is ever unlinked. *(takes effect on restart)* *(advanced)* |
+| `deleted_folder` | string | `'~/.local/share/picframe3/deleted'` | Where “Remove” moves a picture. Nothing is ever unlinked, and every removal is written to removals.jsonl in this folder — when it went, where it came from, and what it was. The Removed tab reads that file and can put a picture back. *(takes effect on restart)* *(advanced)* |
 | `subfolder` | string | *(empty)* | Show only pictures whose path contains this. Pick one of your folders, or type any part of a path. Empty shows everything. |
 
 ## `geo`
@@ -142,6 +143,9 @@ The broker, and the Home Assistant device it announces.
 | `discovery_prefix` | string | `'homeassistant'` | `homeassistant` unless you changed it there. *(takes effect on restart)* *(advanced)* |
 | `topic_prefix` | string | `'picframe'` | The frame publishes under `<prefix>/<device_id>/…`. *(takes effect on restart)* *(advanced)* |
 | `publish_interval` | number | `30.0` | Heartbeat, in seconds. State is also published the moment anything changes. *(takes effect on restart)* *(advanced)* |
+| `publish_image` | boolean | `True` | Send the picture itself to Home Assistant, so a dashboard can show what is on the frame. The photograph, not the screen — it is there even while the display is off. |
+| `image_width` | integer | `1280` | Longest edge of that picture, in pixels. 1280 looks right on a dashboard and on a phone; larger costs more on every change. *(advanced)* |
+| `image_quality` | integer | `82` | JPEG quality for it, 1–100. *(advanced)* |
 
 ## `http`
 
@@ -180,6 +184,33 @@ When the screen is on, off, or dimmed.
 | `schedule` | mapping | `{}` | `{"all": ["22:30-07:00"]}` — ranges may cross midnight, and weekday names work in place of `all`. |
 | `dim_schedule` | mapping | `{}` | `{"19:00-22:30": 0.45}` — brightness, not on/off. |
 | `enabled` | boolean | `True` | Named `enabled`, not `on`: YAML reads a bare `on:` key as a boolean. |
+
+## `health`
+
+What the frame reports about the Pi it runs on — temperature, load, memory, free space and the power supply.
+
+| key | type | default | |
+|---|---|---|---|
+| `enabled` | boolean | `True` | Measure the Pi’s temperature, load, memory and free space, and report them to Home Assistant and this page. |
+| `interval` | number | `30.0` | Seconds between readings. Taken on a background thread, so it never interrupts a transition. *(advanced)* |
+| `disk_path` | string | *(empty)* | Which disk the free-space reading is about. Empty means your first picture folder — the one that actually fills up. *(advanced)* |
+
+## `network`
+
+Watching the frame’s own link to the house, and mending it when it breaks.
+
+| key | type | default | |
+|---|---|---|---|
+| `enabled` | boolean | `True` | Check every so often that the frame can still reach the house, and say so in Home Assistant. |
+| `target` | string | *(empty)* | Empty means your router, found automatically. Never put an address on the internet here — the frame would mend a link that is not broken. |
+| `interface` | string | *(empty)* | Empty means whichever interface the frame actually uses. *(advanced)* |
+| `interval` | number | `60.0` | Seconds between checks. A minute is plenty — the frame is looking for an outage, not measuring latency. |
+| `attempts` | integer | `3` | Ping runs per check. One lost packet is not an outage; needing all of them to fail is what makes a failed check mean something. *(advanced)* |
+| `timeout` | number | `3.0` | How long to wait for a reply before that run counts as lost. *(advanced)* |
+| `failures` | integer | `3` | Three checks a minute apart is several minutes of real silence, not one lost packet. |
+| `repair` | boolean | `True` | Off watches and reports but never touches the connection. |
+| `cooldown` | number | `1800.0` | The safety catch: however bad it looks, never mend more than once in this window. *(advanced)* |
+| `settle` | number | `45.0` | After mending, wait this long before checking again — a link that has just come back needs a moment to finish coming back. *(advanced)* |
 
 ## `logging`
 

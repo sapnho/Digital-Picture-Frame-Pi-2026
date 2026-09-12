@@ -25,6 +25,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
     tab.classList.add("is-active");
     $(`#view-${tab.dataset.view}`).classList.add("is-active");
     if (tab.dataset.view === "library") loadLibrary();
+    if (tab.dataset.view === "removed") loadRemoved();
     if (tab.dataset.view === "settings") loadSettings();
   });
 });
@@ -157,10 +158,27 @@ function render(next) {
 
   renderRestartNotice();
 
+  const filters = state.filters || {};
+  if (filterHasLanded(filters)) {
+    previewing = false;
+    if (gridWaiting) { gridWaiting = false; loadLibrary(); }
+  }
+  const pill = $("#filter-count");
+  if (pill && !previewing) {
+    const total = (state.library || {}).files || 0;
+    pill.textContent = filters.active
+      ? `${fmt(state.playlist_size)} of ${fmt(total)} pictures`
+      : `all ${fmt(total)} pictures`;
+    pill.className = filters.active ? "pill is-filtered" : "pill";
+  }
+  showFilter(filters);
+
   const lib = state.library || {};
+  const gone = state.removed || {};
   $("#stats").innerHTML = [
     ["Pictures", fmt(lib.files)],
     ["Videos", fmt(lib.videos)],
+    ...(gone.count ? [["Removed", fmt(gone.count)]] : []),
     ["In playlist", fmt(state.playlist_size)],
     ["Round", `${fmt(state.playlist_round)} · ${fmt(state.playlist_remaining)} left`],
     ["Times shown", lib.shown_max === lib.shown_min
@@ -168,7 +186,30 @@ function render(next) {
     ["Next in", state.paused ? "paused" : `${Math.round(state.next_change_in || 0)}s`],
     ["Frame rate", `${state.fps ?? 0}/s`],
     ["Uptime", duration(state.uptime)],
-  ].map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+    ...healthTiles(state.health || {}),
+  ].map(([k, v, cls]) => `<div${cls ? ` class="${cls}"` : ""}><dt>${k}</dt><dd>${v}</dd></div>`)
+    .join("");
+}
+
+/* How the Pi itself is doing.  Every reading is optional: a machine that
+   cannot measure its own temperature shows no temperature tile rather than a
+   tile reading "—", and the row simply gets shorter. */
+function healthTiles(h) {
+  const tiles = [];
+  if (h.cpu_temp != null)
+    tiles.push(["CPU temperature", `${h.cpu_temp.toFixed(1)} °C`,
+                h.cpu_temp >= 80 ? "warn" : ""]);
+  if (h.cpu_percent != null) tiles.push(["CPU load", `${h.cpu_percent}%`]);
+  if (h.memory_percent != null) tiles.push(["Memory used", `${h.memory_percent}%`]);
+  if (h.disk_free != null)
+    tiles.push(["Free space", `${(h.disk_free / 1073741824).toFixed(1)} GiB`,
+                h.disk_free < 536870912 ? "warn" : ""]);
+  // Worth its own tile only when there is something to say: an undervoltage
+  // flag the firmware set at 3am is the whole reason for measuring at all.
+  if (h.undervoltage || h.undervoltage_since_boot)
+    tiles.push(["Power supply", h.undervoltage ? "undervoltage" : "dip recorded",
+                "warn"]);
+  return tiles;
 }
 
 [brightness, interval].forEach((el) => {
@@ -194,6 +235,130 @@ setInterval(() => { if (state && !state.paused) {
   $("#progress-bar").style.width = `${pct}%`;
 } }, 1000);
 
+/* --------------------------------------------------------------- filter */
+/* Everything in this panel changes what the frame shows, not what the grid
+   shows.  Typing counts (a preview, cheap, applies nothing); leaving a box or
+   picking from a dropdown applies.  Applying mid-keystroke would send the
+   picture on the wall somewhere new on every letter. */
+
+const FILTER_FIELDS = () => document.querySelectorAll("[data-filter]");
+let filterTimer = null;
+let filterKnown = false;      // the option lists are fetched once
+let previewing = false;       // an edit that has not been applied yet
+let gridWaiting = false;      // a grid reload waiting for the frame to catch up
+
+function filterPatch() {
+  const patch = {};
+  FILTER_FIELDS().forEach((el) => {
+    patch[el.dataset.filter] = el.type === "checkbox" ? el.checked : el.value.trim();
+  });
+  return patch;
+}
+
+async function applyFilter(patch) {
+  clearTimeout(filterTimer);
+  previewing = false;
+  // Both flags before the request, not after it: the frame usually publishes
+  // the new state before the POST has even been read back here, and a flag
+  // set after that would never be looked at again.  The grid is then
+  // reloaded when the state says the filter has landed, rather than after a
+  // guessed delay -- a race the slow case always loses.
+  gridWaiting = true;
+  // Narrowing the slideshow and then browsing the whole library is not what
+  // anyone means; "show everything" puts the grid back too.
+  $("#only-selected").checked = !(patch && patch.reset);
+  await api("/api/filters", {
+    method: "POST",
+    body: JSON.stringify(patch || filterPatch()),
+  });
+}
+
+/* Has the frame caught up with what the panel is asking for? */
+function filterHasLanded(f) {
+  const panel = filterPatch();
+  const folderMatches = f.folder_choice === "(other)"
+    ? true : (f.subfolder || "") === panel.folder;
+  return folderMatches
+    && (f.tags_text || "") === panel.tags
+    && !!f.tags_match_all === panel.tags_match_all
+    && (f.location_contains || "") === panel.location
+    && (f.date_from_text || "") === panel.date_from
+    && (f.date_to_text || "") === panel.date_to;
+}
+
+async function previewFilter() {
+  const pill = $("#filter-count");
+  // Nothing to preview when the frame is already showing exactly this: the
+  // applied count is the better thing to be looking at.
+  if (state && filterHasLanded(state.filters || {})) return;
+  try {
+    const { matching } = await api("/api/filters/preview", {
+      method: "POST", body: JSON.stringify(filterPatch()),
+    });
+    previewing = true;
+    pill.textContent = `${fmt(matching)} would be showing`;
+    pill.className = "pill is-preview";
+  } catch (_) { /* the applied count comes back on the next state anyway */ }
+}
+
+FILTER_FIELDS().forEach((el) => {
+  el.addEventListener("change", () => applyFilter());
+  if (el.type === "text") {
+    el.addEventListener("input", () => {
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(previewFilter, 300);
+    });
+  }
+});
+
+document.querySelectorAll(".filter-quick [data-days]").forEach((button) => {
+  button.onclick = () => {
+    const from = new Date(Date.now() - button.dataset.days * 86400000);
+    applyFilter({ date_from: from.toISOString().slice(0, 10), date_to: "" });
+  };
+});
+$("#f-reset").onclick = () => applyFilter({ reset: true });
+$("#only-selected").addEventListener("change", loadLibrary);
+
+/* The panel's own contents: the folders, tags and places that exist. */
+async function loadFilterOptions() {
+  if (filterKnown) return;
+  filterKnown = true;
+  const body = await api("/api/filters");
+  const fill = (selector, rows, asOption) => {
+    const target = $(selector);
+    rows.forEach((row) => {
+      const option = document.createElement("option");
+      option.value = row.name;
+      if (asOption) option.textContent = `${row.name} (${fmt(row.count)})`;
+      target.appendChild(option);
+    });
+  };
+  fill("#f-folder", body.folders, true);
+  fill("#f-tag-list", body.tags, false);
+  fill("#f-place-list", body.locations, false);
+  showFilter(body.filters);
+}
+
+/* Filters can also be changed from Home Assistant, a key press or another
+   browser, so the panel follows the state document rather than only its own
+   last edit.  A box being typed into is left alone. */
+function showFilter(f) {
+  if (!f) return;
+  const set = (selector, value) => {
+    const el = $(selector);
+    if (el && document.activeElement !== el) el.value = value ?? "";
+  };
+  set("#f-folder", f.folder_choice === "(other)" ? "" : f.subfolder);
+  set("#f-tags", f.tags_text);
+  set("#f-place", f.location_contains);
+  set("#f-from", f.date_from_text);
+  set("#f-to", f.date_to_text);
+  const all = $("#f-tags-all");
+  if (all && document.activeElement !== all) all.checked = !!f.tags_match_all;
+  $("#filter").classList.toggle("is-active", !!f.active);
+}
+
 /* -------------------------------------------------------------- library */
 let libraryTimer = null;
 $("#search").addEventListener("input", () => {
@@ -203,9 +368,12 @@ $("#search").addEventListener("input", () => {
 $("#folder").addEventListener("change", loadLibrary);
 
 async function loadLibrary() {
+  loadFilterOptions();
   const q = $("#search").value.trim();
   const folder = $("#folder").value;
-  let photos = await api(`/api/library/photos?limit=120&q=${encodeURIComponent(q)}`);
+  const selected = $("#only-selected").checked ? "&selected=1" : "";
+  let photos = await api(
+    `/api/library/photos?limit=120&q=${encodeURIComponent(q)}${selected}`);
   if (folder) photos = photos.filter((p) => p.folder === folder);
   const grid = $("#grid");
   grid.innerHTML = "";
@@ -231,6 +399,117 @@ async function loadLibrary() {
       $("#folder").appendChild(opt);
     });
   }
+}
+
+/* -------------------------------------------------------------- removed */
+/* Nothing here deletes anything — the frame moves a picture aside and writes
+   a line about it.  This page reads those lines back, which is the whole
+   point: a folder of loose JPEGs cannot tell you why any of them is there. */
+let removedTimer = null;
+$("#removed-search").addEventListener("input", () => {
+  clearTimeout(removedTimer);
+  removedTimer = setTimeout(loadRemoved, 250);
+});
+$("#removed-restored").addEventListener("change", loadRemoved);
+
+async function loadRemoved() {
+  const withRestored = $("#removed-restored").checked;
+  const query = $("#removed-search").value.trim().toLowerCase();
+  let rows = await api(`/api/removed?include_restored=${withRestored}`);
+  if (query) {
+    rows = rows.filter((r) =>
+      [r.basename, r.title, r.caption, r.location, r.folder, (r.tags || []).join(" ")]
+        .join(" ").toLowerCase().includes(query));
+  }
+  const list = $("#removed-list");
+  list.innerHTML = "";
+  $("#removed-empty").hidden = rows.length > 0;
+  $("#removed-empty").textContent = query
+    ? "Nothing removed matches that."
+    : "Nothing has been removed.";
+  for (const r of rows) list.appendChild(removalRow(r));
+}
+
+function removalRow(r) {
+  const row = document.createElement("article");
+  row.className = "removal" + (r.restored_at ? " is-restored" : "");
+
+  const shot = r.on_disk
+    ? `<span class="shot"><img loading="lazy" alt=""
+         src="/api/removed/${encodeURIComponent(r.stored_as)}/thumb"></span>`
+    : `<span class="shot"><span class="gone">file gone</span></span>`;
+
+  /* What it was, then when it went, then where it belongs. Tags and place are
+     the two that make a picture recognisable months later, so they come before
+     the technical detail. */
+  const said = [r.title, r.location, (r.tags || []).join(", ")].filter(Boolean).join(" · ");
+  const when = r.removed_iso ? when_text(r.removed_iso) : "";
+  const by = r.source ? ` from the ${sourceName(r.source)}` : "";
+  const taken = r.taken_iso ? `taken ${r.taken_iso.slice(0, 10)}` : "date unknown";
+
+  row.innerHTML =
+    shot +
+    `<div class="what">` +
+      `<strong>${escapeHtml(r.title || r.basename)}</strong>` +
+      `<div class="line">${escapeHtml(said || taken)}${
+        said ? ` · ${escapeHtml(taken)}` : ""}${r.is_video ? " · video" : ""}</div>` +
+      `<div class="line">Removed ${escapeHtml(when)}${escapeHtml(by)}</div>` +
+      `<div class="line from" title="${escapeHtml(r.original_path)}">${
+        escapeHtml(r.original_path)}</div>` +
+      (r.restored_at
+        ? `<div class="line back">Put back ${escapeHtml(when_text(r.restored_iso))}${
+            r.restored_to !== r.original_path && r.restored_to
+              ? ` as ${escapeHtml(r.restored_to.split("/").pop())}`
+              : ""}</div>`
+        : "") +
+    `</div>` +
+    `<div class="actions"></div>`;
+
+  const img = row.querySelector("img");
+  if (img) img.onload = (e) => e.target.classList.add("ready");
+
+  if (!r.restored_at && r.on_disk) {
+    const button = document.createElement("button");
+    button.className = "btn";
+    button.textContent = "Put it back";
+    button.title = `Move it back to ${r.original_path}`;
+    button.onclick = async () => {
+      button.disabled = true;
+      button.textContent = "Putting back…";
+      try {
+        const res = await api(
+          `/api/removed/${encodeURIComponent(r.stored_as)}/restore`,
+          { method: "POST" });
+        /* It can land under a different name if something has taken the old
+           one since; saying so beats a silent surprise in the folder. */
+        if (res.moved) alert(`The original name was taken, so it went back as\n${res.path}`);
+      } catch (err) {
+        alert(`Could not put it back: ${err.message}`);
+      }
+      loadRemoved();
+    };
+    row.querySelector(".actions").appendChild(button);
+  }
+  return row;
+}
+
+function sourceName(source) {
+  return { http: "web page", mqtt: "Home Assistant", keyboard: "keyboard",
+           gpio: "button", touch: "screen", internal: "frame" }[source] || source;
+}
+
+/* "Yesterday at 14:03" beats an ISO timestamp for the question actually being
+   asked, which is "was that me, last week?" */
+function when_text(iso) {
+  if (!iso) return "";
+  const then = new Date(iso);
+  if (isNaN(then)) return iso;
+  const days = Math.floor((Date.now() - then) / 86400000);
+  const clock = then.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (days <= 0) return `today at ${clock}`;
+  if (days === 1) return `yesterday at ${clock}`;
+  if (days < 7) return `${days} days ago at ${clock}`;
+  return then.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
 }
 
 /* ------------------------------------------------------------- settings */

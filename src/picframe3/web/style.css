@@ -182,6 +182,10 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin-top: 6px; }
 }
 .stats dt { font-size: 12px; color: var(--muted); }
 .stats dd { margin: 2px 0 0; font-size: 17px; font-variant-numeric: tabular-nums; }
+/* A reading that wants looking at: too hot, nearly full, or a power supply
+   that cannot hold five volts. */
+.stats div.warn { border-color: var(--danger); background: var(--danger-tint); }
+.stats div.warn dd { color: var(--danger); }
 
 /* ---- library ---- */
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
@@ -213,6 +217,68 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin-top: 6px; }
   position: absolute; top: 6px; right: 6px; font-size: 10px;
   background: #000a; padding: 2px 6px; border-radius: 6px;
 }
+
+/* ---- removed ----
+   A row, not a tile.  The picture is half the point here; the other half is
+   the sentence next to it — when it went and which folder it belongs back in
+   — and that does not fit under a thumbnail. */
+.removed { display: grid; gap: 10px; }
+.removal {
+  display: grid; grid-template-columns: 96px 1fr auto; gap: 14px;
+  align-items: center; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 12px; padding: 10px;
+}
+.removal .shot {
+  width: 96px; height: 96px; border-radius: 8px; overflow: hidden;
+  background: var(--stage-bg); display: block;
+}
+.removal .shot img { width: 100%; height: 100%; object-fit: cover;
+                     display: block; opacity: 0; transition: opacity .3s; }
+.removal .shot img.ready { opacity: 1; }
+.removal .gone {
+  display: grid; place-items: center; height: 100%;
+  color: var(--faint); font-size: 11px; text-align: center; padding: 6px;
+}
+.removal .what { min-width: 0; }
+.removal .what strong { display: block; font-size: 14.5px;
+                        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.removal .what .line { color: var(--muted); font-size: 12.5px; margin-top: 3px;
+                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.removal .what .from { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                       font-size: 11.5px; color: var(--faint); }
+.removal.is-restored { opacity: .62; }
+.removal .back { font-size: 12px; color: var(--ok); }
+@media (max-width: 620px) {
+  .removal { grid-template-columns: 64px 1fr; }
+  .removal .shot { width: 64px; height: 64px; }
+  .removal .actions { grid-column: 1 / -1; }
+}
+
+/* ---- the filter panel ---- */
+.filter {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 14px; padding: 14px 16px 16px; margin: 0 0 18px;
+}
+.filter-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+.filter-head h2 { font-size: 15px; margin: 0; }
+/* Five short controls, not four wide ones and a widow on the next row. */
+.filter .form { grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
+                align-items: stretch; }
+.filter .field { background: var(--panel-2); }
+.filter .field input, .filter .field select { background: var(--input-bg); }
+.filter label.inline { margin-top: 8px; align-items: flex-start;
+                       line-height: 1.35; min-width: 0; }
+.filter-quick { display: flex; flex-wrap: wrap; align-items: center;
+                gap: 6px; margin-top: 12px; }
+.filter-quick .btn { padding: 5px 10px; font-size: 12.5px; }
+.filter-quick .muted { font-size: 12.5px; margin-right: 2px; }
+.pill {
+  font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap;
+  background: var(--tint); border-radius: 999px; padding: 3px 10px;
+}
+.pill.is-filtered { background: var(--accent); color: var(--accent-ink); }
+.pill.is-preview { background: var(--tint); color: var(--muted);
+                   outline: 1px dashed var(--line); }
 
 /* ---- settings ---- */
 .form { display: grid; gap: 12px; align-items: start;

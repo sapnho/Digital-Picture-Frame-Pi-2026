@@ -22,6 +22,7 @@ from typing import Any
 
 from ..config import MqttConfig
 from ..events import Action, Command
+from ..library.playlist import ANY_OTHER, ANYTHING
 
 _log = logging.getLogger(__name__)
 
@@ -42,6 +43,10 @@ class MqttBridge:
         self.prefix = f"{config.topic_prefix}/{config.device_id}"
         self._client = None
         self._last_payload: str | None = None
+        #: What the published picture is of.  The picture is only re-rendered
+        #: and re-sent when this changes, so a state update every second does
+        #: not put a megabyte a minute through the broker.
+        self._image_key: tuple | None = None
 
     # -- topics ------------------------------------------------------------
     @property
@@ -51,6 +56,10 @@ class MqttBridge:
     @property
     def availability_topic(self) -> str:
         return f"{self.prefix}/availability"
+
+    @property
+    def image_topic(self) -> str:
+        return f"{self.prefix}/image"
 
     @property
     def command_topic(self) -> str:
@@ -85,6 +94,7 @@ class MqttBridge:
                     keepalive=30,
                 ) as client:
                     self._client = client
+                    self._image_key = None
                     _log.info("connected to MQTT broker %s:%d",
                               self.config.host, self.config.port)
                     delay = 2.0
@@ -126,22 +136,65 @@ class MqttBridge:
             asyncio.ensure_future(self._publish_state(self._client))
 
     async def _publish_state(self, client, *, force: bool = False) -> None:
-        payload = json.dumps(self.app.state().as_dict(), default=str)
-        if not force and payload == self._last_payload:
+        state = self.app.state().as_dict()
+        payload = json.dumps(state, default=str)
+        if force or payload != self._last_payload:
+            self._last_payload = payload
+            try:
+                await client.publish(self.state_topic, payload, qos=0, retain=True)
+            except Exception as exc:  # pragma: no cover
+                _log.debug("state publish failed: %s", exc)
+        await self._publish_image(client, state.get("current") or {})
+
+    async def _publish_image(self, client, current: dict[str, Any]) -> None:
+        """Send the picture on the frame, when it is a different picture.
+
+        Retained, so Home Assistant has something to show the moment it
+        restarts rather than an empty card until the frame next moves on.  The
+        photograph itself is sent rather than a screenshot: it can be rendered
+        while the display is off, it costs the render loop nothing, and it is
+        what a dashboard is actually asking for.
+        """
+        if not self.config.publish_image:
             return
-        self._last_payload = payload
+        # Imported here rather than at the top: it reaches Pillow through the
+        # media package, and the bridge itself has no other use for either.
+        from ..media.preview import render_preview
+
+        path = current.get("path")
+        if not path:
+            return
+        key = (current.get("id"), path, current.get("mtime"))
+        if key == self._image_key:
+            return
+        # Claimed before the render rather than after: a slow picture would
+        # otherwise be started again by every state update in the meantime.
+        self._image_key = key
+        edge = max(64, int(self.config.image_width))
+        data = await asyncio.get_running_loop().run_in_executor(
+            None, render_preview, path, bool(current.get("is_video")),
+            (edge, edge), int(self.config.image_quality),
+        )
+        if data is None:
+            _log.debug("no picture could be rendered for %s", path)
+            return
         try:
-            await client.publish(self.state_topic, payload, qos=0, retain=True)
+            await client.publish(self.image_topic, data, qos=0, retain=True)
         except Exception as exc:  # pragma: no cover
-            _log.debug("state publish failed: %s", exc)
+            _log.debug("image publish failed: %s", exc)
+            self._image_key = None
 
     # -- inbound -----------------------------------------------------------
     async def _listen(self, client) -> None:
         async for message in client.messages:
             topic = str(message.topic)
-            payload = message.payload.decode("utf-8", "replace").strip()
-            if topic.endswith("/state") or topic.endswith("/availability"):
+            # The frame is subscribed to its own prefix, so it hears everything
+            # it publishes.  ``/image`` is skipped before the payload is even
+            # decoded: it is a JPEG, and turning a megabyte of it into a string
+            # on every picture change would be pure waste.
+            if topic.endswith(("/state", "/availability", "/image")):
                 continue
+            payload = message.payload.decode("utf-8", "replace").strip()
             try:
                 await self._dispatch(topic, payload)
             except Exception:
@@ -190,6 +243,19 @@ class MqttBridge:
             self.app.bus.submit(Command(
                 Action.SET_CONFIG, {"key": "library.subfolder", "value": payload},
                 source="mqtt"))
+        elif name in self.FILTER_TOPICS:
+            # One box per filter, and each one sends only itself: the frame
+            # merges it into the filter already in force rather than replacing
+            # it, so typing a place name does not wipe the date range.
+            field = self.FILTER_TOPICS[name]
+            value: Any = payload
+            if field == "tags_match_all":
+                value = low in ("on", "true", "1")
+            self.app.bus.submit(Command(
+                Action.SET_FILTERS, {field: value}, source="mqtt"))
+        elif name == "clear_filters":
+            self.app.bus.submit(Command(
+                Action.SET_FILTERS, {"reset": True}, source="mqtt"))
         else:
             _log.debug("unhandled MQTT topic %s", topic)
 
@@ -207,14 +273,215 @@ class MqttBridge:
                                  f"{self.app.config.http.port}/",
         }
 
+    def _folder_options(self) -> list[str]:
+        """The folders the dropdown offers, as the frame sees them.
+
+        Fixed when discovery is published, which is why a folder that appears
+        later shows up as "(other)" until the frame restarts -- better than a
+        select that Home Assistant logs a warning about on every update.
+        """
+        try:
+            return self.app.folder_choices()
+        except Exception:      # pragma: no cover - a frame with no index yet
+            return []
+
+    def _discovery_topic(self, component: str, object_id: str) -> str:
+        return (f"{self.config.discovery_prefix}/{component}/"
+                f"picframe3_{self.config.device_id}/{object_id}/config")
+
     async def _announce(self, client) -> None:
         entities = self.discovery_entities()
         for component, object_id, payload in entities:
-            topic = (f"{self.config.discovery_prefix}/{component}/"
-                     f"picframe3_{self.config.device_id}/{object_id}/config")
             clean = {k: v for k, v in payload.items() if v is not None}
-            await client.publish(topic, json.dumps(clean), qos=1, retain=True)
+            await client.publish(self._discovery_topic(component, object_id),
+                                 json.dumps(clean), qos=1, retain=True)
+        for component, object_id in self.retired_entities():
+            # An empty retained payload is how Home Assistant is told an entity
+            # has gone; anything else and it stays for ever, unavailable.
+            await client.publish(self._discovery_topic(component, object_id),
+                                 "", qos=1, retain=True)
         _log.info("published Home Assistant discovery for %d entities", len(entities))
+
+    def retired_entities(self) -> list[tuple[str, str]]:
+        """Entities a previous run may have announced that this one does not."""
+        announced = {(component, object_id)
+                     for component, object_id, _ in self.discovery_entities()}
+        optional = self.HEALTH_ENTITIES + self.NETWORK_ENTITIES
+        return [entity for entity in optional if entity not in announced]
+
+    #: Which filter each ``.../<name>/set`` topic writes to.  The frame's own
+    #: vocabulary is on the right; what Home Assistant calls the entity is on
+    #: the left, and the two are allowed to differ.
+    #: The three that share a name with a sensor about the picture on screen
+    #: carry a ``_filter`` suffix, because two entities of the same device may
+    #: not share an object id -- "tags" is already what this photograph is
+    #: tagged with.  The bare names are accepted too, for anyone sending MQTT
+    #: by hand.
+    FILTER_TOPICS = {
+        "folder_filter": "subfolder",
+        "folder": "subfolder",
+        "tags_filter": "tags",
+        "tags": "tags",
+        "tags_match_all": "tags_match_all",
+        "location_filter": "location",
+        "location": "location",
+        "date_from": "date_from",
+        "date_to": "date_to",
+    }
+
+    #: The diagnostic entities that exist only while health reporting is on.
+    #: Listed here as well so switching the reporting off can take them out of
+    #: Home Assistant again -- a retained discovery message nobody withdraws
+    #: leaves five sensors sitting there for ever, permanently unavailable.
+    HEALTH_ENTITIES = (("sensor", "cpu_temp"), ("sensor", "cpu_load"),
+                       ("sensor", "memory"), ("sensor", "disk_free"),
+                       ("binary_sensor", "undervoltage"))
+
+    #: The two entities that exist only while the network watcher is on.
+    NETWORK_ENTITIES = (("binary_sensor", "network"), ("sensor", "network_repairs"))
+
+    def _network_entities(self, base: dict[str, Any], uid: str
+                          ) -> list[tuple[str, str, dict[str, Any]]]:
+        """Whether the frame can reach the house, and how often it has mended itself.
+
+        Both are diagnostics rather than something to look at every day.  The
+        connectivity sensor is the honest one: it can only ever be *off* in
+        Home Assistant retrospectively, because a frame that cannot reach the
+        gateway cannot reach the broker either.  What it is really for is the
+        moment afterwards -- the frame comes back, says it was away, and the
+        repair counter says whether it needed help getting there.
+        """
+        if not self.app.config.network.enabled:
+            return []
+        return [
+            ("binary_sensor", "network", {
+                **base,
+                "name": "Network",
+                "unique_id": f"picframe3_{uid}_network",
+                # Empty, not OFF, until the first check has run: an appliance
+                # that announces itself as disconnected while it is starting up
+                # writes a false outage into the history of every frame.
+                "value_template":
+                    "{% set v = value_json.network.online | default(none) %}"
+                    "{{ '' if v is none else ('ON' if v else 'OFF') }}",
+                "payload_on": "ON", "payload_off": "OFF",
+                "device_class": "connectivity",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ value_json.network | default({}, true) | tojson }}",
+                "entity_category": "diagnostic",
+            }),
+            ("sensor", "network_repairs", {
+                **base,
+                "name": "Network repairs",
+                "unique_id": f"picframe3_{uid}_network_repairs",
+                "value_template":
+                    "{{ value_json.network.repairs | default(0, true) }}",
+                "state_class": "total_increasing",
+                "icon": "mdi:wifi-sync",
+                "entity_category": "diagnostic",
+            }),
+        ]
+
+    def _health_entities(self, base: dict[str, Any], uid: str
+                         ) -> list[tuple[str, str, dict[str, Any]]]:
+        """Temperature, load, memory, free space and the power supply.
+
+        Every one of them reads a flattened field of ``health`` rather than
+        reaching through two levels, and every one is guarded: on a machine
+        that cannot take a reading the field is ``null``, and a guarded
+        template leaves the sensor unknown instead of pushing the string
+        "None" into a numeric entity.
+        """
+        if not self.app.config.health.enabled:
+            return []
+
+        def guarded(field: str, expression: str | None = None) -> str:
+            # Falls back to an empty string, not to None: Jinja renders None as
+            # the *word* "None", which a numeric sensor rejects, while an empty
+            # payload is the one thing Home Assistant is documented to ignore --
+            # so a reading that briefly cannot be taken leaves the last known
+            # value standing instead of blanking the entity.
+            value = f"value_json.health.{field}"
+            return (f"{{{{ {expression or value} if {value} is not none "
+                    f"else '' }}}}")
+
+        return [
+            ("sensor", "cpu_temp", {
+                **base,
+                "name": "CPU temperature",
+                "unique_id": f"picframe3_{uid}_cpu_temp",
+                "value_template": guarded("cpu_temp"),
+                "device_class": "temperature",
+                "unit_of_measurement": "°C",
+                "state_class": "measurement",
+                "suggested_display_precision": 1,
+                "entity_category": "diagnostic",
+            }),
+            ("sensor", "cpu_load", {
+                **base,
+                "name": "CPU load",
+                "unique_id": f"picframe3_{uid}_cpu_load",
+                # One minute of run queue over the number of cores: a load of
+                # 4 on the Pi 5's four cores is 100 %, not 400 %.
+                "value_template": guarded("cpu_percent"),
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ value_json.health.load | default({}, true) | tojson }}",
+                "icon": "mdi:cpu-64-bit",
+                "entity_category": "diagnostic",
+            }),
+            ("sensor", "memory", {
+                **base,
+                "name": "Memory used",
+                "unique_id": f"picframe3_{uid}_memory",
+                "value_template": guarded("memory_percent"),
+                "unit_of_measurement": "%",
+                "state_class": "measurement",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ value_json.health.memory | default({}, true) | tojson }}",
+                "icon": "mdi:memory",
+                "entity_category": "diagnostic",
+            }),
+            ("sensor", "disk_free", {
+                **base,
+                "name": "Free space",
+                "unique_id": f"picframe3_{uid}_disk_free",
+                # The disk the photographs are on, which is not necessarily
+                # the root filesystem -- and the one that fills up.
+                "value_template": guarded(
+                    "disk_free", "(value_json.health.disk_free / 1073741824) | round(1)"),
+                "device_class": "data_size",
+                "unit_of_measurement": "GiB",
+                "state_class": "measurement",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ value_json.health.disk | default({}, true) | tojson }}",
+                "icon": "mdi:harddisk",
+                "entity_category": "diagnostic",
+            }),
+            ("binary_sensor", "undervoltage", {
+                **base,
+                "name": "Power supply",
+                "unique_id": f"picframe3_{uid}_undervoltage",
+                # On for a brownout happening now *and* for one that happened
+                # while nobody was watching: the flag the firmware keeps until
+                # the next reboot is the only trace of a 3am dip, and a frame
+                # that dips is a frame that will corrupt its card eventually.
+                "value_template":
+                    "{{ 'ON' if (value_json.health.undervoltage "
+                    "or value_json.health.undervoltage_since_boot) else 'OFF' }}",
+                "payload_on": "ON", "payload_off": "OFF",
+                "device_class": "problem",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ value_json.health.power | default({}, true) | tojson }}",
+                "entity_category": "diagnostic",
+            }),
+        ]
 
     def discovery_entities(self) -> list[tuple[str, str, dict[str, Any]]]:
         """Every entity the frame offers Home Assistant.
@@ -300,6 +567,18 @@ class MqttBridge:
             # picture", but attributes cannot be put on a dashboard, used in a
             # condition or spoken by a TTS automation without templating.  One
             # entity per fact is what makes those things one click each.
+            ("image", "picture", {
+                "device": device,
+                "availability_topic": self.availability_topic,
+                "qos": 1,
+                "name": "Picture",
+                "unique_id": f"picframe3_{uid}_picture",
+                "image_topic": self.image_topic,
+                "content_type": "image/jpeg",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template": "{{ value_json.current | tojson }}",
+                "icon": "mdi:image-frame",
+            }),
             ("sensor", "title", {
                 **base,
                 "name": "Title",
@@ -427,6 +706,133 @@ class MqttBridge:
                 "icon": "mdi:counter",
                 "entity_category": "diagnostic",
             }),
+            # -- the Pi itself --------------------------------------------
+            # Heat and a marginal power supply are what actually kill a frame
+            # on a wall, and both are invisible from the picture on screen.
+            *self._health_entities(base, uid),
+            *self._network_entities(base, uid),
+            # -- what has been taken out of the library ------------------
+            # Replaces the external watchdog script the pi3d frame needed to
+            # count a folder: the frame already knows, so it says so itself.
+            ("sensor", "removed", {
+                **base,
+                "name": "Pictures removed",
+                "unique_id": f"picframe3_{uid}_removed",
+                "value_template": "{{ value_json.removed.count | default(0) }}",
+                "state_class": "measurement",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ {'last': value_json.removed.last_basename, "
+                    "'last_removed': value_json.removed.last_removed_iso, "
+                    "'came_from': value_json.removed.last_folder, "
+                    "'folder': value_json.removed.folder, "
+                    "'journal': value_json.removed.journal} | tojson }}",
+                "icon": "mdi:image-off",
+            }),
+            ("sensor", "last_removed", {
+                **base,
+                "name": "Last removed",
+                "unique_id": f"picframe3_{uid}_last_removed",
+                "value_template":
+                    "{{ value_json.removed.last_basename | default('', true) }}",
+                "icon": "mdi:image-remove",
+                "entity_category": "diagnostic",
+            }),
+            # -- which pictures are in the running ------------------------
+            # picframe's Home Assistant card had these four boxes and they are
+            # the reason people put the frame in Home Assistant at all: "only
+            # the holiday pictures", "only this Christmas", said from the
+            # sofa.  Each one sends just itself; the frame merges.
+            ("select", "folder_filter", {
+                **base,
+                "name": "Folder",
+                "unique_id": f"picframe3_{uid}_folder_filter",
+                "command_topic": self.entity_topic("folder_filter"),
+                # folder_choice, not subfolder: a select warns on every state
+                # it has no option for, and the folder can also be set to a
+                # free-text fragment from the settings page.
+                "value_template":
+                    "{{ value_json.filters.folder_choice | default('', true) or '"
+                    + ANYTHING + "' }}",
+                "options": [ANYTHING, ANY_OTHER, *self._folder_options()],
+                "icon": "mdi:folder-multiple-image",
+            }),
+            ("text", "tags_filter", {
+                **base,
+                "name": "Tags filter",
+                "unique_id": f"picframe3_{uid}_tags_filter",
+                "command_topic": self.entity_topic("tags_filter"),
+                "value_template": "{{ value_json.filters.tags_text | default('', true) }}",
+                "max": 255,
+                "icon": "mdi:tag-search",
+            }),
+            ("switch", "tags_match_all", {
+                **base,
+                "name": "Match all tags",
+                "unique_id": f"picframe3_{uid}_tags_match_all",
+                "command_topic": self.entity_topic("tags_match_all"),
+                "value_template":
+                    "{{ 'ON' if value_json.filters.tags_match_all else 'OFF' }}",
+                "payload_on": "on", "payload_off": "off",
+                "state_on": "ON", "state_off": "OFF",
+                "icon": "mdi:set-center",
+                "entity_category": "config",
+            }),
+            ("text", "location_filter", {
+                **base,
+                "name": "Place filter",
+                "unique_id": f"picframe3_{uid}_location_filter",
+                "command_topic": self.entity_topic("location_filter"),
+                "value_template":
+                    "{{ value_json.filters.location_contains | default('', true) }}",
+                "max": 255,
+                "icon": "mdi:map-search",
+            }),
+            ("text", "date_from", {
+                **base,
+                "name": "Pictures from",
+                "unique_id": f"picframe3_{uid}_date_from",
+                "command_topic": self.entity_topic("date_from"),
+                "value_template":
+                    "{{ value_json.filters.date_from_text | default('', true) }}",
+                # An empty box means no limit, which is why the pattern lets
+                # the whole thing be empty rather than demanding a date.
+                "pattern": r"^(\d{4}-\d{2}-\d{2})?$",
+                "max": 10,
+                "icon": "mdi:calendar-start",
+            }),
+            ("text", "date_to", {
+                **base,
+                "name": "Pictures until",
+                "unique_id": f"picframe3_{uid}_date_to",
+                "command_topic": self.entity_topic("date_to"),
+                "value_template":
+                    "{{ value_json.filters.date_to_text | default('', true) }}",
+                "pattern": r"^(\d{4}-\d{2}-\d{2})?$",
+                "max": 10,
+                "icon": "mdi:calendar-end",
+            }),
+            ("sensor", "selected", {
+                **base,
+                "name": "Selected pictures",
+                "unique_id": f"picframe3_{uid}_selected",
+                "value_template": "{{ value_json.playlist_size | default(0) }}",
+                "state_class": "measurement",
+                # The whole filter rides along, so one card can show what the
+                # count is a count of.
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template": "{{ value_json.filters | tojson }}",
+                "icon": "mdi:image-filter-center-focus",
+            }),
+            ("binary_sensor", "filtered", {
+                **base,
+                "name": "Filter active",
+                "unique_id": f"picframe3_{uid}_filtered",
+                "value_template":
+                    "{{ 'ON' if value_json.filters.active else 'OFF' }}",
+                "payload_on": "ON", "payload_off": "OFF",
+                "icon": "mdi:filter-check",
+            }),
             ("binary_sensor", "scanning", {
                 **base,
                 "name": "Scanning",
@@ -442,6 +848,7 @@ class MqttBridge:
             ("rescan", "Rescan library", "mdi:folder-refresh"),
             ("restart", "Restart the frame", "mdi:restart"),
             ("delete", "Remove current picture", "mdi:delete"),
+            ("clear_filters", "Show everything again", "mdi:filter-remove"),
         ):
             entities.append(("button", action, {
                 "device": device,

@@ -36,12 +36,16 @@ Default `http://<frame>:9000`. Interactive documentation at `/api/docs`.
 | POST | `/api/{action}` | shorthand, e.g. `POST /api/next` |
 | GET | `/api/config` | the whole configuration |
 | PATCH | `/api/config?persist=true` | `{"slideshow.interval": 90}` |
+| GET | `/api/filters` | the filter in force, plus the folders, tags and places to choose from |
+| POST | `/api/filters` | change one or more filters; absent keys are left alone |
+| POST | `/api/filters/preview` | how many pictures a filter *would* select, applying nothing |
 | GET | `/api/library` | counts, date range, size on disk |
-| GET | `/api/library/folders`, `/api/library/tags` | with counts |
-| GET | `/api/library/photos?q=&limit=&offset=` | list or full-text search |
+| GET | `/api/library/folders`, `/api/library/tags`, `/api/library/locations` | with counts |
+| GET | `/api/library/photos?q=&limit=&offset=&selected=1` | list, full-text search, or exactly what the slideshow is drawing from |
 | GET | `/api/library/photo/{id}` | one record |
 | GET | `/api/library/photo/{id}/thumb` | JPEG thumbnail, cacheable |
 | GET | `/api/library/photo/{id}/file` | the original file |
+| GET | `/api/current?size=` | **a JPEG of the photograph on the frame right now** |
 | GET | `/api/screenshot` | **a PNG of what is on the frame's screen right now** |
 | GET | `/api/transitions` | the available transition names |
 | GET | `/api/health` | liveness, no auth |
@@ -49,12 +53,62 @@ Default `http://<frame>:9000`. Interactive documentation at `/api/docs`.
 Set `http.auth_user` and `http.auth_password` for HTTP basic auth on everything
 except `/api/health`.
 
+`/api/health` is a liveness probe and nothing more -- it answers `{"ok": true}`
+to a monitoring system without a password. What the Pi is actually doing --
+temperature, load, memory, free space, the power supply -- rides in the
+`health` block of the state document, behind whatever authentication the rest
+of the API has.
+
 The frame has no desktop and therefore no screenshot tool, so it reads its own
 framebuffer back: `/api/screenshot` draws the next frame, captures it before it
 is presented, and returns it. That is how a frame on a wall becomes something
 you can attach to a message.
 
+### Filtering
+
+Which pictures are in the running is a **patch**, not a whole filter set:
+every control surface has one text box, one dropdown, one switch, and a box
+that wiped the date range whenever somebody typed a place name into it would
+be unusable. Keys not mentioned are left as they are; `{"reset": true}` clears
+the lot.
+
+| key | |
+|---|---|
+| `folder` | any part of a path; `""` for all of them |
+| `tags` | `"holiday, france"` or `["holiday", "france"]` |
+| `tags_match_all` | `false` (any of them, the default) or `true` (all of them) |
+| `location` | any part of a place name — `France` catches every town in it |
+| `date_from`, `date_to` | `2024-07-14`, `14.07.2024`, or a Unix timestamp; `""` for no limit |
+| `min_rating` | 1–5 |
+| `search` | free text over titles, captions, tags and places |
+| `include_videos`, `include_images` | |
+| `reset` | `true` clears everything |
+
+An upper date limit means the whole of that day, not midnight at the start of
+it. The folder is also a setting (`library.subfolder`), so it survives a
+restart and the settings page always agrees with the filter panel.
+
 ```bash
+# only the holiday pictures, from this summer
+curl -XPOST http://frame.local:9000/api/filters \
+     -H 'content-type: application/json' \
+     -d '{"tags":"holiday","date_from":"2026-06-01"}'
+
+# how many would that be?  (changes nothing)
+curl -XPOST http://frame.local:9000/api/filters/preview \
+     -H 'content-type: application/json' -d '{"tags":"holiday"}'
+
+curl -XPOST http://frame.local:9000/api/filters -d '{"reset":true}' \
+     -H 'content-type: application/json'
+```
+
+`/api/current` is the other half of that pair, and the cheaper one: the
+photograph itself rather than the screen, so it is there while the display is
+off and it costs the render loop nothing. `size` is the longest edge, 64 to
+3840.
+
+```bash
+curl -o picture.jpg 'http://frame.local:9000/api/current?size=1280'
 curl -o frame.png http://frame.local:9000/api/screenshot
 curl -XPOST http://frame.local:9000/api/next
 curl -XPOST http://frame.local:9000/api/command \
@@ -72,6 +126,7 @@ Topics, with `mqtt.topic_prefix` defaulting to `picframe` and `device_id` to
 |---|---|---|
 | `picframe/picframe/state` | out, retained | the whole state as JSON |
 | `picframe/picframe/availability` | out, retained | `online` / `offline` (Last Will) |
+| `picframe/picframe/image` | out, retained | the current photograph as a JPEG |
 | `picframe/picframe/cmd` | in | an action name, or a full command as JSON |
 | `picframe/picframe/display/set` | in | `on` / `off` |
 | `picframe/picframe/brightness/set` | in | `0`–`255` |
@@ -81,6 +136,12 @@ Topics, with `mqtt.topic_prefix` defaulting to `picframe` and `device_id` to
 | `picframe/picframe/transition/set` | in | a transition name |
 | `picframe/picframe/order/set` | in | a playlist order |
 | `picframe/picframe/subfolder/set` | in | restrict to a subfolder |
+| `picframe/picframe/folder_filter/set` | in | a folder from the list, or `(all)` |
+| `picframe/picframe/tags_filter/set` | in | `holiday, france` |
+| `picframe/picframe/tags_match_all/set` | in | `on` / `off` |
+| `picframe/picframe/location_filter/set` | in | any part of a place name |
+| `picframe/picframe/date_from/set`, `…/date_to/set` | in | `2024-07-14`, or empty for no limit |
+| `picframe/picframe/clear_filters/set` | in | any payload shows everything again |
 
 State is published as **one** JSON document that every Home Assistant entity
 reads with a template, so a frame with a dozen entities still produces one
@@ -96,6 +157,12 @@ Discovered automatically under one device:
   `_restart_the_frame`, `_remove_current_picture`
 - `number.<name>_seconds_per_picture`
 - `select.<name>_transition`, `select.<name>_order`
+- `image.<name>_picture` — **the photograph on the frame**, sent as a JPEG on
+  its own topic whenever the picture changes and retained, so a dashboard shows
+  it straight after a Home Assistant restart. The photograph, not the screen:
+  no mat, no caption, and there even while the display is off. Off with
+  `mqtt.publish_image: false`; `mqtt.image_width` and `mqtt.image_quality` say
+  how large it goes over the wire
 - `sensor.<name>_current_picture` — filename, with all metadata as attributes
 - `sensor.<name>_title` — title, else caption, else filename
 - `sensor.<name>_taken` — a real `timestamp` entity, so Home Assistant can
@@ -110,9 +177,43 @@ Discovered automatically under one device:
 - `sensor.<name>_pictures_indexed`
 - `sensor.<name>_shuffle_round`, `sensor.<name>_left_in_this_round` — how far
   through the current pass over the library the frame is (diagnostic)
+**Which pictures are in the running** — the four boxes picframe's own card
+had, and the reason to put a frame in Home Assistant at all ("only the holiday
+pictures", "only this Christmas", said from the sofa). Each entity sends only
+itself and the frame merges it into the filter already in force:
+
+- `select.<name>_folder` — the folders in the library, plus `(all)`. Shows
+  `(other)` when the folder was set to a free-text fragment from the settings
+  page, rather than becoming a state the select has no option for
+- `text.<name>_tags_filter` — `holiday, france`
+- `switch.<name>_match_all_tags` — off means any of them, on means all of them
+- `text.<name>_place_filter` — any part of a place name
+- `text.<name>_pictures_from`, `text.<name>_pictures_until` — `2024-07-14`,
+  empty for no limit
+- `sensor.<name>_selected_pictures` — how many are in the running, with the
+  whole filter as attributes
+- `binary_sensor.<name>_filter_active`
+- `button.<name>_show_everything_again`
+
 - `binary_sensor.<name>_scanning`
 - `binary_sensor.<name>_restart_needed` — on when a setting has been changed
   that only a fresh process will pick up, with the list as an attribute
+
+And, while `health.enabled` is on, the Pi itself — all diagnostic:
+
+- `sensor.<name>_cpu_temperature` — °C, a real `temperature` entity
+- `sensor.<name>_cpu_load` — the one-minute load as a percentage of the cores
+  there are, with all three averages as attributes
+- `sensor.<name>_memory_used` — percent, with the byte figures as attributes
+- `sensor.<name>_free_space` — GiB free on the disk the photographs are on,
+  which is not necessarily the root filesystem
+- `binary_sensor.<name>_power_supply` — a `problem` entity, on for an
+  undervoltage happening now **and** for one the firmware recorded earlier in
+  this boot. A frame that browns out at 3am looks perfect by breakfast; the
+  flag is the only trace, and undervoltage is what corrupts SD cards
+
+Turning `health.enabled` off withdraws those five from Home Assistant rather
+than leaving them behind, permanently unavailable.
 
 All of them read one retained JSON document on `…/state`, so adding entities
 costs no extra traffic.

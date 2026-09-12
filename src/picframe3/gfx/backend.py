@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import abc
 import logging
-import os
 from dataclasses import dataclass
 
 _log = logging.getLogger(__name__)
@@ -144,14 +143,3 @@ def create_backend(
             _log.info("backend %s unavailable: %s", name, exc)
 
     raise RuntimeError("no usable display backend (" + "; ".join(errors) + ")")
-
-
-def default_device() -> str | None:
-    """Best guess at the DRM card that actually has a display attached."""
-    override = os.environ.get("PICFRAME_DRM_DEVICE")
-    if override:
-        return override
-    import glob
-
-    cards = sorted(glob.glob("/dev/dri/card*"))
-    return cards[0] if cards else None

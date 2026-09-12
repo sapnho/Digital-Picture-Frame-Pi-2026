@@ -135,3 +135,30 @@ def test_the_tiers_editor_previews_against_the_real_formatter():
 def test_the_subfolder_field_offers_the_folders_that_exist():
     assert 'case "datalist"' in APP_JS
     assert "<datalist" in APP_JS
+
+
+# -- the filter panel -------------------------------------------------------
+
+def test_the_panel_offers_every_filter_the_frame_understands():
+    for field in ("folder", "tags", "tags_match_all", "location",
+                  "date_from", "date_to"):
+        assert f'data-filter="{field}"' in HTML, field
+
+
+def test_the_panel_counts_before_it_changes_the_wall():
+    """Typing previews; leaving the box applies.  Applying on every keystroke
+    would send the picture on the wall somewhere new letter by letter."""
+    assert "/api/filters/preview" in APP_JS
+    assert "previewFilter" in APP_JS and "applyFilter" in APP_JS
+
+
+def test_the_panel_follows_a_filter_set_from_somewhere_else():
+    """Home Assistant, a phone, a second tab: the panel reads the state
+    document rather than only its own last edit."""
+    assert "showFilter(filters)" in APP_JS
+    assert "state.filters" in APP_JS
+
+
+def test_the_dropdowns_are_filled_from_the_library():
+    assert "/api/filters" in APP_JS
+    assert 'id="f-tag-list"' in HTML and 'id="f-place-list"' in HTML

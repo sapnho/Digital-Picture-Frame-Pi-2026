@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 import uuid
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from .db import Library, Record
@@ -36,6 +38,85 @@ _log = logging.getLogger(__name__)
 ORDER_MODES = ("shuffle", "random", "date_desc", "date_asc", "name", "folder",
                "recent", "least_played")
 
+#: What a dropdown says when it is not narrowing anything down.  Home
+#: Assistant's select entity has no empty option, so the word has to be a real
+#: one; ``ANY_OTHER`` is what it shows when the filter was set from somewhere
+#: else to something that is not in its list.
+ANYTHING = "(all)"
+ANY_OTHER = "(other)"
+
+
+def parse_date(value: Any, *, end_of_day: bool = False) -> float | None:
+    """A date as a person writes it, as a Unix timestamp.
+
+    Four kinds of caller reach this: Home Assistant and the browser's date
+    input send ``2024-07-14``, a migrated picframe configuration may hold a
+    raw timestamp, somebody typing by hand in Germany writes ``14.07.2024``,
+    and an empty box means "no limit".  Guessing wrong here silently empties
+    the frame, so every form is understood and anything else is refused.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) or None
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            stamp = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        # A bare date as an upper limit means the whole of that day, which is
+        # what everyone expects and what midnight would quietly cut off.
+        if end_of_day:
+            stamp = stamp.replace(hour=23, minute=59, second=59)
+        return stamp.timestamp()
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        pass
+    try:
+        return float(text) or None
+    except ValueError:
+        return None
+
+
+def date_text(stamp: float | None) -> str:
+    """The other direction: what a date box should show."""
+    if not stamp:
+        return ""
+    try:
+        return datetime.fromtimestamp(stamp).strftime("%Y-%m-%d")
+    except (OSError, OverflowError, ValueError):  # pragma: no cover
+        return ""
+
+
+def split_tags(value: Any) -> list[str]:
+    """``"holiday, france"`` and ``["holiday", "france"]`` mean the same."""
+    if value is None:
+        return []
+    parts = re.split(r"[,;\n]", value) if isinstance(value, str) else [
+        str(v) for v in value]
+    out: list[str] = []
+    for part in parts:
+        tag = part.strip()
+        if tag and tag not in out:
+            out.append(tag)
+    return out
+
+
+def _truth(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "on", "true", "yes", "ja")
+    return bool(value)
+
+
+def _plain(value: Any) -> str:
+    """A dropdown's "all" or "other" is not something to search for."""
+    text = str(value or "").strip()
+    return "" if text in (ANYTHING, ANY_OTHER) else text
+
 
 @dataclass
 class Filters:
@@ -43,6 +124,10 @@ class Filters:
     tags_any: list[str] = field(default_factory=list)
     tags_all: list[str] = field(default_factory=list)
     tags_none: list[str] = field(default_factory=list)
+    #: Whether a picture has to carry *every* tag that was asked for or just
+    #: one of them.  Which of ``tags_all`` and ``tags_any`` the tags live in
+    #: follows from it, so the switch and the query can never disagree.
+    tags_match_all: bool = False
     date_from: float | None = None
     date_to: float | None = None
     min_rating: int | None = None
@@ -51,12 +136,32 @@ class Filters:
     include_videos: bool = True
     include_images: bool = True
 
+    #: What the control surfaces may call a field.  Home Assistant's entity is
+    #: "location", the old picframe card said "directory", the query says
+    #: ``location_contains`` -- one place to keep them all pointing at it.
+    ALIASES = {
+        "folder": "subfolder",
+        "directory": "subfolder",
+        "location": "location_contains",
+        "place": "location_contains",
+        "from": "date_from",
+        "to": "date_to",
+        "rating": "min_rating",
+    }
+
+    def __post_init__(self) -> None:
+        # A filter restored from an older frame, or written by hand, states
+        # which bucket it means by putting the tags in it.
+        if self.tags_all and not self.tags_any:
+            self.tags_match_all = True
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "subfolder": self.subfolder,
             "tags_any": list(self.tags_any),
             "tags_all": list(self.tags_all),
             "tags_none": list(self.tags_none),
+            "tags_match_all": self.tags_match_all,
             "date_from": self.date_from,
             "date_to": self.date_to,
             "min_rating": self.min_rating,
@@ -64,12 +169,79 @@ class Filters:
             "search": self.search,
             "include_videos": self.include_videos,
             "include_images": self.include_images,
+            # Derived, for the surfaces that cannot compute: a text box wants
+            # "holiday, france" and a date box wants "2024-07-14", and Home
+            # Assistant templates cannot do either.
+            "tags": self.tags,
+            "tags_text": ", ".join(self.tags),
+            "date_from_text": date_text(self.date_from),
+            "date_to_text": date_text(self.date_to),
+            "active": self.active,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Filters:
         known = {k: v for k, v in (data or {}).items() if k in cls.__dataclass_fields__}
         return cls(**known)
+
+    # -- the tags, as one field --------------------------------------------
+    @property
+    def tags(self) -> list[str]:
+        """The tags being filtered on, whichever way they are combined."""
+        return list(self.tags_all or self.tags_any)
+
+    def set_tags(self, value: Any, match_all: bool | None = None) -> None:
+        if match_all is not None:
+            self.tags_match_all = bool(match_all)
+        tags = split_tags(value)
+        if self.tags_match_all:
+            self.tags_all, self.tags_any = tags, []
+        else:
+            self.tags_any, self.tags_all = tags, []
+
+    # -- patching ----------------------------------------------------------
+    def merged(self, patch: dict[str, Any]) -> Filters:
+        """A copy of these filters with the keys in *patch* applied.
+
+        A patch and not a replacement, because every control surface sends one
+        field at a time: Home Assistant has a text box per filter, and a frame
+        whose location box wiped the date range whenever somebody typed in it
+        would be unusable.  Absent keys are left exactly as they were.
+        """
+        out = Filters.from_dict(self.as_dict())
+        data = {self.ALIASES.get(k, k): v for k, v in (patch or {}).items()}
+        if _truth(data.pop("reset", False)):
+            keep_videos, keep_images = out.include_videos, out.include_images
+            out = Filters(include_videos=keep_videos, include_images=keep_images)
+        if "tags_match_all" in data:
+            out.tags_match_all = _truth(data["tags_match_all"])
+            out.set_tags(out.tags)          # into the other bucket, unchanged
+        for key in ("tags_any", "tags_all", "tags_none"):
+            if key in data:
+                setattr(out, key, split_tags(data[key]))
+        if "tags" in data:
+            out.set_tags(data["tags"])
+        if "subfolder" in data:
+            out.subfolder = _plain(data["subfolder"])
+        if "location_contains" in data:
+            out.location_contains = _plain(data["location_contains"])
+        if "search" in data:
+            out.search = _plain(data["search"])
+        if "date_from" in data:
+            out.date_from = parse_date(data["date_from"])
+        if "date_to" in data:
+            out.date_to = parse_date(data["date_to"], end_of_day=True)
+        if "min_rating" in data:
+            value = data["min_rating"]
+            try:
+                rating = int(float(value)) if str(value).strip() != "" else 0
+            except (TypeError, ValueError):
+                rating = 0
+            out.min_rating = rating or None
+        for key in ("include_videos", "include_images"):
+            if key in data:
+                setattr(out, key, _truth(data[key]))
+        return out
 
     @property
     def active(self) -> bool:
@@ -79,6 +251,30 @@ class Filters:
             or self.location_contains or self.search
             or not self.include_videos or not self.include_images
         )
+
+    def describe(self) -> str:
+        """One line saying what is being shown, for a log or a status line."""
+        bits = []
+        if self.subfolder:
+            bits.append(f"folder ~ {self.subfolder}")
+        if self.tags:
+            bits.append((" and " if self.tags_match_all else " or ").join(self.tags))
+        if self.tags_none:
+            bits.append("not " + ", ".join(self.tags_none))
+        if self.location_contains:
+            bits.append(f"place ~ {self.location_contains}")
+        if self.date_from or self.date_to:
+            bits.append(f"{date_text(self.date_from) or '…'} to "
+                        f"{date_text(self.date_to) or '…'}")
+        if self.min_rating:
+            bits.append(f"{self.min_rating}+ stars")
+        if self.search:
+            bits.append(f"\u201c{self.search}\u201d")
+        if not self.include_videos:
+            bits.append("no videos")
+        if not self.include_images:
+            bits.append("videos only")
+        return "; ".join(bits) or "everything"
 
 
 class Playlist:
@@ -123,10 +319,10 @@ class Playlist:
             self._restore_position()
 
     # -- query building ----------------------------------------------------
-    def _where(self) -> tuple[str, list[Any]]:
+    def _where(self, filters: Filters | None = None) -> tuple[str, list[Any]]:
         clauses = ["f.hidden = 0"]
         params: list[Any] = []
-        f = self.filters
+        f = filters if filters is not None else self.filters
         if f.subfolder:
             clauses.append("f.folder LIKE ?")
             params.append(f"%{f.subfolder.rstrip('/')}%")
@@ -206,7 +402,7 @@ class Playlist:
             except ValueError:
                 self._pos = -1
         _log.info("playlist: %d pictures (order=%s%s)%s", len(self._ids), self.order,
-                  ", filtered" if self.filters.active else "",
+                  f", filtered: {self.filters.describe()}" if self.filters.active else "",
                   f", {len(self._ids) - self._pos - 1} left in round {self._round}"
                   if self.order == "shuffle" else "")
         return len(self._ids)
@@ -259,6 +455,31 @@ class Playlist:
         rng.shuffle(recent)
         rng.shuffle(rest)
         return recent + rest
+
+    def count_for(self, filters: Filters) -> int:
+        """How many pictures a filter would select, without applying it.
+
+        The panel counts down while you type, so nobody applies a filter to
+        the wall to discover it matches four photographs.
+        """
+        where, params = self._where(filters)
+        return self.library.connect().execute(
+            f"SELECT COUNT(*) AS n FROM files f WHERE {where}", params
+        ).fetchone()["n"]
+
+    def selection(self, limit: int = 200, offset: int = 0) -> list[int]:
+        """The ids the filter selects, newest first -- what the browser shows.
+
+        The same ``WHERE`` clause the slideshow itself runs on, so the grid
+        cannot disagree with the frame about which pictures are in.
+        """
+        where, params = self._where()
+        rows = self.library.connect().execute(
+            f"SELECT f.id FROM files f WHERE {where} "
+            f"ORDER BY COALESCE(f.taken_at, f.mtime) DESC LIMIT ? OFFSET ?",
+            [*params, int(limit), int(offset)],
+        ).fetchall()
+        return [r["id"] for r in rows]
 
     # -- navigation --------------------------------------------------------
     @property

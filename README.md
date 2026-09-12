@@ -56,12 +56,27 @@ the Pi and nothing to rebuild when Mesa updates.
 - Captions from EXIF / IPTC / XMP, reverse-geocoded place names, and a clock
 - **Video** playback with audio, hardware decoding where the Pi provides it
 - **HEIC/HEIF** (iPhone) support
+- **Filter what is shown** — by folder, tags, place and date range, from the
+  web UI or from Home Assistant, with a live count of how many pictures a
+  filter selects before it is applied
 - Web UI, REST API, server-sent events, MQTT with **Home Assistant discovery**
+- **The picture itself in Home Assistant** — the photograph on the frame is
+  published as an image entity, so a dashboard card shows what is on the wall
+  with no camera to set up and nothing shared over the network
 - **Screenshots of the frame itself** — it reads its own framebuffer back, so
   what is on the wall can be captured with `curl` or one button in the web UI
 - Keyboard, touchscreen gestures, mouse, and GPIO buttons — read from evdev, so
   they work with no desktop installed
 - Night-time screen-off and evening-dimming schedules
+- **Reports its own health** — CPU temperature, load, memory, free space and
+  the Pi's undervoltage flag, in the web UI, in `doctor`, and as diagnostic
+  sensors in Home Assistant
+- **Watches its own network** — a frame whose Wi-Fi drops keeps showing the
+  picture it already had, so nobody notices until Home Assistant has been
+  missing it for hours. picframe3 checks that it can still reach the router,
+  reports outages, and mends the link itself: reconnect first, restart
+  NetworkManager only if that was not enough, never more than once in half an
+  hour, and never a reboot
 - `picframe3 doctor` — checks the hardware, drivers, permissions and library and
   tells you the command to fix whatever is missing
 

@@ -32,6 +32,7 @@ _log = logging.getLogger(__name__)
 
 SERVICE_NAME = "picframe3@{user}.service"
 SERVICE_UNIT = "/etc/systemd/system/picframe3@.service"
+POLKIT_RULE = "/etc/polkit-1/rules.d/50-picframe3-network.rules"
 SAMBA_CONF = "/etc/samba/smb.conf"
 SAMBA_BEGIN = "# >>> picframe3 >>>"
 SAMBA_END = "# <<< picframe3 <<<"
@@ -553,7 +554,56 @@ def install_service(user: str, venv_bin: Path | None) -> bool:
     say(f"   {GREEN}✓{RESET} {name} enabled")
     note("No console autologin and no desktop session are involved: the frame "
          "takes the screen directly, so it starts before anyone logs in.")
+    install_network_rule(user)
     return True
+
+
+def install_network_rule(user: str) -> bool:
+    """Let the frame reconnect its own Wi-Fi, and nothing else.
+
+    The watchdog can always *see* that the network is gone; mending it needs
+    permission.  The unit runs with NoNewPrivileges=yes, so sudo is not an
+    option even if it were a good one -- polkit is, and a rule can be narrow in
+    a way that sudo cannot: this user, NetworkManager's own device control, and
+    restarting the one unit.  Without the rule the frame still watches and
+    still reports; only the repair goes missing, which is why a failure here is
+    a note rather than an error.
+    """
+    if shutil.which("pkaction") is None and not os.path.isdir("/etc/polkit-1"):
+        return False                       # not a polkit system; nothing to do
+    rule = _network_rule(user)
+    tmp = Path("/tmp/50-picframe3-network.rules")
+    tmp.write_text(rule, encoding="utf-8")
+    ok = run_root(["install", "-D", "-m", "0644", str(tmp), POLKIT_RULE]).returncode == 0
+    tmp.unlink(missing_ok=True)
+    if ok:
+        say(f"   {GREEN}✓{RESET} may reconnect its own Wi-Fi when it drops")
+    else:
+        say(f"{YELLOW}   ! Could not write {POLKIT_RULE}; the frame will report "
+            f"network outages but not mend them.{RESET}")
+    return ok
+
+
+def _network_rule(user: str) -> str:
+    """The polkit rule, with this frame's user written into it."""
+    return textwrap.dedent("""\
+        // Installed by picframe3.  Lets the frame mend its own network
+        // connection -- reconnect its wireless device, or restart
+        // NetworkManager -- and grants nothing else to anyone else.
+        polkit.addRule(function (action, subject) {
+            if (subject.user !== "%s") {
+                return undefined;
+            }
+            if (action.id === "org.freedesktop.NetworkManager.network-control") {
+                return polkit.Result.YES;
+            }
+            if (action.id === "org.freedesktop.systemd1.manage-units" &&
+                action.lookup("unit") === "NetworkManager.service") {
+                return polkit.Result.YES;
+            }
+            return undefined;
+        });
+        """) % user
 
 
 def _service_unit(user: str, venv_bin: Path | None) -> str:

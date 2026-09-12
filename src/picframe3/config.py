@@ -127,6 +127,11 @@ class ViewerConfig:
 
     overlay_image: str = "/dev/shm/picframe-overlay.png"
 
+    #: Shown when there is nothing to show.  Empty is the picture that ships
+    #: with the frame; a path is your own; "none" draws a plain screen with the
+    #: folders it looked in.  picframe called this model.no_files_img.
+    no_files_img: str = ""
+
 
 @dataclass
 class LibraryConfig:
@@ -177,6 +182,9 @@ class MqttConfig:
     discovery_prefix: str = "homeassistant"
     topic_prefix: str = "picframe"
     publish_interval: float = 30.0
+    publish_image: bool = True
+    image_width: int = 1280
+    image_quality: int = 82
 
 
 @dataclass
@@ -222,6 +230,55 @@ class PowerConfig:
 
 
 @dataclass
+class HealthConfig:
+    """What the frame reports about the Pi it is running on."""
+
+    #: Off removes the diagnostic sensors from Home Assistant and the line from
+    #: the web interface; nothing is measured either.
+    enabled: bool = True
+    #: Seconds between readings.  Taken on a background thread, never in the
+    #: render loop.
+    interval: float = 30.0
+    #: Which filesystem the free-space reading is about.  Empty means the first
+    #: picture folder, which is the disk that actually fills up.
+    disk_path: str = ""
+
+
+@dataclass
+class NetworkConfig:
+    """Watching the frame's own link to the house, and mending it."""
+
+    #: Off means nothing is pinged and nothing is ever restarted.
+    enabled: bool = True
+    #: What has to answer for the network to count as up.  Empty means the
+    #: default gateway, read fresh from the routing table on every check --
+    #: which is the right target in any house and needs no configuration.
+    #: Never make this an address on the internet: a frame that restarts its
+    #: Wi-Fi because a far-away server dropped a packet is worse than no
+    #: watchdog at all.
+    target: str = ""
+    #: Which interface to reconnect.  Empty means the one the default route
+    #: goes through.
+    interface: str = ""
+    #: Seconds between checks.
+    interval: float = 60.0
+    #: Ping runs, each of several packets, before one check counts as failed.
+    attempts: int = 3
+    #: Seconds to wait for a reply.
+    timeout: float = 3.0
+    #: Failed checks in a row before anything is repaired.  Three, an interval
+    #: apart, is several minutes of genuine silence -- not a lost packet.
+    failures: int = 3
+    #: False watches and reports but never touches the connection.
+    repair: bool = True
+    #: Never repair more often than this.  The single most important setting
+    #: here: without it a repair that makes the next check fail becomes a loop.
+    cooldown: float = 1800.0
+    #: Seconds to let the link settle after a repair before checking again.
+    settle: float = 45.0
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     file: str = ""
@@ -239,6 +296,8 @@ class Config:
     http: HttpConfig = field(default_factory=HttpConfig)
     input: InputConfig = field(default_factory=InputConfig)
     power: PowerConfig = field(default_factory=PowerConfig)
+    health: HealthConfig = field(default_factory=HealthConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     #: Where this config was loaded from, for ``save()``.

@@ -112,6 +112,12 @@ viewer:
                           # if this PNG exists it is drawn over the picture —
                           # a hook for weather, calendars, anything you like
 
+  no_files_img: ''        # shown when there is nothing to show
+                          #   ''     — the picture that ships with the frame
+                          #   a path — your own picture
+                          #   none   — a plain screen naming the folders it
+                          #            looked in
+
 library:
   picture_folders:
     - ~/Pictures
@@ -170,6 +176,8 @@ mqtt:
   device_id: picframe
   device_name: Picture Frame
   discovery_prefix: homeassistant
+  publish_image: true     # send the current photograph, as an image entity
+  image_width: 1280       # longest edge of it, in pixels
 
 http:
   enabled: true
@@ -189,6 +197,29 @@ power:
   enabled: true
   schedule: {}            # {all: ["22:30-07:00"]} — screen off overnight
   dim_schedule: {}        # {"19:00-22:30": 0.45} — dim in the evening
+
+# What the frame reports about the Pi itself.  Read on a background thread, so
+# a reading never interrupts a transition.
+health:
+  enabled: true
+  interval: 30            # seconds between readings
+  disk_path: ""           # empty: the free space on your first picture folder
+
+network:
+  # The frame watches its own link to the house and, if it goes, mends it.
+  # What is pinged is your router (found automatically from the routing table),
+  # never an address on the internet: a frame that restarts its Wi-Fi because a
+  # far-away server dropped a packet is worse than no watchdog at all.
+  enabled: true
+  target: ""              # empty: the default gateway, re-read on every check
+  interface: ""           # empty: whichever interface the default route uses
+  interval: 60            # seconds between checks
+  attempts: 3             # ping runs per check, before the check counts failed
+  timeout: 3              # seconds to wait for a reply
+  failures: 3             # failed checks in a row before anything is repaired
+  repair: true            # false: watch and report, never touch the connection
+  cooldown: 1800          # never mend more often than this (the safety catch)
+  settle: 45              # let the link settle this long after a repair
 
 logging:
   level: INFO             # DEBUG | INFO | WARNING | ERROR

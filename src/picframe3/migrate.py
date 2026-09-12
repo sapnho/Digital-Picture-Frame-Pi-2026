@@ -33,6 +33,7 @@ DIRECT: dict[str, str] = {
     "model.geo_key": "geo.contact",
     "model.log_level": "logging.level",
     "model.log_file": "logging.file",
+    "model.no_files_img": "viewer.no_files_img",
 
     "viewer.blur_amount": "viewer.blur_amount",
     "viewer.blur_zoom": "viewer.blur_zoom",
@@ -90,7 +91,6 @@ RETIRED: dict[str, str] = {
     "viewer.blend_type": "use slideshow.transition (blend -> fade, burn, bump)",
     "viewer.menu_text_sz": "the on-screen menu was replaced by the web UI",
     "viewer.menu_autohide_tm": "the on-screen menu was replaced by the web UI",
-    "model.no_files_img": "the empty-library screen is drawn, not loaded from a file",
     "model.image_attr": "all metadata is published; no allow-list needed",
     "model.db_file": "use library.database",
     "model.locale": "the system locale is used",

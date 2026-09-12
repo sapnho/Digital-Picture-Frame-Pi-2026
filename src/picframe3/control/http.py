@@ -9,7 +9,6 @@ so an open tab costs nothing while the frame is idle.
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import logging
 import os
@@ -121,6 +120,48 @@ class HttpServer:
             return StreamingResponse(stream(), media_type="text/event-stream",
                                      headers={"Cache-Control": "no-cache",
                                               "X-Accel-Buffering": "no"})
+
+        # -- which pictures are in the running -------------------------
+        # Declared before the /api/{action} shortcut below, which would
+        # otherwise swallow POST /api/filters and turn it into an unknown
+        # action.  FastAPI matches routes in the order they are added.
+        @api.get("/api/filters", dependencies=guard)
+        async def get_filters():
+            """The filter now in force, and everything a filter panel offers."""
+            return {
+                "filters": self.app.playlist.filters.as_dict(),
+                "matching": self.app.playlist.size,
+                "total": self.app.library.stats().get("files", 0),
+                "folders": [{"name": name, "count": count}
+                            for name, count in self._folder_counts()],
+                "tags": [{"name": t, "count": n}
+                         for t, n in self.app.library.all_tags()],
+                "locations": [{"name": p, "count": n}
+                              for p, n in self.app.library.locations()[:200]],
+            }
+
+        @api.post("/api/filters", dependencies=guard)
+        async def set_filters(body: dict | None = None):
+            """Change one or more filters.  Absent keys are left alone.
+
+            A patch rather than a whole filter set because that is what a
+            control surface actually has: one text box, one dropdown, one
+            switch.  ``{"reset": true}`` clears everything.
+            """
+            self.app.bus.submit(
+                Command(Action.SET_FILTERS, dict(body or {}), source="http"))
+            return {"ok": True}
+
+        @api.post("/api/filters/preview", dependencies=guard)
+        async def preview_filters(body: dict | None = None):
+            """How many pictures a filter *would* select, without applying it.
+
+            What lets the panel count down as you type instead of making you
+            apply a filter to find out it matches nothing.
+            """
+            trial = self.app.playlist.filters.merged(dict(body or {}))
+            return {"matching": self.app.playlist.count_for(trial),
+                    "filters": trial.as_dict()}
 
         # -- commands --------------------------------------------------
         @api.post("/api/command", dependencies=guard)
@@ -242,9 +283,28 @@ class HttpServer:
         async def tags():
             return [{"name": t, "count": n} for t, n in self.app.library.all_tags()]
 
+        @api.get("/api/library/locations", dependencies=guard)
+        async def locations():
+            return [{"name": p, "count": n} for p, n in self.app.library.locations()]
+
         @api.get("/api/library/photos", dependencies=guard)
-        async def photos(q: str = "", limit: int = Query(60, le=500), offset: int = 0):
-            if q:
+        async def photos(q: str = "", limit: int = Query(60, le=500), offset: int = 0,
+                         selected: bool = False):
+            if selected:
+                # Exactly what the slideshow is drawing from, in the same
+                # order the grid shows everything else: newest first.  A
+                # search inside the selection reads further down it before
+                # trimming, so searching does not silently look at one page.
+                reach = min(limit * 10, 2000) if q else limit
+                ids = self.app.playlist.selection(limit=reach, offset=offset)
+                records = [r for r in (self.app.library.get(i) for i in ids)
+                           if r is not None]
+                if q:
+                    needle = q.casefold()
+                    records = [r for r in records if needle in " ".join(
+                        str(x) for x in (r.basename, r.title, r.caption, r.location,
+                                         *(r.tags or ()))).casefold()][:limit]
+            elif q:
                 records = self.app.library.search(q, limit=limit)
             else:
                 records = self.app.library.query(
@@ -280,6 +340,89 @@ class HttpServer:
             if record is None or not os.path.exists(record.path):
                 raise HTTPException(404, "not found")
             return FileResponse(record.path)
+
+        # -- removed pictures ------------------------------------------
+        # The journal, not the folder listing: the folder only knows there is
+        # a file called IMG_4312.jpg, while the journal knows it was taken in
+        # Lisbon in 2019, removed on Tuesday from the web UI, and which folder
+        # it belongs back in.
+        @api.get("/api/removed", dependencies=guard)
+        async def removed(include_restored: bool = Query(False),
+                          limit: int = Query(200, le=2000)):
+            log = self.app.removals
+            if log is None:
+                return []
+            entries = log.entries(include_restored=include_restored, newest_first=True)
+            return [_removal(e, log.folder) for e in entries[:limit]]
+
+        @api.get("/api/removed/summary", dependencies=guard)
+        async def removed_summary():
+            log = self.app.removals
+            return log.summary() if log is not None else {}
+
+        @api.get("/api/removed/{stored_as}/thumb", dependencies=guard)
+        async def removed_thumb(stored_as: str):
+            entry, path = _removed_file(self.app, stored_as)
+            if entry is None or not os.path.exists(path):
+                raise HTTPException(404, "not found")
+            data = await asyncio.get_running_loop().run_in_executor(
+                None, _thumbnail, path, bool(entry.get("is_video"))
+            )
+            if data is None:
+                raise HTTPException(415, "cannot render a thumbnail for this file")
+            return Response(data, media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=86400"})
+
+        @api.get("/api/removed/{stored_as}/file", dependencies=guard)
+        async def removed_file(stored_as: str):
+            entry, path = _removed_file(self.app, stored_as)
+            if entry is None or not os.path.exists(path):
+                raise HTTPException(404, "not found")
+            return FileResponse(path)
+
+        @api.post("/api/removed/{stored_as}/restore", dependencies=guard)
+        async def restore(stored_as: str):
+            """Put it back where it came from, and say where that was."""
+            result = await self.app._restore_removed(stored_as)
+            if not result.get("ok"):
+                raise HTTPException(404, result.get("error", "cannot restore"))
+            return result
+
+        @api.get("/api/removed/journal", dependencies=guard)
+        async def removed_journal():
+            """The raw journal file, for keeping or reading elsewhere."""
+            log = self.app.removals
+            if log is None or not os.path.exists(log.path):
+                raise HTTPException(404, "nothing has been removed yet")
+            return FileResponse(log.path, media_type="application/x-ndjson",
+                                filename="removals.jsonl")
+
+        @api.get("/api/current", dependencies=guard)
+        async def current_picture(size: int = Query(1280, ge=64, le=3840)):
+            """A JPEG of the photograph that is on the frame right now.
+
+            The picture itself, not the screen -- so it is there while the
+            display is off, and a Generic Camera in Home Assistant can point at
+            it without the frame having to draw anything.  ``/api/screenshot``
+            is the other question: what the panel actually looks like.
+            """
+            from ..media.preview import render_preview
+
+            current = self.app.state().current or {}
+            path = current.get("path")
+            if not path or not os.path.exists(path):
+                raise HTTPException(404, "no picture is on the frame")
+            data = await asyncio.get_running_loop().run_in_executor(
+                None, render_preview, path, bool(current.get("is_video")),
+                (size, size), 82,
+            )
+            if data is None:
+                raise HTTPException(415, "cannot render this file as a picture")
+            return Response(data, media_type="image/jpeg", headers={
+                # The picture behind one URL changes every few minutes, so a
+                # cached copy would be the wrong one within the hour.
+                "Cache-Control": "no-store",
+            })
 
         @api.get("/api/screenshot", dependencies=guard)
         async def screenshot():
@@ -352,6 +495,16 @@ class HttpServer:
         return api
 
     # ------------------------------------------------------------------
+    def _folder_counts(self) -> list[tuple[str, int]]:
+        """The folder dropdown's options: short names, with a count each."""
+        counts: dict[str, int] = {}
+        wanted = set(self.app.folder_choices())
+        for path, count in self.app.library.folders():
+            for name in wanted:
+                if path == name or path.endswith("/" + name):
+                    counts[name] = counts.get(name, 0) + count
+        return sorted(counts.items())
+
     def _auth_dependency(self):
         if not self.config.auth_user:
             return None
@@ -413,24 +566,54 @@ def _summary(record) -> dict:
 
 
 def _thumbnail(path: str, is_video: bool) -> bytes | None:
-    try:
-        from PIL import Image, ImageOps
+    from ..media.preview import render_preview
 
-        if is_video:
-            from ..media.video import poster_frame
+    return render_preview(path, is_video, THUMB_SIZE)
 
-            image = poster_frame(path, THUMB_SIZE)
-            if image is None:
-                return None
-        else:
-            image = Image.open(path)
-            image.draft("RGB", THUMB_SIZE)        # JPEG DCT scaling: much faster
-            image = ImageOps.exif_transpose(image)
-        image = image.convert("RGB")
-        image.thumbnail(THUMB_SIZE, Image.LANCZOS)
-        buf = io.BytesIO()
-        image.save(buf, "JPEG", quality=82, optimize=True)
-        return buf.getvalue()
-    except Exception as exc:
-        _log.debug("thumbnail failed for %s: %s", path, exc)
-        return None
+
+def _removal(entry: dict, folder: str) -> dict:
+    """One journal line, shaped for the page that draws it."""
+    stored_as = entry.get("stored_as") or ""
+    return {
+        "stored_as": stored_as,
+        "basename": entry.get("basename") or stored_as,
+        "folder": entry.get("folder") or "",
+        "original_path": entry.get("original_path") or "",
+        "removed_at": entry.get("removed_at"),
+        "removed_iso": entry.get("removed_iso") or "",
+        "source": entry.get("source") or "",
+        "taken_at": entry.get("taken_at"),
+        "taken_iso": entry.get("taken_iso") or "",
+        "title": entry.get("title") or "",
+        "caption": entry.get("caption") or "",
+        "location": entry.get("location") or "",
+        "tags": entry.get("tags") or [],
+        "size": entry.get("size"),
+        "is_video": bool(entry.get("is_video")),
+        "play_count": entry.get("play_count"),
+        "restored_at": entry.get("restored_at"),
+        "restored_iso": entry.get("restored_iso") or "",
+        "restored_to": entry.get("restored_to") or "",
+        "on_disk": os.path.exists(os.path.join(folder, stored_as)) if stored_as else False,
+    }
+
+
+def _removed_file(app, stored_as: str):
+    """Resolve a journal id to a file, refusing anything outside the folder.
+
+    ``stored_as`` arrives from the URL, so ``../../etc/passwd`` has to bounce
+    off something.  basename() plus a journal lookup is that something: only
+    names the frame itself wrote can be served.
+    """
+    log = getattr(app, "removals", None)
+    if log is None:
+        return None, ""
+    name = os.path.basename(str(stored_as or ""))
+    if not name or name != stored_as:
+        return None, ""
+    entry = next(
+        (e for e in reversed(log.entries()) if e.get("stored_as") == name), None
+    )
+    if entry is None:
+        return None, ""
+    return entry, os.path.join(log.folder, name)

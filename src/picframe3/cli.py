@@ -320,6 +320,73 @@ def cmd_doctor(args) -> int:
     except Exception as exc:
         ok &= check("photo index", False, str(exc))
 
+    # -- the Pi itself
+    #
+    # Two things kill a frame on a wall: heat and a power supply that cannot
+    # hold five volts.  Both are silent -- the picture looks perfect while the
+    # card is being corrupted -- so commissioning is exactly when to look.
+    from . import health as health_module
+
+    folders = config.library.picture_folders
+    disk_path = config.health.disk_path or (folders[0] if folders else "")
+    reading = health_module.sample(disk_path)
+
+    temperature = reading["cpu_temp"]
+    if temperature is None:
+        print("   note: this machine does not report a CPU temperature")
+    else:
+        check("CPU temperature", temperature < 80.0, f"{temperature:.1f} °C",
+              "the Pi throttles from 80 °C. Give it air, or fit a heatsink or "
+              "the active cooler; a frame in a sealed box cooks itself.")
+        ok &= temperature < 80.0
+
+    power = reading["power"]
+    if power is None:
+        print("   note: power supply flags unavailable "
+              "(vcgencmd missing, or this user is not in the 'video' group)")
+    elif power.get("undervoltage") or power.get("undervoltage_since_boot"):
+        ok &= check(
+            "power supply", False,
+            "undervoltage now" if power.get("undervoltage")
+            else "undervoltage recorded since boot",
+            "use the official supply (5 V 3 A for the Pi 4, 5 V 5 A for the Pi 5) "
+            "and a short, thick cable. Undervoltage corrupts SD cards.")
+    else:
+        check("power supply", True, "no undervoltage recorded")
+
+    free = reading["disk"]
+    if free:
+        roomy = free["free"] > 512 * 1024 * 1024
+        ok &= check(f"free space on {free['path']}", roomy,
+                    f"{free['free'] / 1024 ** 3:.1f} GiB free "
+                    f"({free['used_percent']:.0f}% used)",
+                    "make room: thumbnails, the index and the journal all need "
+                    "somewhere to go.")
+
+    # -- the network the frame hangs on
+    #
+    # Commissioning is the moment to find out whether the watchdog will be able
+    # to do anything when it matters.  A frame whose gateway cannot be found,
+    # or whose polkit rule never got installed, still reports outages -- but it
+    # will sit through them, and nobody discovers that until the first one.
+    if config.network.enabled:
+        from . import network as network_module
+
+        route = network_module.default_route()
+        if route is None:
+            ok &= check("network", False, "no default route",
+                        "the frame cannot see a router. Check the Wi-Fi "
+                        "credentials, or wire it up.")
+        else:
+            gateway, iface = route
+            check("network", True, f"{gateway} via {iface}")
+            if config.network.repair:
+                rule = "/etc/polkit-1/rules.d/50-picframe3-network.rules"
+                check("may mend its own connection", os.path.exists(rule),
+                      "" if os.path.exists(rule) else "polkit rule missing",
+                      "run 'picframe3 setup' to install it, or set "
+                      "network.repair: false to watch without mending.")
+
     # -- optional services
     for module, label, extra in (
         ("fastapi", "web interface", "pip install 'picframe3[web]'"),
