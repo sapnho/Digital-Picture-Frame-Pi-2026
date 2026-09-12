@@ -1,0 +1,64 @@
+"""The Samba share config — the part that decides whether you can drop a
+photograph on the frame or merely look at the folder."""
+
+import pytest
+
+from picframe3.wizard import SAMBA_BEGIN, SAMBA_END, share_config
+
+
+def lines(**kw):
+    return share_config("Pictures", "/home/pi/Pictures", "pi", **kw).splitlines()
+
+
+def test_markers_wrap_the_block():
+    """The block is rewritten in place on every run, so it must be findable."""
+    text = share_config("Pictures", "/home/pi/Pictures", "pi", open_share=True)
+    assert text.startswith(SAMBA_BEGIN)
+    assert SAMBA_END in text
+
+
+@pytest.mark.parametrize("open_share", [True, False])
+def test_the_share_is_always_writable(open_share):
+    assert "   read only = no" in lines(open_share=open_share)
+
+
+def test_open_share_needs_no_password():
+    got = lines(open_share=True)
+    assert "   guest ok = yes" in got
+    assert "   guest only = yes" in got          # never prompt, never fail
+    assert "   map to guest = bad user" in got   # accept the anonymous session
+    assert not any("valid users" in ln for ln in got)
+
+
+def test_private_share_switches_guest_off_rather_than_ignoring_it():
+    """The regression: `guest ok` merely absent let macOS connect as Guest and
+    silently mount read-only. Guest has to be refused so Finder asks."""
+    got = lines(open_share=False)
+    assert "   guest ok = no" in got
+    assert "   map to guest = never" in got
+    assert "   valid users = pi" in got
+
+
+@pytest.mark.parametrize("open_share", [True, False])
+def test_writes_land_as_the_frames_own_user(open_share):
+    """Whoever connects, the files must be owned by the user the slideshow
+    runs as, or the frame cannot read what was just dropped in."""
+    got = lines(open_share=open_share)
+    assert "   force user = pi" in got
+    assert "   force group = pi" in got
+    assert "   force create mode = 0664" in got
+    assert "   force directory mode = 0775" in got
+
+
+def test_macos_clutter_is_kept_out_of_the_library():
+    got = lines(open_share=True)
+    veto = next(ln for ln in got if "veto files" in ln)
+    assert ".DS_Store" in veto and "._*" in veto
+    assert "   delete veto files = yes" in got
+
+
+def test_share_name_and_path_are_honoured():
+    text = share_config("Fotos", "/mnt/photos", "frame", open_share=True)
+    assert "[Fotos]" in text
+    assert "   path = /mnt/photos" in text
+    assert "   force user = frame" in text

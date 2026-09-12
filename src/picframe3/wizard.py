@@ -258,21 +258,18 @@ def setup_samba(config: Config, user: str) -> bool:
     share_name = ask("   Share name", "Pictures")
     folder = str(Path(config.library.picture_folders[0]).expanduser())
 
-    block = textwrap.dedent(f"""\
-        {SAMBA_BEGIN}
-        [{share_name}]
-           comment = picframe3 pictures
-           path = {folder}
-           browseable = yes
-           writeable = yes
-           create mask = 0664
-           directory mask = 0775
-           force user = {user}
-           vfs objects = catia fruit streams_xattr
-           fruit:metadata = stream
-           fruit:posix_rename = yes
-        {SAMBA_END}
-        """)
+    note("An open share needs no password: the frame appears in Finder and you "
+         "drag photographs onto it. Anyone on your network can then add, change "
+         "or delete them — which is usually what you want at home, and not what "
+         "you want on a shared or office network.")
+    open_share = confirm("   Open share, no password?", default=True)
+
+    # The folder must exist and belong to the user Samba acts as.
+    run_root(["mkdir", "-p", folder])
+    run_root(["chown", "-R", f"{user}:{user}", folder])
+    run_root(["chmod", "775", folder])
+
+    block = share_config(share_name, folder, user, open_share=open_share)
 
     try:
         existing = Path(SAMBA_CONF).read_text(encoding="utf-8")
@@ -292,25 +289,103 @@ def setup_samba(config: Config, user: str) -> bool:
         return False
     tmp.unlink(missing_ok=True)
 
-    say(f"   Set a password for the share (user “{user}”). It is separate from "
-        f"the login password.")
-    while True:
-        password = ask("   Share password", secret=True)
-        again = ask("   Again", secret=True)
-        if password and password == again:
-            break
-        say("   They did not match; try again.")
-    run_root(["smbpasswd", "-a", "-s", user], input_text=f"{password}\n{password}\n")
-    run_root(["systemctl", "restart", "smbd"])
-    run_root(["systemctl", "enable", "smbd"])
+    if not open_share:
+        say(f"   Set a password for the share (user “{user}”). It is separate "
+            f"from the login password.")
+        while True:
+            password = ask("   Share password", secret=True)
+            again = ask("   Again", secret=True)
+            if password and password == again:
+                break
+            say("   They did not match; try again.")
+        run_root(["smbpasswd", "-a", "-s", user], input_text=f"{password}\n{password}\n")
+        run_root(["smbpasswd", "-e", user])
+        accounts = run_root(["pdbedit", "-L"]).stdout or ""
+        if user not in accounts:
+            say(f"{YELLOW}   ! The Samba account for {user} was not created; "
+                f"run 'sudo smbpasswd -a {user}' by hand.{RESET}")
 
+    # Ask Samba's own parser rather than hoping: a share nobody can write to
+    # looks identical to a working one until you drag a file onto it.
+    check = run_root(["testparm", "-s"])
+    if check.returncode != 0:
+        detail = (check.stderr or check.stdout).strip().splitlines()
+        say(f"{YELLOW}   ! Samba rejected the configuration:{RESET}")
+        say("     " + (detail[-1][:160] if detail else "see testparm"))
+        return False
+
+    run_root(["systemctl", "enable", "smbd"])
+    run_root(["systemctl", "restart", "smbd"])
     advertise_share()
 
     host = socket.gethostname()
     say(f"   {GREEN}✓{RESET} Share ready:")
     say(f"       macOS    smb://{host}.local/{share_name}")
     say(f"       Windows  \\\\{host}\\{share_name}")
+    if open_share:
+        note("No password: connect as Guest and drag photographs straight in. "
+             "If Finder still says read-only, eject the share and reconnect — "
+             "it caches the old session.")
+    else:
+        note(f"Sign in as “{user}” with the password you just set.")
     return True
+
+
+def share_config(share_name: str, folder: str, user: str, *,
+                 open_share: bool) -> str:
+    """The smb.conf block for the picture share.
+
+    Two shapes, and the difference is the whole bug report:
+
+    *open* -- `guest only` skips authentication and `force user` makes every
+    write land as the frame's own user. No password, anyone on the network can
+    drop photographs in.
+
+    *private* -- guest must be switched **off**, not merely unused. Left on,
+    Debian's `map to guest = bad user` turns an anonymous connection into the
+    `nobody` account without ever prompting, so macOS quietly connects as Guest
+    and the share opens read-only with nothing to explain why.
+    """
+    if open_share:
+        access = [
+            "   read only = no",
+            "   guest ok = yes",
+            "   guest only = yes",
+            f"   force user = {user}",
+            f"   force group = {user}",
+        ]
+        guest_policy = "   map to guest = bad user"
+    else:
+        access = [
+            "   read only = no",
+            "   guest ok = no",
+            f"   valid users = {user}",
+            f"   force user = {user}",
+            f"   force group = {user}",
+        ]
+        guest_policy = "   map to guest = never"
+
+    lines = [
+        SAMBA_BEGIN,
+        "[global]",
+        guest_policy,
+        "   server min protocol = SMB2",
+        "",
+        f"[{share_name}]",
+        "   comment = picframe3 pictures",
+        f"   path = {folder}",
+        "   browseable = yes",
+        *access,
+        "   create mask = 0664",
+        "   force create mode = 0664",
+        "   directory mask = 0775",
+        "   force directory mode = 0775",
+        "   veto files = /._*/.DS_Store/.Spotlight-V100/.TemporaryItems/.Trashes/",
+        "   delete veto files = yes",
+        SAMBA_END,
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def advertise_share() -> bool:
