@@ -65,11 +65,20 @@ class SlideshowConfig:
     video_max_seconds: float = 0.0        # 0 = play to the end
     kenburns: bool = False
     kenburns_zoom: float = 1.12
+    #: Which transitions ``transition: random`` may draw from.  Empty means the
+    #: standard pool; name a few to keep only the ones you like.
+    transition_choices: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ViewerConfig:
     fit: str = "auto"                     # auto | cover | contain | blur | mat
+    #: What ``fit: auto`` may do with a picture whose shape does not match the
+    #: panel.  One name treats every such picture the same; several means "pick
+    #: one of these", chosen from the file path so a given photograph always
+    #: looks the same.  A picture that already matches the panel is shown edge
+    #: to edge whatever is listed here, because that crops nothing.
+    fit_choices: list[str] = field(default_factory=lambda: ["mat"])
     blur_amount: float = 20.0
     blur_zoom: float = 1.06
     blur_dim: float = 0.55
@@ -140,6 +149,10 @@ class GeoConfig:
     contact: str = ""                     # required by the Nominatim usage policy
     language: str = "en"
     cache: str = "~/.local/share/picframe3/geocache.db3"
+    #: How much of the address to write. A preset name, or "custom" to use
+    #: the key_order list below verbatim.
+    detail: str = "full"
+    #: Names never to show — your own country, say, or a county nobody uses.
     suppress: list[str] = field(default_factory=list)
     key_order: list[list[str]] = field(default_factory=lambda: [
         ["tourism", "attraction", "amenity", "isolated_dwelling"],

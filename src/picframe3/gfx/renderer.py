@@ -133,6 +133,8 @@ class Renderer:
         self.background = tuple(background)
         self.transition_name = transition
         self.transition_time = transition_time
+        #: What ``transition: random`` draws from.  None = the standard pool.
+        self.transition_pool: tuple[str, ...] | None = None
         self.brightness = 1.0
         self._rotate = 0
 
@@ -205,7 +207,7 @@ class Renderer:
         """Start a transition from whatever is on screen to ``slide``."""
         name = transition or self.transition_name
         if name == "random":
-            name = random.choice(transitions.RANDOM_POOL)
+            name = random.choice(self.transition_pool or transitions.RANDOM_POOL)
         if name not in transitions.TRANSITIONS:
             _log.warning("unknown transition %r; using fade", name)
             name = "fade"

@@ -39,6 +39,8 @@ slideshow:
   portrait_pairs: false   # show two upright photos side by side
   kenburns: false         # slow pan and zoom
   kenburns_zoom: 1.12
+  transition_choices: []  # which transitions "random" may use;
+                          # [] means the standard pool. e.g. [fade, dissolve, blur]
   video_mute: true
   video_loop: false
   video_max_seconds: 0    # 0 = play each video to the end
@@ -50,6 +52,12 @@ viewer:
                           #   contain — letterbox on the background colour
                           #   blur  — letterbox on a blurred copy of the picture
                           #   mat   — always frame it in a passepartout
+  fit_choices: [mat]      # what "auto" may do with a picture that does NOT
+                          # match the screen: any of mat, blur, contain, cover.
+                          # Several means "pick one of these", chosen from the
+                          # file path so a photograph always looks the same.
+                          # A picture that already matches the screen is shown
+                          # edge to edge regardless — that crops nothing.
   mat_style: single       # single | single_bevel | double | double_bevel |
                           # float | float_shadow | float_wrap | polaroid
                           # "random" or "" for any; several names separated by
@@ -122,7 +130,28 @@ geo:
   contact: ""             # REQUIRED when enabled: your email address.
                           # Nominatim's usage policy needs a way to reach you.
   language: en
-  suppress: []            # strings to drop from the resulting place name
+  detail: full            # how much of the address a caption shows:
+                          #   full                 Plage de Hattainville,
+                          #                        Hattainville, Cherbourg,
+                          #                        Normandy, France
+                          #   town_region_country  Hattainville, Normandy, France
+                          #   town_country         Hattainville, France
+                          #   town                 Hattainville
+                          #   region_country       Normandy, France
+                          #   country              France
+                          #   custom               use key_order below verbatim
+                          # Changing this rewrites the place names already in
+                          # the index, from the geocache — no new lookups.
+  suppress: []            # place names never to show, e.g. ["France"]
+  key_order:              # only used when detail is "custom".
+                          # One tier per line; within a tier the first key
+                          # Nominatim returned wins, which is what makes one
+                          # setting behave the same in France and in Germany.
+    - [tourism, attraction, amenity, isolated_dwelling]
+    - [neighbourhood, suburb, village, town]
+    - [city, municipality, county]
+    - [state, province, region]
+    - [country]
 
 mqtt:
   enabled: false

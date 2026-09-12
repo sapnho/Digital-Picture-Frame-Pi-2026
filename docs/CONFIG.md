@@ -45,6 +45,7 @@ Pacing and sequencing: how long each picture stays, how it changes, what comes n
 | `video_max_seconds` | number | `0.0` | 0 plays each video to the end. |
 | `kenburns` | boolean | `False` |  |
 | `kenburns_zoom` | number | `1.12` |  |
+| `transition_choices` | list of strings | `[]` | Which transitions `transition: random` may draw from. Empty means the standard pool. Ticked in the Settings tab. |
 
 ## `viewer`
 
@@ -53,6 +54,7 @@ How a picture is composed on screen, and what is written over it.
 | key | type | default | |
 |---|---|---|---|
 | `fit` | string | `'auto'` | auto · cover · contain · blur · mat |
+| `fit_choices` | list of strings | `['mat']` | What `fit: auto` may do with a picture whose shape does not match the panel: any of mat, blur, contain, cover. Several means "pick one of these", chosen from the file path so a given photograph always looks the same. A picture that already matches the panel is shown edge to edge regardless, because that crops nothing. |
 | `blur_amount` | number | `20.0` |  |
 | `blur_zoom` | number | `1.06` |  |
 | `blur_dim` | number | `0.55` |  |
@@ -115,8 +117,9 @@ Turning GPS coordinates into place names for captions.
 | `contact` | string | *(empty)* | **Required when `enabled`.** Nominatim's usage policy needs a contact address. |
 | `language` | string | `'en'` |  |
 | `cache` | string | `'~/.local/share/picframe3/geocache.db3'` |  |
-| `suppress` | list of strings | `[]` |  |
-| `key_order` | list[list[str]] | `[['tourism', 'attraction', 'amenity', 'isolated_dwelling'], ['neighbourhood', 'suburb', 'village', 'town'], ['city', 'municipality', 'county'], ['state', 'province', 'region'], ['country']]` |  |
+| `detail` | string | `'full'` | How much of an address a caption shows: full · town_region_country · town_country · town · region_country · country · custom (uses `key_order` below). |
+| `suppress` | list of strings | `[]` | Place names never to show — your own country, say. |
+| `key_order` | list[list[str]] | `[['tourism', 'attraction', 'amenity', 'isolated_dwelling'], ['neighbourhood', 'suburb', 'village', 'town'], ['city', 'municipality', 'county'], ['state', 'province', 'region'], ['country']]` | Only used when `detail` is `custom`. One tier per line; within a tier the first key Nominatim returned wins, which is what makes one setting behave the same in France and in Germany. |
 
 ## `mqtt`
 

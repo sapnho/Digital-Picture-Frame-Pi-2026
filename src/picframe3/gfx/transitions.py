@@ -11,6 +11,11 @@ adding one string here; nothing else in the renderer has to change.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
+
+_log = logging.getLogger(__name__)
+
 VERTEX_SHADER = """#version 300 es
 in vec2 a_pos;
 out vec2 v_uv;
@@ -227,6 +232,21 @@ vec4 pf_transition(vec2 uv, float p) {
 #: Reasonable pool for ``transition: random``.
 RANDOM_POOL = ("fade", "dissolve", "zoom", "blur", "push_left", "push_up",
                "wipe_left", "wipe_up", "radial")
+
+
+def resolve_pool(choices: Sequence[str] | None) -> tuple[str, ...]:
+    """The transitions ``random`` may pick from.
+
+    Unknown names are dropped with a warning rather than raised: a
+    configuration that survives a renamed transition is worth more than one
+    that refuses to start over a typo in a list of decorations.
+    """
+    wanted = tuple(name for name in (choices or ()) if name in TRANSITIONS)
+    unknown = [name for name in (choices or ()) if name not in TRANSITIONS]
+    if unknown:
+        _log.warning("unknown transition(s) %s; ignoring them", ", ".join(unknown))
+    return wanted or RANDOM_POOL
+
 
 
 def fragment_source(name: str) -> str:

@@ -9,6 +9,7 @@ refresh on a Pi 4 while still using LANCZOS resampling and real Gaussian blur.
 from __future__ import annotations
 
 import logging
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -23,6 +24,9 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True        # a damaged JPEG must not stall th
 
 FIT_MODES = ("cover", "contain", "blur", "mat", "auto")
 
+#: What ``auto`` may choose between for a picture that does not match the panel.
+AUTO_FITS = ("mat", "blur", "contain", "cover")
+
 
 @dataclass
 class PrepareOptions:
@@ -35,6 +39,8 @@ class PrepareOptions:
     portrait_pairs: bool = False
     kenburns_headroom: float = 1.0    # render larger than the screen for panning
     upscale_limit: float = 2.5        # never enlarge a small image more than this
+    #: What ``fit="auto"`` may do with a picture that does not match the panel.
+    fit_choices: tuple[str, ...] = ("mat",)
 
     def __post_init__(self) -> None:
         if self.mat_style is None:
@@ -129,6 +135,21 @@ def pair_portraits(a: Image.Image, b: Image.Image, gap: int = 12,
     return canvas
 
 
+def pick_auto_fit(choices: Sequence[str], seed: str = "") -> str:
+    """Which treatment ``auto`` gives one mismatched picture.
+
+    Seeded from the file path rather than left to chance, so a given
+    photograph always comes up looking the same -- a frame that showed the
+    same picture matted one day and blurred the next would read as a fault.
+    """
+    wanted = [c for c in (choices or ()) if c in AUTO_FITS]
+    if not wanted:
+        return "mat"
+    if len(wanted) == 1:
+        return wanted[0]
+    return random.Random(seed).choice(wanted)
+
+
 def prepare(
     metas: Sequence[PhotoMeta],
     screen_size: tuple[int, int],
@@ -159,9 +180,12 @@ def prepare(
     style = opts.mat_style
     fit = opts.fit
     if fit == "auto":
-        fit = "mat" if mat_module.should_mat(
-            loaded[0].size, target, style.tolerance
-        ) else "cover"
+        if mat_module.should_mat(loaded[0].size, target, style.tolerance):
+            fit = pick_auto_fit(opts.fit_choices, metas[0].path if metas else "")
+        else:
+            # Already the panel's shape: filling the screen crops nothing, so
+            # there is no treatment to choose between.
+            fit = "cover"
 
     if len(loaded) > 1 and fit != "mat":
         merged = pair_portraits(loaded[0], loaded[1], background=opts.background)

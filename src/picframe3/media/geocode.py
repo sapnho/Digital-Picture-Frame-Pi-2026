@@ -28,6 +28,59 @@ DEFAULT_KEY_ORDER: tuple[tuple[str, ...], ...] = (
     ("country",),
 )
 
+#: Ready-made answers to "how much of the address do you want?".
+#:
+#: Nominatim returns a dozen or more address keys and which ones exist varies
+#: wildly by country -- a French hamlet has ``village``, a German one
+#: ``isolated_dwelling``, a US address neither.  That is why each tier is a
+#: *list* of keys and the first one present wins: it is what makes one setting
+#: behave the same in Normandy and in Hessen.
+DETAIL_PRESETS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "full": DEFAULT_KEY_ORDER,
+    "town_region_country": (
+        ("village", "town", "city", "municipality", "suburb", "neighbourhood"),
+        ("state", "province", "region"),
+        ("country",),
+    ),
+    "town_country": (
+        ("village", "town", "city", "municipality", "suburb", "neighbourhood"),
+        ("country",),
+    ),
+    "town": (
+        ("village", "town", "city", "municipality", "suburb", "neighbourhood"),
+    ),
+    "region_country": (
+        ("state", "province", "region"),
+        ("country",),
+    ),
+    "country": (("country",),),
+}
+
+#: What the settings page calls them.
+DETAIL_LABELS = {
+    "full": "Everything — landmark, town, region, country",
+    "town_region_country": "Town, region, country",
+    "town_country": "Town, country",
+    "town": "Town only",
+    "region_country": "Region and country",
+    "country": "Country only",
+    "custom": "Custom — the geo.key_order list in the config file",
+}
+
+
+def key_order_for(detail: str, custom: Sequence[Sequence[str]] | None = None
+                  ) -> tuple[tuple[str, ...], ...]:
+    """The tiers to use, from a preset name or the hand-written list."""
+    name = (detail or "full").strip().lower()
+    if name == "custom":
+        return tuple(tuple(tier) for tier in (custom or DEFAULT_KEY_ORDER))
+    preset = DETAIL_PRESETS.get(name)
+    if preset is None:
+        _log.warning("unknown geo.detail %r; using 'full'", detail)
+        return DEFAULT_KEY_ORDER
+    return preset
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS geocache (
     key      TEXT PRIMARY KEY,
@@ -135,6 +188,12 @@ class Geocoder:
         for bad in self.suppress:
             parts = [p for p in parts if p != bad]
         return ", ".join(parts) or None
+
+    def set_style(self, key_order: Sequence[Sequence[str]],
+                  suppress: Sequence[str] = ()) -> None:
+        """Change the wording of place names without touching the cache."""
+        self.key_order = [tuple(k) for k in key_order]
+        self.suppress = [s for s in suppress if s]
 
     def close(self) -> None:
         try:

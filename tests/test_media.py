@@ -197,3 +197,43 @@ def test_prepare_records_how_the_picture_was_laid_out(tmp_path):
     out = prepare.prepare([PhotoMeta(path=str(portrait), width=900, height=1200)],
                           (1280, 720), prepare.PrepareOptions(fit="auto"))
     assert out.info["picframe3_fit"] == "mat"
+
+
+# -- choosing between treatments -------------------------------------------
+
+def test_auto_picks_only_from_the_allowed_fits(tmp_path):
+    """Untick "cover" in the settings and nothing is ever cropped."""
+    path = tmp_path / "p.jpg"
+    _photo(900, 1200).save(path)
+    meta = PhotoMeta(path=str(path), width=900, height=1200)
+    for allowed in (["mat"], ["blur"], ["contain"], ["mat", "blur"]):
+        out = prepare.prepare([meta], (1280, 720),
+                              prepare.PrepareOptions(fit="auto",
+                                                     fit_choices=tuple(allowed)))
+        assert out.info["picframe3_fit"] in allowed, allowed
+
+
+def test_a_picture_that_already_fits_is_never_given_a_mat(tmp_path):
+    """Whatever is ticked: filling the screen crops nothing here."""
+    path = tmp_path / "wide.jpg"
+    _photo(1600, 900).save(path)
+    meta = PhotoMeta(path=str(path), width=1600, height=900)
+    out = prepare.prepare([meta], (1280, 720),
+                          prepare.PrepareOptions(fit="auto", fit_choices=("mat",)))
+    assert out.info["picframe3_fit"] == "cover"
+
+
+def test_the_same_photograph_always_gets_the_same_treatment():
+    """A frame that matted a picture yesterday and blurred it today reads as a
+    fault, so the choice is seeded from the file path, not left to chance."""
+    picks = {prepare.pick_auto_fit(("mat", "blur", "contain"), "/photos/a.jpg")
+             for _ in range(20)}
+    assert len(picks) == 1
+    spread = {prepare.pick_auto_fit(("mat", "blur", "contain"), f"/photos/{i}.jpg")
+              for i in range(40)}
+    assert len(spread) > 1, "every picture got the same treatment"
+
+
+def test_an_empty_or_nonsense_list_falls_back_to_a_mat():
+    assert prepare.pick_auto_fit((), "x") == "mat"
+    assert prepare.pick_auto_fit(("nonsense",), "x") == "mat"

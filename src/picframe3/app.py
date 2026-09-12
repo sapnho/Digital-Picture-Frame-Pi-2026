@@ -14,13 +14,14 @@ from . import __version__
 from .config import Config
 from .control.power import BacklightControl, PowerSchedule
 from .events import Action, Bus, Command, State
-from .gfx import Renderer, Slide, Texture, create_backend
+from .gfx import Renderer, Slide, Texture, create_backend, transitions
 from .gfx import overlays as overlay_builders
 from .gfx.textstyle import TextStyle
 from .library.db import Library, Record
 from .library.playlist import Filters, Playlist
 from .library.scanner import Scanner
 from .media import PrepareOptions, SlideLoader, placeholder
+from .media import geocode as geocode_module
 from .media.geocode import Geocoder
 from .media.mat import MatStyle
 
@@ -96,6 +97,8 @@ class PicFrame:
         )
         self.renderer.brightness = cfg.display.brightness
         self.renderer.rotate = cfg.display.rotate
+        self.renderer.transition_pool = transitions.resolve_pool(
+            cfg.slideshow.transition_choices)
 
         self.library = Library(cfg.library.database)
         if cfg.geo.enabled:
@@ -103,7 +106,7 @@ class PicFrame:
                 os.path.expanduser(cfg.geo.cache),
                 contact=cfg.geo.contact,
                 enabled=cfg.geo.enabled,
-                key_order=cfg.geo.key_order,
+                key_order=geocode_module.key_order_for(cfg.geo.detail, cfg.geo.key_order),
                 suppress=cfg.geo.suppress,
                 language=cfg.geo.language,
             )
@@ -138,6 +141,7 @@ class PicFrame:
         v = self.config.viewer
         return PrepareOptions(
             fit=v.fit,
+            fit_choices=tuple(v.fit_choices or ("mat",)),
             background=tuple(int(c * 255) for c in self.config.display.background[:3]),
             blur_amount=v.blur_amount,
             blur_zoom=v.blur_zoom,
@@ -405,6 +409,34 @@ class PicFrame:
             _log.debug("could not resolve a place name: %s", exc)
         finally:
             self._location_pending.discard(record.id)
+
+    def _restyle_locations(self) -> None:
+        """Rewrite every place name after the wording settings change.
+
+        The geocache holds Nominatim's raw replies, so this is a pass over the
+        index and the cache with no network at all -- which is the whole point
+        of caching the reply rather than the formatted string.
+        """
+        if self.geocoder is None:
+            return
+        cfg = self.config.geo
+        self.geocoder.set_style(
+            geocode_module.key_order_for(cfg.detail, cfg.key_order), cfg.suppress)
+        changed = 0
+        for file_id, lat, lon in self.library.with_position():
+            name = self.geocoder.lookup(lat, lon, cached_only=True)
+            record = self.library.get(file_id)
+            if record is not None and (record.location or "") != (name or ""):
+                self.library.set_location(file_id, name)
+                changed += 1
+        _log.info("place names rewritten as %r (%d changed)", cfg.detail, changed)
+        if self.current:
+            for record in self.current:
+                fresh = self.library.get(record.id)
+                if fresh is not None:
+                    record.location = fresh.location
+            self._build_info_overlay(self.current)
+            self._dirty = True
 
     def _slide_duration(self, group: list[Record]) -> float:
         base = float(self.config.slideshow.interval)
@@ -712,11 +744,15 @@ class PicFrame:
         elif section == "slideshow":
             self.renderer.transition_name = self.config.slideshow.transition
             self.renderer.transition_time = self.config.slideshow.transition_time
+            self.renderer.transition_pool = transitions.resolve_pool(
+                self.config.slideshow.transition_choices)
             self.playlist.portrait_pairs = self.config.slideshow.portrait_pairs
             self.playlist.recent_days = self.config.slideshow.recent_days
             if key.endswith("order"):
                 self.playlist.set_order(self.config.slideshow.order)
             self.loader.options = self._prepare_options()
+        elif section == "geo":
+            self._restyle_locations()
         elif section == "display" and key.endswith("brightness"):
             self.set_brightness(self.config.display.brightness)
         elif section == "display" and key.endswith("rotate"):
@@ -745,6 +781,8 @@ class PicFrame:
         self.power = PowerSchedule(fresh.power.schedule, fresh.power.dim_schedule)
         self.renderer.transition_name = fresh.slideshow.transition
         self.renderer.transition_time = fresh.slideshow.transition_time
+        self.renderer.transition_pool = transitions.resolve_pool(
+            fresh.slideshow.transition_choices)
         self._clock_minute = None
         self._dirty = True
         _log.info("configuration reloaded")

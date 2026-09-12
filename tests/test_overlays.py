@@ -119,3 +119,36 @@ def test_the_separator_is_configurable():
     stacked = overlays.info_bar(["Lunch", "Carteret"], SCREEN, style, separator="\n")
     assert stacked.image.height > one_line.image.height, \
         "a newline separator should put each element on its own line"
+
+
+# -- place names -----------------------------------------------------------
+
+def test_place_name_detail_presets():
+    """How much of an address a caption shows is a setting, not a constant."""
+    from picframe3.media import geocode
+
+    address = {"tourism": "Plage de Hattainville", "village": "Hattainville",
+               "county": "Cherbourg", "state": "Normandy", "country": "France"}
+
+    def render(detail, suppress=()):
+        coder = geocode.Geocoder.__new__(geocode.Geocoder)
+        coder.key_order = list(geocode.key_order_for(detail))
+        coder.suppress = list(suppress)
+        return coder._format(address)
+
+    assert render("full") == ("Plage de Hattainville, Hattainville, "
+                              "Cherbourg, Normandy, France")
+    assert render("town_region_country") == "Hattainville, Normandy, France"
+    assert render("town_country") == "Hattainville, France"
+    assert render("town") == "Hattainville"
+    assert render("region_country") == "Normandy, France"
+    assert render("country") == "France"
+    assert render("town_country", suppress=["France"]) == "Hattainville"
+    assert render("nonsense-preset") == render("full"), "a typo must not blank the caption"
+
+
+def test_every_offered_place_name_preset_resolves():
+    from picframe3.media import geocode
+
+    for name in geocode.DETAIL_LABELS:
+        assert geocode.key_order_for(name), name

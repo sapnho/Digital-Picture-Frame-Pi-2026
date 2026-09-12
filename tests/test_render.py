@@ -165,3 +165,16 @@ def test_es_version_gate():
     assert gl.es_version_ok("OpenGL ES 3.1 Mesa 23.2.1")
     assert not gl.es_version_ok("OpenGL ES 2.0 Mesa 20.3.5")
     assert not gl.es_version_ok("")
+
+
+def test_random_transitions_come_only_from_the_chosen_pool():
+    """Untick the ones you dislike and they never come up again."""
+    from picframe3.gfx import transitions
+
+    assert transitions.resolve_pool(["fade", "zoom"]) == ("fade", "zoom")
+    assert transitions.resolve_pool([]) == transitions.RANDOM_POOL
+    assert transitions.resolve_pool(None) == transitions.RANDOM_POOL
+    # A renamed or mistyped transition must not stop the frame starting.
+    assert transitions.resolve_pool(["fade", "not_a_transition"]) == ("fade",)
+    assert transitions.resolve_pool(["not_a_transition"]) == transitions.RANDOM_POOL
+    assert set(transitions.RANDOM_POOL) <= set(transitions.TRANSITIONS)

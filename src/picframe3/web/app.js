@@ -235,11 +235,13 @@ async function loadLibrary() {
 const FIELDS = [
   ["slideshow.interval", "Seconds per picture", "number"],
   ["slideshow.transition", "Transition", "transition"],
+  ["slideshow.transition_choices", "Transitions \"random\" may use (none ticked = all)", "transitions"],
   ["slideshow.transition_time", "Transition length (s)", "number"],
   ["slideshow.order", "Order", "select", ["shuffle", "random", "date_desc", "date_asc", "name", "folder", "recent", "least_played"]],
   ["slideshow.kenburns", "Ken Burns pan & zoom", "bool"],
   ["slideshow.portrait_pairs", "Pair portrait photos", "bool"],
   ["viewer.fit", "Fit", "select", ["auto", "cover", "contain", "blur", "mat"]],
+  ["viewer.fit_choices", "What \"auto\" may do with a picture that does not match the screen (none ticked = mat)", "fits"],
   ["viewer.mat_style", "Mat styles (tick more than one to rotate)", "styles"],
   ["viewer.show_text", "Caption elements", "fields"],
   ["viewer.text_separator", "Between elements", "select", ["  ·  ", " – ", ", ", "\n"]],
@@ -251,6 +253,8 @@ const FIELDS = [
   ["viewer.text_size", "Caption size", "number"],
   ["display.brightness", "Brightness", "number"],
   ["library.subfolder", "Only this subfolder", "text"],
+  ["geo.detail", "Place names", "geo-detail"],
+  ["geo.suppress", "Never show these place names", "csv"],
 ];
 
 /* The separator is stored as the literal characters that go between two
@@ -263,6 +267,8 @@ async function loadSettings() {
   const transitions = await api("/api/transitions");
   const captionFields = await api("/api/caption-fields").catch(() => []);
   const matStyles = await api("/api/mat-styles").catch(() => []);
+  const fitModes = await api("/api/fits").catch(() => []);
+  const geoDetail = await api("/api/geo-detail").catch(() => []);
   const form = $("#settings");
   form.innerHTML = "";
   for (const [key, label, kind, choices] of FIELDS) {
@@ -273,10 +279,25 @@ async function loadSettings() {
     if (kind === "bool") {
       control = `<input type="checkbox" data-key="${key}" ${value ? "checked" : ""}>`;
     } else if (kind === "fields") {
-      control = pickList(key, value || [], captionFields, true);
+      control = pickList(key, value || [], captionFields, true, true);
     } else if (kind === "styles") {
       control = pickList(key, String(value || "").toLowerCase().split(/[\s,]+/)
-                                .filter(Boolean), matStyles, false);
+                                .filter(Boolean), matStyles, false, false);
+    } else if (kind === "fits") {
+      control = pickList(key, value || [], fitModes, true, false);
+    } else if (kind === "transitions") {
+      control = pickList(key, value || [],
+                         (transitions || []).map((n) => ({ name: n, label: n })),
+                         true, false);
+    } else if (kind === "geo-detail") {
+      const opts = geoDetail.map((g) =>
+        `<option value="${g.name}" ${g.name === value ? "selected" : ""}>` +
+        `${escapeHtml(g.label)}</option>`).join("");
+      control = `<select data-key="${key}">${opts}</select>`;
+    } else if (kind === "csv") {
+      control = `<input type="text" data-key="${key}" data-kind="csv" ` +
+                `value="${escapeHtml((value || []).join(", "))}" ` +
+                `placeholder="Germany, Hesse">`;
     } else if (kind === "select" || kind === "transition") {
       const opts = (kind === "transition" ? ["random", ...transitions] : choices)
         .map((c) => `<option value="${escapeHtml(c)}" ${c === value ? "selected" : ""}>` +
@@ -286,14 +307,19 @@ async function loadSettings() {
       control = `<input type="${kind}" step="any" data-key="${key}" value="${escapeHtml(value ?? "")}">`;
     }
     wrap.innerHTML = `<label>${label}</label>${control}<div class="hint">${key}</div>`;
-    if (kind === "fields" || kind === "styles") wrap.classList.add("field-wide");
+    if (["fields", "styles", "fits", "transitions"].includes(kind)) {
+      wrap.classList.add("field-wide");
+    }
     form.appendChild(wrap);
   }
   form.querySelectorAll("[data-key]").forEach((el) => {
     if (el.dataset.kind === "list") return;          // handled by pickList
     el.onchange = () => {
       const value = el.type === "checkbox" ? el.checked
-        : el.type === "number" ? Number(el.value) : el.value;
+        : el.type === "number" ? Number(el.value)
+        : el.dataset.kind === "csv"
+          ? el.value.split(",").map((s) => s.trim()).filter(Boolean)
+        : el.value;
       send("set_config", { key: el.dataset.key, value });
       $("#saved").textContent = `${el.dataset.key} = ${value}  (not yet written to disk)`;
     };
@@ -307,9 +333,9 @@ async function loadSettings() {
    where it is not: ticking several means "rotate between these".
    `ordered` sends a JSON array; otherwise a space-separated string, which is
    the form picframe used and the config still accepts. */
-function pickList(key, chosen, available, ordered) {
-  const known = available.length ? available
-    : chosen.map((name) => ({ name, label: name }));
+function pickList(key, chosen, available, asArray, reorder) {
+  const known = (available.length ? available : chosen)
+    .map((f) => (typeof f === "string" ? { name: f, label: f } : f));
   const byName = Object.fromEntries(known.map((f) => [f.name, f.label]));
   const rows = [
     ...chosen.filter((n) => n in byName).map((n) => ({ name: n, on: true })),
@@ -318,23 +344,24 @@ function pickList(key, chosen, available, ordered) {
     <li data-name="${name}" class="${on ? "on" : ""}">
       <label><input type="checkbox" ${on ? "checked" : ""}>
         <span>${escapeHtml(byName[name])}</span></label>
-      ${ordered ? `<button type="button" data-move="-1" title="Move up">▲</button>
+      ${reorder ? `<button type="button" data-move="-1" title="Move up">▲</button>
       <button type="button" data-move="1" title="Move down">▼</button>` : ""}
     </li>`).join("");
   return `<ol class="caption-list" data-pick-list data-key="${key}" data-kind="list"
-              data-ordered="${ordered ? 1 : 0}">${rows}</ol>`;
+              data-array="${asArray ? 1 : 0}">${rows}</ol>`;
 }
 
 function wirePickList(list) {
-  const ordered = list.dataset.ordered === "1";
+  const asArray = list.dataset.array === "1";
   const commit = () => {
     const names = [...list.querySelectorAll("li")]
       .filter((li) => li.querySelector("input").checked)
       .map((li) => li.dataset.name);
-    const value = ordered ? names : (names.join(" ") || "single");
+    // A mat style is a string, as picframe had it; the rest are real lists.
+    const value = asArray ? names : (names.join(" ") || "single");
     send("set_config", { key: list.dataset.key, value });
     $("#saved").textContent =
-      `${list.dataset.key} = ${ordered ? `[${names.join(", ")}]` : value}` +
+      `${list.dataset.key} = ${asArray ? `[${names.join(", ")}]` : value}` +
       "  (not yet written to disk)";
   };
   list.onclick = (e) => {

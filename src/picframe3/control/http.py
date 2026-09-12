@@ -250,6 +250,27 @@ class HttpServer:
             return [{"name": name, "label": STYLE_LABELS.get(name, name)}
                     for name in STYLES]
 
+        @api.get("/api/fits", dependencies=guard)
+        async def fit_modes():
+            """What `fit: auto` may do with a picture that needs help."""
+            labels = {
+                "mat": "In a mat (passepartout)",
+                "blur": "Whole, on a blurred copy of itself",
+                "contain": "Whole, on the background colour",
+                "cover": "Cropped to fill the screen",
+            }
+            from ..media.prepare import AUTO_FITS
+
+            return [{"name": name, "label": labels[name]} for name in AUTO_FITS]
+
+        @api.get("/api/geo-detail", dependencies=guard)
+        async def geo_detail():
+            """How much of an address a caption may show."""
+            from ..media.geocode import DETAIL_LABELS
+
+            return [{"name": name, "label": label}
+                    for name, label in DETAIL_LABELS.items()]
+
         @api.get("/api/health")
         async def health():
             return {"ok": True, "uptime": round(time.monotonic() - self.app.started, 1)}

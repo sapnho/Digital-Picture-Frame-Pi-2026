@@ -468,6 +468,20 @@ class Library:
         ).fetchall()
         return [(r["id"], r["latitude"], r["longitude"]) for r in rows]
 
+    def with_position(self, limit: int = 5000) -> list[tuple[int, float, float]]:
+        """Every row that has coordinates, place name or not.
+
+        Used when the wording of place names changes -- the raw Nominatim
+        replies are already in the geocache, so every caption can be rewritten
+        from disk without a single new request.
+        """
+        rows = self.connect().execute(
+            "SELECT id, latitude, longitude FROM files "
+            "WHERE latitude IS NOT NULL AND longitude IS NOT NULL LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [(r["id"], r["latitude"], r["longitude"]) for r in rows]
+
     def count_locations_missing(self) -> int:
         return self.connect().execute(
             "SELECT COUNT(*) AS n FROM files WHERE latitude IS NOT NULL "
