@@ -40,7 +40,40 @@ def _load(*names: str) -> ctypes.CDLL:
     raise OSError(f"cannot load any of {names}: {last}")
 
 
-libegl = _load("libEGL.so.1", "libEGL.so")
+class _LazyLib:
+    """A shared library that is opened the first time something is called.
+
+    Importing a module must not require Mesa to be installed.  ``picframe3
+    doctor`` exists to *report* that EGL is missing and cannot do that if the
+    import is what fails; ``picframe3 transitions``, ``--version``, the
+    settings page, the overlay layout tests and the packaging check in CI all
+    reach into the graphics package without ever drawing a frame.  Loading the
+    library on the first actual call keeps all of them working on a machine
+    that has no graphics stack at all, and changes nothing on the Pi.
+    """
+
+    def __init__(self, *names: str, on_open=None):
+        self._names = names
+        self._on_open = on_open
+        self._lib: ctypes.CDLL | None = None
+
+    def open(self) -> ctypes.CDLL:
+        if self._lib is None:
+            lib = _load(*self._names)
+            if self._on_open is not None:
+                self._on_open(lib)          # signatures, once
+            self._lib = lib
+        return self._lib
+
+    @property
+    def loaded(self) -> bool:
+        return self._lib is not None
+
+    def __getattr__(self, name: str):
+        return getattr(self.open(), name)
+
+
+libegl = _LazyLib("libEGL.so.1", "libEGL.so", on_open=lambda lib: _describe(lib))
 
 # --------------------------------------------------------------------------
 # Types
@@ -146,38 +179,40 @@ class EGLError(RuntimeError):
 # Prototypes
 # --------------------------------------------------------------------------
 
-libegl.eglGetError.restype = EGLint
-libegl.eglGetProcAddress.restype = ctypes.c_void_p
-libegl.eglGetProcAddress.argtypes = [ctypes.c_char_p]
-libegl.eglGetDisplay.restype = EGLDisplay
-libegl.eglGetDisplay.argtypes = [ctypes.c_void_p]
-libegl.eglInitialize.restype = ctypes.c_uint
-libegl.eglInitialize.argtypes = [EGLDisplay, ctypes.POINTER(EGLint), ctypes.POINTER(EGLint)]
-libegl.eglTerminate.argtypes = [EGLDisplay]
-libegl.eglQueryString.restype = ctypes.c_char_p
-libegl.eglQueryString.argtypes = [EGLDisplay, EGLint]
-libegl.eglBindAPI.restype = ctypes.c_uint
-libegl.eglBindAPI.argtypes = [ctypes.c_uint]
-libegl.eglChooseConfig.restype = ctypes.c_uint
-libegl.eglChooseConfig.argtypes = [
-    EGLDisplay, ctypes.POINTER(EGLint), ctypes.POINTER(EGLConfig), EGLint, ctypes.POINTER(EGLint)
-]
-libegl.eglGetConfigAttrib.restype = ctypes.c_uint
-libegl.eglGetConfigAttrib.argtypes = [EGLDisplay, EGLConfig, EGLint, ctypes.POINTER(EGLint)]
-libegl.eglCreateContext.restype = EGLContext
-libegl.eglCreateContext.argtypes = [EGLDisplay, EGLConfig, EGLContext, ctypes.POINTER(EGLint)]
-libegl.eglDestroyContext.argtypes = [EGLDisplay, EGLContext]
-libegl.eglCreateWindowSurface.restype = EGLSurface
-libegl.eglCreateWindowSurface.argtypes = [EGLDisplay, EGLConfig, EGLNativeWindow, ctypes.POINTER(EGLint)]
-libegl.eglCreatePbufferSurface.restype = EGLSurface
-libegl.eglCreatePbufferSurface.argtypes = [EGLDisplay, EGLConfig, ctypes.POINTER(EGLint)]
-libegl.eglDestroySurface.argtypes = [EGLDisplay, EGLSurface]
-libegl.eglMakeCurrent.restype = ctypes.c_uint
-libegl.eglMakeCurrent.argtypes = [EGLDisplay, EGLSurface, EGLSurface, EGLContext]
-libegl.eglSwapBuffers.restype = ctypes.c_uint
-libegl.eglSwapBuffers.argtypes = [EGLDisplay, EGLSurface]
-libegl.eglSwapInterval.restype = ctypes.c_uint
-libegl.eglSwapInterval.argtypes = [EGLDisplay, EGLint]
+def _describe(lib: ctypes.CDLL) -> None:
+    """Signatures for every entry point, applied when the library opens."""
+    lib.eglGetError.restype = EGLint
+    lib.eglGetProcAddress.restype = ctypes.c_void_p
+    lib.eglGetProcAddress.argtypes = [ctypes.c_char_p]
+    lib.eglGetDisplay.restype = EGLDisplay
+    lib.eglGetDisplay.argtypes = [ctypes.c_void_p]
+    lib.eglInitialize.restype = ctypes.c_uint
+    lib.eglInitialize.argtypes = [EGLDisplay, ctypes.POINTER(EGLint), ctypes.POINTER(EGLint)]
+    lib.eglTerminate.argtypes = [EGLDisplay]
+    lib.eglQueryString.restype = ctypes.c_char_p
+    lib.eglQueryString.argtypes = [EGLDisplay, EGLint]
+    lib.eglBindAPI.restype = ctypes.c_uint
+    lib.eglBindAPI.argtypes = [ctypes.c_uint]
+    lib.eglChooseConfig.restype = ctypes.c_uint
+    lib.eglChooseConfig.argtypes = [
+        EGLDisplay, ctypes.POINTER(EGLint), ctypes.POINTER(EGLConfig), EGLint, ctypes.POINTER(EGLint)
+    ]
+    lib.eglGetConfigAttrib.restype = ctypes.c_uint
+    lib.eglGetConfigAttrib.argtypes = [EGLDisplay, EGLConfig, EGLint, ctypes.POINTER(EGLint)]
+    lib.eglCreateContext.restype = EGLContext
+    lib.eglCreateContext.argtypes = [EGLDisplay, EGLConfig, EGLContext, ctypes.POINTER(EGLint)]
+    lib.eglDestroyContext.argtypes = [EGLDisplay, EGLContext]
+    lib.eglCreateWindowSurface.restype = EGLSurface
+    lib.eglCreateWindowSurface.argtypes = [EGLDisplay, EGLConfig, EGLNativeWindow, ctypes.POINTER(EGLint)]
+    lib.eglCreatePbufferSurface.restype = EGLSurface
+    lib.eglCreatePbufferSurface.argtypes = [EGLDisplay, EGLConfig, ctypes.POINTER(EGLint)]
+    lib.eglDestroySurface.argtypes = [EGLDisplay, EGLSurface]
+    lib.eglMakeCurrent.restype = ctypes.c_uint
+    lib.eglMakeCurrent.argtypes = [EGLDisplay, EGLSurface, EGLSurface, EGLContext]
+    lib.eglSwapBuffers.restype = ctypes.c_uint
+    lib.eglSwapBuffers.argtypes = [EGLDisplay, EGLSurface]
+    lib.eglSwapInterval.restype = ctypes.c_uint
+    lib.eglSwapInterval.argtypes = [EGLDisplay, EGLint]
 
 
 def check(ok, what: str) -> None:

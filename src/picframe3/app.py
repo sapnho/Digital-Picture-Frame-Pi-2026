@@ -140,6 +140,14 @@ class PicFrame:
             os.path.expanduser(self.config.library.deleted_folder).rstrip("/"))
         if deleted and deleted not in exclude:
             exclude.append(deleted)
+        # Syncthing keeps its marker and its trash can inside the folder it
+        # syncs. Both are hidden, so `ignore_hidden` normally takes care of
+        # them -- but somebody who turns that off to index a folder beginning
+        # with a dot would otherwise find every photograph they have ever
+        # removed back in the library, out of .stversions.
+        for name in (".stfolder", ".stversions"):
+            if name not in exclude:
+                exclude.append(name)
         return exclude
 
     def _health_disk_path(self) -> str:
@@ -181,6 +189,15 @@ class PicFrame:
         self.library = Library(cfg.library.database)
         self.removals = RemovalLog(cfg.library.deleted_folder)
         self.health.snapshot()   # kicks off the first reading on its own thread
+        if cfg.sync.enabled:
+            # Best effort, on a thread: if Syncthing is there this makes sure
+            # it is still keeping the right folder, with the right direction,
+            # and that its own page is still reachable. If it is not there,
+            # this says so in the log and the settings page offers to install
+            # it. Either way the frame starts.
+            from . import sync as sync_module
+
+            sync_module.apply_async(cfg)
         if cfg.geo.enabled:
             self.geocoder = Geocoder(
                 os.path.expanduser(cfg.geo.cache),

@@ -108,6 +108,10 @@ the Pi and nothing to rebuild when Mesa updates.
 - Captions from EXIF / IPTC / XMP, reverse-geocoded place names, and a clock
 - **Video** playback with audio, hardware decoding where the Pi provides it
 - **HEIC/HEIF** (iPhone) support
+- **Photographs that arrive by themselves** — the setup offers Syncthing
+  alongside the file share, installs it, points it at the picture folder and
+  prints the id to pair with; the settings page then shows what it is doing,
+  pairs it with a phone or a Mac, and can switch it on later if you said no
 - **Filter what is shown** — by folder, tags, place and date range, from the
   web UI or from Home Assistant, with a live count of how many pictures a
   filter selects before it is applied
@@ -150,9 +154,9 @@ curl -fsSL https://raw.githubusercontent.com/sapnho/Digital-Picture-Frame-Pi-202
 
 That is the whole installation. It fetches the libraries, creates a virtual
 environment, sets the permissions, tidies the boot options, and then asks you
-where your pictures are, whether you want a network share to drop photographs
-onto, whether to enable the web interface and Home Assistant, how it should
-look, and whether to start on boot. Every question has a working default.
+where your pictures are, how photographs should get onto the frame (Syncthing,
+a network share, or both), whether to enable the web interface and Home
+Assistant, how it should look, and whether to start on boot. Every question has a working default.
 
 Then:
 

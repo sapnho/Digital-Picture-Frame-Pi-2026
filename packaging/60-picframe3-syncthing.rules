@@ -1,0 +1,34 @@
+// Lets the picture frame switch Syncthing on and off -- and nothing else.
+//
+// The settings page offers Syncthing as a way of getting photographs onto the
+// frame: installing it, running it at boot, stopping it again. All three need
+// root, and the frame has no route to root at all (its unit sets
+// NoNewPrivileges=yes, so sudo would not help even if it were a good idea).
+//
+// So the root part lives in two fixed units -- picframe3-syncthing-on@ and
+// picframe3-syncthing-off@ -- whose text is ours and which take no argument
+// but the user name, and this rule lets exactly one user start exactly those
+// two instances, plus Syncthing's own service so the page can stop and start
+// it without a round trip through the installer.
+//
+// Everything else -- which folder is synced, who it is shared with, where
+// Syncthing's own web interface listens -- happens over Syncthing's API as
+// the ordinary user and needs no permission from anybody.
+//
+// Installed by 'picframe3 setup' as
+// /etc/polkit-1/rules.d/60-picframe3-syncthing.rules with @USER@ replaced.
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "@USER@") {
+        return undefined;
+    }
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return undefined;
+    }
+    var unit = action.lookup("unit");
+    if (unit === "syncthing@@USER@.service" ||
+        unit === "picframe3-syncthing-on@@USER@.service" ||
+        unit === "picframe3-syncthing-off@@USER@.service") {
+        return polkit.Result.YES;
+    }
+    return undefined;
+});

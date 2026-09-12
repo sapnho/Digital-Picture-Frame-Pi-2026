@@ -694,6 +694,7 @@ function drawSheet(name) {
   $("#sheet-kicker").textContent = job.kicker;
   $("#sheet-title").textContent = job.title;
   $("#sheet-state").textContent = job.state;
+  drawSheetExtra(job);
 
   const form = $("#sheet-form");
   form.innerHTML = "";
@@ -724,6 +725,7 @@ function drawSheet(name) {
 async function closeSheet() {
   if (!openJob) return;
   openJob = null;
+  stopSyncPolling();
   sheet().removeAttribute("data-open");
   // The cards summarise the configuration, so they are stale the moment
   // anything in the sheet changed: ask the frame again rather than guessing.
@@ -740,6 +742,173 @@ $("#sheet-save").onclick = async () => {
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheet(); });
 $("#settings-back").onclick = () => showJobs();
 
+
+/* ---- Syncthing ----------------------------------------------------------
+   The one card that is about another program. Settings alone cannot answer
+   the questions somebody has here — is it installed, is it running, who is it
+   paired with, what is it doing right now — so the card carries a panel that
+   asks the frame, and the frame asks Syncthing.
+
+   Everything root-shaped (installing it, running it at boot) goes through the
+   frame's /api/sync/switch, which is the same path as the switch below it;
+   pairing and the folder go through Syncthing's own API on the frame. This
+   page never pretends to be Syncthing's interface — it links to it. */
+let syncTimer = null;
+
+function stopSyncPolling() {
+  if (syncTimer) clearInterval(syncTimer);
+  syncTimer = null;
+}
+
+function drawSheetExtra(job) {
+  const box = $("#sheet-extra");
+  stopSyncPolling();
+  if (!job || job.name !== "sync") {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = `<div class="panel"><p class="muted">Asking Syncthing…</p></div>`;
+  refreshSync();
+  // While something is being installed the answer changes underneath us, so
+  // the panel keeps asking for as long as it is on screen.
+  syncTimer = setInterval(refreshSync, 4000);
+}
+
+async function refreshSync() {
+  if (openJob !== "sync") return stopSyncPolling();
+  try {
+    drawSync(await api("/api/sync"));
+  } catch (err) {
+    $("#sheet-extra").innerHTML =
+      `<div class="panel"><p class="muted">The frame could not be asked about ` +
+      `Syncthing just now.</p></div>`;
+  }
+}
+
+function syncGuiUrl(s) {
+  return `http://${location.hostname}:${s.gui_port}/`;
+}
+
+function drawSync(s) {
+  const box = $("#sheet-extra");
+  const rows = [];
+
+  if (s.busy) {
+    rows.push(`<p><strong>Working on it…</strong></p>
+      <p class="muted">Installing Syncthing and starting it. On a Pi this is a
+      minute or two; this panel keeps itself up to date.</p>`);
+  } else if (!s.installed) {
+    rows.push(`<p><strong>Syncthing is not installed on this frame.</strong></p>
+      <p class="muted">Switching it on installs it, starts it with the Pi and
+      offers ${escapeHtml(s.folder_path)} to your other machines.</p>
+      <p><button class="btn btn-primary" data-sync="on" type="button">Install and switch on</button></p>`);
+  } else if (!s.running) {
+    rows.push(`<p><strong>Installed, not running.</strong></p>
+      <p><button class="btn btn-primary" data-sync="on" type="button">Switch on</button></p>`);
+  } else {
+    const folder = s.folder || null;
+    rows.push(`<p><strong>Running${s.version ? " · " + escapeHtml(s.version) : ""}</strong>
+      ${folder ? `· ${fmt(folder.files)} files, ${bytes(folder.bytes)}
+        ${folder.need_bytes ? `· ${bytes(folder.need_bytes)} still to come` : "· up to date"}`
+        : "· the frame's folder is not set up yet"}</p>`);
+    if (!folder) {
+      rows.push(`<p><button class="btn btn-primary" data-sync="folder" type="button">
+        Keep ${escapeHtml(s.folder_path)} in step</button></p>`);
+    }
+    if (s.device_id) {
+      rows.push(`<p class="sync-id"><span class="muted">This frame is</span>
+        <code>${escapeHtml(s.device_id)}</code>
+        <button class="btn" data-sync="copy" type="button">Copy</button></p>`);
+    }
+    // The actions are always here; only the link to Syncthing's own page
+    // depends on that page being reachable from anywhere but the frame.
+    rows.push(`<p>${s.gui_local_only ? "" :
+      `<a class="btn" href="${syncGuiUrl(s)}" target="_blank"
+          rel="noopener">Open Syncthing →</a>`}
+      <button class="btn" data-sync="folder" type="button">Re-apply the folder</button>
+      <button class="btn" data-sync="off" type="button">Switch off</button></p>`);
+    if (s.gui_local_only) {
+      rows.push(`<p class="muted">Syncthing's own page is only reachable on the
+        frame itself. Turn on “Syncthing’s own page on the network” below to
+        open it from here.</p>`);
+    }
+
+    if (s.pending && s.pending.length) {
+      rows.push(`<p class="sync-head">Asking to pair</p>` + s.pending.map((d) =>
+        `<p class="sync-row"><strong>${escapeHtml(d.name || d.device_id.slice(0, 7))}</strong>
+         <span class="muted">${escapeHtml(d.address || "")}</span>
+         <button class="btn btn-primary" data-sync="accept"
+           data-id="${escapeHtml(d.device_id)}"
+           data-name="${escapeHtml(d.name || "")}" type="button">Pair and share</button></p>`).join(""));
+    }
+    if (s.devices && s.devices.length) {
+      rows.push(`<p class="sync-head">Paired with</p>` + s.devices.map((d) =>
+        `<p class="sync-row"><strong>${escapeHtml(d.name)}</strong>
+         <span class="muted">${d.connected ? "connected" : "not connected now"}${
+           d.shares_the_pictures ? " · has the pictures" : " · not sharing the pictures"}</span>
+         <button class="btn btn-danger" data-sync="forget"
+           data-id="${escapeHtml(d.device_id)}" type="button">Forget</button></p>`).join(""));
+    }
+    rows.push(`<p class="sync-head">Add a machine by its id</p>
+      <p class="sync-row">
+        <input id="sync-id" type="text" autocomplete="off" spellcheck="false"
+               placeholder="ABCDEFG-HIJKLMN-…">
+        <input id="sync-name" type="text" autocomplete="off" placeholder="name (optional)">
+        <button class="btn" data-sync="add" type="button">Add</button></p>
+      <p class="muted">Syncthing shows the id under Actions → Show ID on the
+        other machine. Once it is added here, accept the folder there.</p>`);
+  }
+
+  if (s.error) {
+    rows.push(`<p class="sync-error">${escapeHtml(s.error)}</p>`);
+  }
+  box.innerHTML = `<div class="panel">${rows.join("")}</div>`;
+  box.querySelectorAll("[data-sync]").forEach((el) => {
+    el.onclick = () => syncAction(el);
+  });
+}
+
+async function syncAction(el) {
+  const what = el.dataset.sync;
+  if (what === "copy") {
+    const id = el.closest(".sync-id")?.querySelector("code")?.textContent || "";
+    try { await navigator.clipboard.writeText(id); el.textContent = "Copied"; }
+    catch (err) { el.textContent = "Select it by hand"; }
+    return;
+  }
+  if (what === "forget" &&
+      !confirm("Stop syncing with this machine? Nothing is deleted.")) return;
+  const label = el.textContent;
+  el.disabled = true;
+  el.textContent = "Working…";
+  try {
+    if (what === "on" || what === "off") {
+      await api("/api/sync/switch", {
+        method: "POST", body: JSON.stringify({ on: what === "on" }) });
+    } else if (what === "folder") {
+      await api("/api/sync/folder", { method: "POST", body: "{}" });
+    } else if (what === "accept") {
+      await api("/api/sync/device", { method: "POST", body: JSON.stringify(
+        { device_id: el.dataset.id, name: el.dataset.name }) });
+    } else if (what === "add") {
+      await api("/api/sync/device", { method: "POST", body: JSON.stringify(
+        { device_id: $("#sync-id").value, name: $("#sync-name").value }) });
+    } else if (what === "forget") {
+      await api("/api/sync/device/remove", { method: "POST",
+        body: JSON.stringify({ device_id: el.dataset.id }) });
+    }
+  } catch (err) {
+    el.textContent = "That did not work";
+    setTimeout(() => { el.disabled = false; el.textContent = label; }, 2500);
+    return;
+  }
+  await refreshSync();
+  // The card behind the sheet summarises the settings, and switching
+  // Syncthing on changed one of them.
+  try { SCHEMA = await api("/api/config/schema"); drawJobs(); } catch (e) {}
+}
 
 function optionList(name) {
   return (SCHEMA.options && SCHEMA.options[name]) || [];
@@ -1157,6 +1326,14 @@ function escapeHtml(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function fmt(n) { return (n ?? 0).toLocaleString(); }
+/* A size as somebody reads it: 940 MB, 12.4 GB — never 12884901888. */
+function bytes(n) {
+  n = Number(n || 0);
+  const units = ["bytes", "kB", "MB", "GB", "TB"];
+  let unit = 0;
+  while (n >= 1000 && unit < units.length - 1) { n /= 1000; unit += 1; }
+  return `${unit === 0 ? n : n.toFixed(n < 10 ? 1 : 0)} ${units[unit]}`;
+}
 function duration(sec) {
   sec = Math.round(sec || 0);
   const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);

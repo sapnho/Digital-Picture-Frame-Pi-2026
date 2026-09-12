@@ -76,6 +76,13 @@ jobs:
           bash -n packaging/install.sh
           shellcheck packaging/install.sh
 
+      # Run as root by a oneshot unit, so a mistake in it is a mistake made
+      # as root. It gets the same treatment as the installer.
+      - name: The Syncthing helper must parse and pass shellcheck
+        run: |
+          bash -n packaging/syncthing-helper.sh
+          shellcheck packaging/syncthing-helper.sh
+
       - name: The unit file must be valid systemd
         run: |
           # @EXEC@ is what `picframe3 setup` substitutes. systemd-analyze
@@ -96,6 +103,26 @@ jobs:
             exit 1
           fi
           echo "packaging/picframe3.service verifies clean"
+
+      - name: The Syncthing units must be valid systemd
+        run: |
+          # Same rule as above: any output at all is a failure. These two run
+          # as root, so an ExecStart systemd quietly ignores is the worst
+          # possible way to find out.
+          mkdir -p units
+          cp packaging/picframe3-syncthing-on@.service units/
+          cp packaging/picframe3-syncthing-off@.service units/
+          sudo install -D -m 0755 packaging/syncthing-helper.sh \
+            /usr/local/lib/picframe3/syncthing-helper
+          for unit in units/picframe3-syncthing-*@.service; do
+            output=$(systemd-analyze verify "$unit" 2>&1) || true
+            if [ -n "$output" ]; then
+              echo "$output"
+              echo "::error file=packaging/$(basename "$unit")::systemd-analyze is not happy with this unit"
+              exit 1
+            fi
+            echo "$unit verifies clean"
+          done
 
   # A real install, from a real wheel, into an empty virtual environment --
   # the only arrangement in which a missing data file shows up at all. An

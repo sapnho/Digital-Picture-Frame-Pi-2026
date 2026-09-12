@@ -592,6 +592,78 @@ class HttpServer:
             return {"ok": True, "saved": saved,
                     "supervised": self.app.under_systemd()}
 
+        # -- syncthing -------------------------------------------------
+        # Syncthing is another program with its own web interface, and this is
+        # not an attempt to reimplement it: it is the four things somebody
+        # setting up a frame needs before Syncthing's own page is any use --
+        # is it there, turn it on, keep this folder, pair with that phone.
+        @api.get("/api/sync", dependencies=guard)
+        async def sync_status():
+            from .. import sync as sync_module
+
+            return await _in_thread(sync_module.status, self.app.config)
+
+        @api.post("/api/sync/switch", dependencies=guard)
+        async def sync_switch(body: dict | None = None):
+            """Turn Syncthing on -- installing it if it is missing -- or off.
+
+            Deliberately the same path as the switch on the settings page:
+            this writes ``sync.enabled`` through the command bus, and the
+            applier does the rest on a thread.  Saved at once, because
+            installing a package and enabling a service is not a change that
+            should be lost to a restart.
+            """
+            on = bool((body or {}).get("on", True))
+            self.app.bus.submit(Command(Action.SET_CONFIG,
+                                        {"key": "sync.enabled", "value": on},
+                                        source="http"))
+            await asyncio.sleep(0.2)         # let the setting land first
+            self.app.save_config()
+            return {"ok": True, "enabled": on}
+
+        @api.post("/api/sync/folder", dependencies=guard)
+        async def sync_folder():
+            """Create or re-align the frame's folder, and its own web page."""
+            from .. import sync as sync_module
+
+            if not sync_module.installed():
+                raise HTTPException(503, "Syncthing is not installed on this "
+                                         "frame yet.")
+            if not sync_module.is_active(sync_module.unit()):
+                raise HTTPException(503, "Syncthing is installed but not "
+                                         "running.")
+            try:
+                await _in_thread(sync_module.configure, self.app.config)
+            except sync_module.SyncError as exc:
+                raise HTTPException(503, str(exc)) from exc
+            return await _in_thread(sync_module.status, self.app.config)
+
+        @api.post("/api/sync/device", dependencies=guard)
+        async def sync_add_device(body: dict | None = None):
+            """Pair with another machine and share the pictures with it."""
+            from .. import sync as sync_module
+
+            payload = body or {}
+            device_id = str(payload.get("device_id") or "")
+            name = str(payload.get("name") or "")[:64]
+            try:
+                await _in_thread(sync_module.add_device, device_id, name,
+                                 self.app.config)
+            except sync_module.SyncError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            return await _in_thread(sync_module.status, self.app.config)
+
+        @api.post("/api/sync/device/remove", dependencies=guard)
+        async def sync_remove_device(body: dict | None = None):
+            from .. import sync as sync_module
+
+            device_id = str((body or {}).get("device_id") or "")
+            try:
+                await _in_thread(sync_module.remove_device, device_id)
+            except sync_module.SyncError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            return await _in_thread(sync_module.status, self.app.config)
+
         # -- library ---------------------------------------------------
         # Everything below reads SQLite, so everything below reads it in a
         # worker thread: a library of forty thousand photographs is several

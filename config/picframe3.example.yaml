@@ -184,6 +184,40 @@ library:
   # (advanced)
   prune_max_fraction: 0.2
 
+# Syncthing — photographs that arrive by themselves from your phone, your
+# Mac or a NAS, without anybody copying anything.
+sync:
+  # Run Syncthing on this frame. Switching it on installs it if it is
+  # missing and starts it with the Pi; switching it off stops it and leaves
+  # the folder, the pairings and the photographs exactly where they are.
+  enabled: false
+  # The folder Syncthing keeps in step. Empty means your first picture
+  # folder, which is almost always the right answer.
+  folder_path: ''
+  # What this folder is called on your phone and your Mac. (advanced)
+  folder_label: Picture Frame
+  # The id the two sides agree on. Changing it afterwards means pairing the
+  # folder again, so leave it alone unless you have a reason. (advanced)
+  folder_id: picframe3-pictures
+  # **Send & receive** is two-way: photographs arrive, and what the frame
+  # does to them travels back — including a removal. **Receive only** takes
+  # photographs and never sends a change of its own, so Remove on the frame
+  # stays on the frame. **Send only** is the frame handing pictures out and
+  # taking none.
+  folder_type: sendreceive
+  # Days Syncthing keeps its own copy of anything deleted or overwritten in
+  # that folder — the safety net under a two-way folder. 0 switches the
+  # trash can off.
+  versioning_days: 30
+  # Syncthing listens on the frame itself out of the box, which on a Pi with
+  # no browser means nobody can open its page. On makes it reachable from
+  # your own network, the way the frame’s own page is — and, like it, with
+  # no password in front of it.
+  gui_lan: true
+  # The port Syncthing’s own page is served on. 8384 unless something else
+  # on the frame already wants it. (advanced)
+  gui_port: 8384
+
 # Turning GPS coordinates into place names for captions.
 geo:
   enabled: false          # Reverse-geocode GPS coordinates into place names.

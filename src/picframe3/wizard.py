@@ -35,6 +35,10 @@ SERVICE_NAME = "picframe3@{user}.service"
 SERVICE_UNIT = "/etc/systemd/system/picframe3@.service"
 POLKIT_RULE = "/etc/polkit-1/rules.d/50-picframe3-network.rules"
 UDEV_RULE = "/etc/udev/rules.d/99-picframe3.rules"
+SYNC_POLKIT_RULE = "/etc/polkit-1/rules.d/60-picframe3-syncthing.rules"
+SYNC_HELPER = "/usr/local/lib/picframe3/syncthing-helper"
+SYNC_ON_UNIT = "/etc/systemd/system/picframe3-syncthing-on@.service"
+SYNC_OFF_UNIT = "/etc/systemd/system/picframe3-syncthing-off@.service"
 SAMBA_CONF = "/etc/samba/smb.conf"
 SAMBA_BEGIN = "# >>> picframe3 >>>"
 SAMBA_END = "# <<< picframe3 <<<"
@@ -320,13 +324,113 @@ def choose_pictures(config: Config) -> None:
              "and picks up new files within seconds without a restart.")
 
 
+#: What each answer to the step-3 question means: (Syncthing, file share).
+COPYING_CHOICES = {
+    "1": (True, False), "syncthing": (True, False), "s": (True, False),
+    "2": (False, True), "share": (False, True), "samba": (False, True),
+    "3": (True, True), "both": (True, True), "b": (True, True),
+    "4": (False, False), "neither": (False, False), "none": (False, False),
+    "n": (False, False),
+}
+
+
+def copying_choice(answer: str) -> tuple[bool, bool]:
+    """``"3"`` -> ``(True, True)``.  Anything unrecognised means Syncthing.
+
+    A wizard must not loop on a typo at the one question that decides how
+    photographs get onto the frame; an unrecognised answer takes the default,
+    and the summary at the end says what was actually set up.
+    """
+    return COPYING_CHOICES.get(str(answer or "").strip().lower(), (True, False))
+
+
+def setup_copying(config: Config, user: str) -> tuple[bool, bool]:
+    """Step 3: how photographs get onto the frame.  Both ways are offered."""
+    heading("3. Getting photographs onto the frame")
+    note("Two ways, and you can have both. Syncthing keeps a folder on your "
+         "phone, your Mac or a NAS in step with the frame by itself \u2014 a "
+         "photograph taken this afternoon is on the wall this afternoon, from "
+         "anywhere. A Windows/macOS file share makes the frame appear in "
+         "Finder or Explorer, so you can drag photographs onto it while you "
+         "are on the same network.")
+    say("")
+    say("     1  Syncthing \u2014 photographs arrive by themselves")
+    say("     2  A file share \u2014 drag photographs onto the frame")
+    say("     3  Both")
+    say("     4  Neither; I will copy the files on myself")
+    say("")
+    want_sync, want_share = copying_choice(ask("   Which", "1"))
+    synced = setup_syncthing(config, user) if want_sync else False
+    shared = setup_samba(config, user) if want_share else False
+    return synced, shared
+
+
+def setup_syncthing(config: Config, user: str) -> bool:
+    """Install Syncthing, point it at the picture folder, and say how to pair.
+
+    Everything root-shaped goes through the same two units the settings page
+    uses, rather than a second implementation here that only the wizard would
+    ever exercise: if it works now, it works from the page later.
+    """
+    from . import sync as sync_module
+
+    say("")
+    note("Syncthing pairs with your phone, Mac, PC or NAS once and then keeps "
+         "a folder in step in both directions. Nothing goes through anybody "
+         "else\u2019s server \u2014 the devices talk to each other.")
+
+    two_way = confirm("   Should photographs travel both ways?", default=True)
+    config.sync.folder_type = "sendreceive" if two_way else "receiveonly"
+    if two_way:
+        note("Both ways means a photograph you Remove on the frame is also "
+             "removed from the phone that sent it. Syncthing keeps its own "
+             "copy of anything deleted for 30 days, and the frame\u2019s Removed "
+             "tab keeps its own \u2014 so it is recoverable, twice over. Pick "
+             "\u201cno\u201d above if you would rather the frame never sent "
+             "anything back.")
+
+    install_sync_support(user)
+
+    if shutil.which("syncthing") is None:
+        say("   Installing Syncthing \u2014 a minute or two\u2026")
+    unit = f"picframe3-syncthing-on@{user}.service"
+    result = run_root(["systemctl", "start", unit])
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        say(f"{YELLOW}   ! Could not switch Syncthing on: "
+            f"{detail[-1][:160] if detail else 'systemd refused'}{RESET}")
+        note("The frame itself is unaffected. You can try again from the "
+             "settings page, under \u201cGetting photographs onto the frame\u201d.")
+        return False
+
+    config.sync.enabled = True
+    try:
+        client = sync_module.wait_for_api()
+        sync_module.ensure_gui(config, client)
+        sync_module.ensure_folder(config, client)
+        state = sync_module.status(config)
+    except sync_module.SyncError as exc:
+        say(f"{YELLOW}   ! Syncthing is installed but did not answer: {exc}{RESET}")
+        return True
+
+    host = socket.gethostname()
+    folder = sync_module.folder_path(config)
+    say(f"   {GREEN}\u2713{RESET} Syncthing is keeping {folder} in step")
+    say(f"       Its own page   http://{host}.local:{config.sync.gui_port}/")
+    if state.get("device_id"):
+        say(f"       This frame is  {state['device_id']}")
+    note("To pair: open Syncthing on your phone or Mac, add this frame by the "
+         "id above, and accept the folder when the frame offers it \u2014 or "
+         "paste your phone\u2019s id into the frame\u2019s settings page, under "
+         "\u201cGetting photographs onto the frame\u201d.")
+    return True
+
+
 def setup_samba(config: Config, user: str) -> bool:
     """Optional: share the picture folder so photos can be dropped over the network."""
-    heading("3. Copying pictures over the network")
-    note("A Windows/macOS file share makes the frame appear in Finder or Explorer "
-         "so you can drag photographs straight onto it. This is optional.")
-    if not confirm("   Set up a network share?", default=True):
-        return False
+    say("")
+    note("A Windows/macOS file share makes the frame appear in Finder or "
+         "Explorer so you can drag photographs straight onto it.")
 
     if shutil.which("smbd") is None:
         say("   Installing Samba…")
@@ -595,6 +699,7 @@ def install_service(user: str, venv_bin: Path | None) -> bool:
          "takes the screen directly, so it starts before anyone logs in.")
     install_udev_rules()
     install_network_rule(user)
+    install_sync_support(user)
     return True
 
 
@@ -660,10 +765,55 @@ def install_network_rule(user: str) -> bool:
 
 def _network_rule(user: str) -> str:
     """The polkit rule from ``packaging/``, with this frame's user in it."""
+    return _rule_for(user, "50-picframe3-network.rules")
+
+
+def _rule_for(user: str, name: str) -> str:
+    """One of the polkit rules from ``packaging/``, with the user filled in.
+
+    The comment lines are left alone on purpose: they explain what ``@USER@``
+    means, and a blanket replace would rewrite the explanation into an example
+    that no longer explains anything.
+    """
     return "".join(
         line if line.lstrip().startswith("//") else line.replace("@USER@", user)
-        for line in packaged("50-picframe3-network.rules").splitlines(keepends=True)
+        for line in packaged(name).splitlines(keepends=True)
     )
+
+
+def install_sync_support(user: str) -> bool:
+    """Install what Syncthing needs to be switchable from the settings page.
+
+    Three fixed files and nothing else: a helper script that only knows "on"
+    and "off", the two oneshot units that run it as root, and a polkit rule
+    naming exactly those two units and Syncthing's own service for this one
+    user.  Together they are what lets an open-on-the-LAN settings page offer
+    "install Syncthing" without the frame ever being able to run anything else
+    as root.
+
+    Installed by every setup run, interactive or not, so an existing frame
+    picks them up on its next update rather than only new installs.
+    """
+    ok = True
+    if not write_as_root(packaged("syncthing-helper.sh"), SYNC_HELPER, mode="0755"):
+        say(f"{YELLOW}   ! Could not write {SYNC_HELPER}{RESET}")
+        ok = False
+    for name, destination in (
+        ("picframe3-syncthing-on@.service", SYNC_ON_UNIT),
+        ("picframe3-syncthing-off@.service", SYNC_OFF_UNIT),
+    ):
+        if not write_as_root(packaged(name), destination):
+            say(f"{YELLOW}   ! Could not write {destination}{RESET}")
+            ok = False
+    if shutil.which("systemctl"):
+        run_root(["systemctl", "daemon-reload"])
+    if os.path.isdir("/etc/polkit-1") or shutil.which("pkaction"):
+        if not write_as_root(_rule_for(user, "60-picframe3-syncthing.rules"),
+                             SYNC_POLKIT_RULE):
+            say(f"{YELLOW}   ! Could not write {SYNC_POLKIT_RULE}; Syncthing "
+                f"will have to be switched on from a terminal.{RESET}")
+            ok = False
+    return ok
 
 
 def _service_unit(user: str, venv_bin: Path | None) -> str:
@@ -796,6 +946,7 @@ def run(config_path: str | None = None, *, venv_bin: str | None = None,
         # too -- otherwise a fix to the unit or to a rule only ever reaches
         # people who run the wizard interactively.
         install_udev_rules()
+        install_sync_support(user)
         if shutil.which("systemctl") and Path("/run/systemd/system").exists():
             if write_service_unit(user, Path(venv_bin) if venv_bin else None):
                 run_root(["systemctl", "enable", SERVICE_NAME.format(user=user)])
@@ -810,7 +961,7 @@ def run(config_path: str | None = None, *, venv_bin: str | None = None,
         note(f"Starting from your existing {target}.")
 
     choose_pictures(config)
-    shared = setup_samba(config, user)
+    synced, shared = setup_copying(config, user)
     setup_web(config)
     setup_mqtt(config)
     setup_look(config)
@@ -840,6 +991,9 @@ def run(config_path: str | None = None, *, venv_bin: str | None = None,
     if shared:
         steps.append(f"Drop photographs on it:  smb://{host}.local/ (macOS) "
                      f"or \\\\{host}\\ (Windows)")
+    if synced:
+        steps.append(f"Pair a phone or a Mac with it:  "
+                     f"http://{host}.local:{config.sync.gui_port}/")
     steps.append("If anything looks wrong:  picframe3 doctor")
 
     for index, step in enumerate(steps, 1):

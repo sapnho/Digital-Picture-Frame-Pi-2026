@@ -115,6 +115,21 @@ Where the photographs are and how they are indexed.
 | `subfolder` | string | *(empty)* | Show only pictures whose path contains this. Pick one of your folders, or type any part of a path. Empty shows everything. |
 | `prune_max_fraction` | number | `0.2` | How much of the index one scan may drop, as a fraction. A picture folder on a stick or a share is briefly absent now and then, and every file under it then looks deleted — this is what stops that from throwing away the play history and the place names. 0 removes the safeguard. *(takes effect on restart)* *(advanced)* |
 
+## `sync`
+
+Syncthing — photographs that arrive by themselves from your phone, your Mac or a NAS, without anybody copying anything.
+
+| key | type | default | |
+|---|---|---|---|
+| `enabled` | boolean | `False` | Run Syncthing on this frame. Switching it on installs it if it is missing and starts it with the Pi; switching it off stops it and leaves the folder, the pairings and the photographs exactly where they are. |
+| `folder_path` | string | *(empty)* | The folder Syncthing keeps in step. Empty means your first picture folder, which is almost always the right answer. |
+| `folder_label` | string | `'Picture Frame'` | What this folder is called on your phone and your Mac. *(advanced)* |
+| `folder_id` | string | `'picframe3-pictures'` | The id the two sides agree on. Changing it afterwards means pairing the folder again, so leave it alone unless you have a reason. *(advanced)* |
+| `folder_type` | string | `'sendreceive'` | **Send & receive** is two-way: photographs arrive, and what the frame does to them travels back — including a removal. **Receive only** takes photographs and never sends a change of its own, so Remove on the frame stays on the frame. **Send only** is the frame handing pictures out and taking none. |
+| `versioning_days` | integer | `30` | Days Syncthing keeps its own copy of anything deleted or overwritten in that folder — the safety net under a two-way folder. 0 switches the trash can off. |
+| `gui_lan` | boolean | `True` | Syncthing listens on the frame itself out of the box, which on a Pi with no browser means nobody can open its page. On makes it reachable from your own network, the way the frame’s own page is — and, like it, with no password in front of it. |
+| `gui_port` | integer | `8384` | The port Syncthing’s own page is served on. 8384 unless something else on the frame already wants it. *(advanced)* |
+
 ## `geo`
 
 Turning GPS coordinates into place names for captions.

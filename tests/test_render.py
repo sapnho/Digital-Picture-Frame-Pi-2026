@@ -461,3 +461,44 @@ def test_a_flip_that_never_completes_is_written_off_rather_than_freezing(monkeyp
     finally:
         os.close(read_fd)
         os.close(write_fd)
+
+
+def test_the_graphics_package_imports_on_a_machine_with_no_mesa():
+    """Opening the library happens on the first call, never on import.
+
+    `picframe3 doctor` exists to say that EGL or GLES is missing -- and it
+    cannot say anything at all if importing the graphics package is what
+    fails.  The same goes for `picframe3 transitions`, `--version`, the
+    settings page, the overlay layout tests and the packaging job in CI, which
+    installs the wheel into a bare container and never draws a frame.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    program = textwrap.dedent("""
+        import ctypes, ctypes.util
+        # As close as this gets to a machine with no graphics packages.
+        ctypes.util.find_library = lambda name: None
+        real = ctypes.CDLL
+
+        def blocked(name, *args, **kwargs):
+            if name and any(x in str(name) for x in ("EGL", "GLES", "gbm", "drm")):
+                raise OSError(f"no such file: {name}")
+            return real(name, *args, **kwargs)
+
+        ctypes.CDLL = blocked
+
+        import picframe3.gfx                    # noqa: F401
+        import picframe3.gfx.overlays           # noqa: F401
+        from picframe3.gfx import transitions
+        assert transitions.resolve_pool([]), "no transitions without a GPU?"
+
+        import picframe3.cli, sys
+        sys.argv = ["picframe3", "transitions"]
+        raise SystemExit(picframe3.cli.main())
+    """)
+    result = subprocess.run([sys.executable, "-c", program],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "fade" in result.stdout

@@ -486,6 +486,38 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin-top: 6px; }
 .sheet-close { margin-left: auto; }
 .sheet-rest { display: block; padding: 4px 22px 18px; font-size: 13px; }
 
+/* A card whose subject is another program: Syncthing's state, above the
+   settings that describe what it should be doing. */
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  padding: 14px 16px; margin-bottom: 18px; font-size: 13.5px;
+}
+.panel p { margin: 0 0 10px; }
+.panel p:last-child { margin-bottom: 0; }
+.panel .btn { margin-right: 6px; }
+.panel code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; word-break: break-all; background: var(--tint);
+  padding: 2px 5px;
+}
+.panel input[type="text"] {
+  flex: 1 1 180px; min-width: 0; padding: 7px 9px;
+  background: var(--input-bg); color: var(--text);
+  border: 1px solid var(--line); font: inherit; font-size: 13px;
+}
+.sync-head {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+  margin-top: 16px !important; margin-bottom: 6px !important;
+}
+.sync-row, .sync-id {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 6px 0; border-top: 1px solid var(--line);
+}
+.sync-row .muted, .sync-id .muted { font-size: 12.5px; }
+.sync-row .btn, .sync-id .btn { margin-left: auto; padding: 4px 9px; font-size: 12.5px; }
+.sync-error { color: var(--danger); font-size: 12.5px; }
+
 /* ---- settings: the full list ---- */
 .form { display: grid; gap: 12px; align-items: start;
          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }

@@ -30,6 +30,8 @@ SECTION_PROSE = {
                  "changes, what comes next.",
     "viewer": "How a picture is composed on screen, and what is written over it.",
     "library": "Where the photographs are and how they are indexed.",
+    "sync": "Syncthing \u2014 photographs that arrive by themselves from your phone, "
+            "your Mac or a NAS, without anybody copying anything.",
     "geo": "Turning GPS coordinates into place names for captions.",
     "mqtt": "The broker, and the Home Assistant device it announces.",
     "http": "The web interface and REST API.",
@@ -45,6 +47,7 @@ SECTION_LABELS = {
     "slideshow": "Slideshow",
     "viewer": "Picture and captions",
     "library": "Library",
+    "sync": "Syncthing",
     "geo": "Place names",
     "mqtt": "MQTT and Home Assistant",
     "http": "Web interface",
@@ -131,6 +134,14 @@ NOTES = {
     "library.deleted_folder": "Where “Remove” moves a picture. Nothing is ever unlinked, and every removal is written to removals.jsonl in this folder — when it went, where it came from, and what it was. The Removed tab reads that file and can put a picture back.",
     "library.subfolder": "Show only pictures whose path contains this. Pick one of your folders, or type any part of a path. Empty shows everything.",
     "library.prune_max_fraction": "How much of the index one scan may drop, as a fraction. A picture folder on a stick or a share is briefly absent now and then, and every file under it then looks deleted — this is what stops that from throwing away the play history and the place names. 0 removes the safeguard.",
+    "sync.enabled": "Run Syncthing on this frame. Switching it on installs it if it is missing and starts it with the Pi; switching it off stops it and leaves the folder, the pairings and the photographs exactly where they are.",
+    "sync.folder_path": "The folder Syncthing keeps in step. Empty means your first picture folder, which is almost always the right answer.",
+    "sync.folder_label": "What this folder is called on your phone and your Mac.",
+    "sync.folder_id": "The id the two sides agree on. Changing it afterwards means pairing the folder again, so leave it alone unless you have a reason.",
+    "sync.folder_type": "**Send & receive** is two-way: photographs arrive, and what the frame does to them travels back \u2014 including a removal. **Receive only** takes photographs and never sends a change of its own, so Remove on the frame stays on the frame. **Send only** is the frame handing pictures out and taking none.",
+    "sync.versioning_days": "Days Syncthing keeps its own copy of anything deleted or overwritten in that folder \u2014 the safety net under a two-way folder. 0 switches the trash can off.",
+    "sync.gui_lan": "Syncthing listens on the frame itself out of the box, which on a Pi with no browser means nobody can open its page. On makes it reachable from your own network, the way the frame\u2019s own page is \u2014 and, like it, with no password in front of it.",
+    "sync.gui_port": "The port Syncthing\u2019s own page is served on. 8384 unless something else on the frame already wants it.",
     "geo.enabled": "Reverse-geocode GPS coordinates into place names.",
     "geo.contact": "**Required when enabled.** Nominatim's usage policy needs a way to reach you.",
     "geo.language": "Two-letter code: the language place names come back in.",
@@ -221,6 +232,14 @@ LABELS = {
     "gpio_buttons": "GPIO buttons",
     "journald": "Log to the journal",
     "subfolder": "Show only this subfolder",
+    "sync.enabled": "Run Syncthing on the frame",
+    "sync.folder_path": "Folder kept in step",
+    "sync.folder_label": "Name on your other machines",
+    "sync.folder_id": "Folder id",
+    "sync.folder_type": "Which way photographs travel",
+    "sync.versioning_days": "Keep deleted files for (days)",
+    "sync.gui_lan": "Syncthing\u2019s own page on the network",
+    "sync.gui_port": "Syncthing\u2019s port",
     "detail": "How much of the address",
     "suppress": "Never show these names",
     "dim_schedule": "Dimming schedule",
@@ -258,6 +277,7 @@ PATH_KEYS = {
     "library.database",
     "library.deleted_folder",
     "library.picture_folders",
+    "sync.folder_path",
     "viewer.overlay_image",
     "viewer.font",
     "viewer.clock_extra_file",
@@ -397,7 +417,8 @@ def redact(data: dict) -> dict:
 #: Settings the running frame picks up at once.  Everything else is written to
 #: the config file and takes effect when the frame restarts, and the page says
 #: so rather than leaving the owner to wonder why nothing happened.
-LIVE_SECTIONS = {"viewer", "slideshow", "geo", "power", "health", "network"}
+LIVE_SECTIONS = {"viewer", "slideshow", "geo", "power", "health", "network",
+                 "sync"}
 LIVE_KEYS = {
     "display.brightness", "display.rotate", "display.background",
     "library.subfolder", "logging.level",
@@ -447,6 +468,8 @@ LIMITS: dict[str, tuple[float | None, float | None]] = {
     "library.rescan_interval": (0.0, None),
     "library.prune_max_fraction": (0.0, 1.0),
     "http.port": (1, 65535),
+    "sync.gui_port": (1, 65535),
+    "sync.versioning_days": (0, 3650),
     "mqtt.port": (1, 65535),
     "mqtt.publish_interval": (1.0, None),
     "mqtt.image_width": (64, 4096),
@@ -467,6 +490,7 @@ CHOICES: dict[str, list[str]] = {
     "viewer.text_justify": ["L", "C", "R"],
     "viewer.clock_position": ["TL", "TC", "TR", "BL", "BC", "BR"],
     "logging.level": ["DEBUG", "INFO", "WARNING", "ERROR"],
+    "sync.folder_type": ["sendreceive", "receiveonly", "sendonly"],
 }
 
 #: Controls that need a list of options built at runtime.
@@ -482,6 +506,7 @@ DYNAMIC: dict[str, str] = {
     "geo.key_order": "address-keys",
     "library.subfolder": "folders",
     "display.rotate": "rotate",
+    "sync.folder_type": "sync-directions",
 }
 
 #: Fields nobody should meet before the ones that matter.
@@ -491,6 +516,7 @@ ADVANCED = {
     "viewer.text_margin_x", "viewer.text_margin_y", "viewer.text_opacity",
     "viewer.overlay_image", "viewer.clock_extra_file", "viewer.blur_zoom",
     "library.database", "library.deleted_folder", "library.follow_links",
+    "sync.folder_id", "sync.folder_label", "sync.gui_port",
     "library.prune_max_fraction",
     "geo.cache",
     "mqtt.discovery_prefix", "mqtt.topic_prefix", "mqtt.tls_ca",
@@ -586,6 +612,11 @@ def _options() -> dict[str, list[dict[str, str]]]:
         "separator": pairs([("  ·  ", "Dot  ·"), (" – ", "Dash  –"),
                             (", ", "Comma  ,"), ("\n", "One per line")]),
         "rotate": pairs([("0", "Upright"), ("180", "Upside down")]),
+        "sync-directions": pairs([
+            ("sendreceive", "Send & receive \u2014 two-way"),
+            ("receiveonly", "Receive only \u2014 the frame never sends a change"),
+            ("sendonly", "Send only \u2014 the frame hands pictures out"),
+        ]),
         # Every address key Nominatim is known to return, grouped the way the
         # tiers editor offers them.
         "address-keys": [{"name": key, "label": f"{key} — {group.lower()}"}
@@ -707,6 +738,36 @@ def _state_library(c) -> str:
     return " · ".join(bits)
 
 
+#: How a folder direction reads in a sentence.
+SYNC_DIRECTION_SHORT = {
+    "sendreceive": "two-way",
+    "receiveonly": "incoming only",
+    "sendonly": "outgoing only",
+}
+
+
+def _state_sync(c) -> str:
+    """What Syncthing is set to do — from the configuration alone.
+
+    Deliberately says nothing about whether Syncthing is installed, running or
+    paired: this sentence is built every time the settings page is drawn, and
+    asking another program over the network on every draw is how a settings
+    page becomes slow. The card's own panel asks, once it is open.
+    """
+    sync = c.sync
+    if not sync.enabled:
+        return "Off \u2014 photographs arrive some other way"
+    import os as _os
+
+    folders = c.library.picture_folders or []
+    where = sync.folder_path or (folders[0] if folders else "~/Pictures")
+    bits = [_os.path.basename(str(where).rstrip("/")) or str(where),
+            SYNC_DIRECTION_SHORT.get(sync.folder_type, sync.folder_type)]
+    bits.append(f"deleted files kept {sync.versioning_days} days"
+                if sync.versioning_days else "no trash can")
+    return "On \u00b7 " + " \u00b7 ".join(bits)
+
+
 def _state_video(c) -> str:
     s = c.slideshow
     if not c.library.include_videos:
@@ -814,6 +875,15 @@ JOBS = [
      "section": "library", "state": _state_library,
      "fields": ["library.picture_folders", "library.subfolder",
                 "library.include_videos", "library.watch"]},
+    {"name": "sync", "kicker": "Syncthing",
+     "title": "Getting photographs onto the frame",
+     "section": "sync", "state": _state_sync,
+     # Deliberately no sync.enabled here: the card carries a panel that
+     # switches Syncthing on and off with the state in front of you, and a
+     # bare checkbox beside it would be a second, quieter way to do the same
+     # thing. It is still in the full list, like every other setting.
+     "fields": ["sync.folder_path", "sync.folder_type",
+                "sync.versioning_days", "sync.gui_lan"]},
     {"name": "video", "kicker": "Video", "title": "How a video clip plays",
      "section": "slideshow", "state": _state_video,
      "fields": ["slideshow.video_max_seconds", "slideshow.video_loop",
@@ -876,7 +946,8 @@ def schema(config, extra_options: dict[str, Any] | None = None) -> dict[str, Any
             if dotted in CHOICES:
                 kind = "select"
             widget = DYNAMIC.get(dotted)
-            if widget in ("transition", "separator", "geo-detail", "rotate"):
+            if widget in ("transition", "separator", "geo-detail", "rotate",
+                          "sync-directions"):
                 kind = "select"
             elif widget in ("transitions", "fits", "caption-fields"):
                 kind = "pick"
@@ -905,7 +976,12 @@ def schema(config, extra_options: dict[str, Any] | None = None) -> dict[str, Any
                 "is_set": bool(getattr(obj, f.name)) if dotted in SECRETS else None,
                 "default": None if dotted in SECRETS else default,
                 "note": NOTES.get(dotted, ""),
-                "choices": CHOICES.get(dotted),
+                # A setting can have both: CHOICES is what the frame will
+                # *accept* (so a value typed into the config file or sent over
+                # MQTT is checked), a dynamic option list is how it should be
+                # *offered*. The browser draws the option list when there is
+                # one, or it would show the bare internal name.
+                "choices": None if widget else CHOICES.get(dotted),
                 "options": DYNAMIC.get(dotted),
                 "ordered": dotted == "viewer.show_text",
                 "live": live,

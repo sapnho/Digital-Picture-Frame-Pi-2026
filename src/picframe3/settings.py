@@ -185,6 +185,22 @@ class ConfigApplier:
         # screen wherever the old schedule had put it.
         frame.apply_power_schedule(force=True)
 
+    def _on_sync(self, key: str) -> None:
+        """Make Syncthing match the settings -- on a thread, always.
+
+        Everything behind this key talks to another program: systemd, a
+        package manager, Syncthing's own API.  The slowest of them is an apt
+        install, which is minutes, and none of it may happen on the loop that
+        is drawing the cross-fade.  So the work is handed to a thread and the
+        outcome is read back from ``/api/sync`` by whoever asked -- the
+        settings page polls it -- rather than being reported here.
+        """
+        from . import sync as sync_module
+
+        config = self.frame.config
+        switch = bool(config.sync.enabled) if key.endswith("enabled") else None
+        sync_module.apply_async(config, switch=switch)
+
     def _on_library(self, key: str) -> None:
         frame = self.frame
         cfg = frame.config.library

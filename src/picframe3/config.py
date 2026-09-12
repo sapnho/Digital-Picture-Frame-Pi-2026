@@ -155,6 +155,41 @@ class LibraryConfig:
 
 
 @dataclass
+class SyncConfig:
+    """Syncthing: photographs that arrive by themselves.
+
+    The frame owns very little of this.  Which folder is kept in step, who it
+    is paired with and where Syncthing's own page listens are all settings
+    Syncthing keeps; these are the handful the frame has an opinion about, so
+    that a fresh install can be set up without ever opening Syncthing itself.
+    """
+
+    #: Whether this frame runs Syncthing at all.  Switching it on installs the
+    #: package if it is missing and starts it with the Pi; switching it off
+    #: stops it and leaves everything -- folder, pairings, photographs -- in
+    #: place.
+    enabled: bool = False
+    #: The folder Syncthing keeps in step.  Empty means the first picture
+    #: folder, which is what anyone actually wants.
+    folder_path: str = ""
+    #: Its name on the other machines, and the internal id the two sides agree
+    #: on.  The id is awkward to change afterwards, so it has a dull default.
+    folder_label: str = "Picture Frame"
+    folder_id: str = "picframe3-pictures"
+    #: ``sendreceive`` is two-way: photographs arrive, and anything the frame
+    #: does to them travels back.  ``receiveonly`` takes photographs and never
+    #: sends a change of its own.
+    folder_type: str = "sendreceive"
+    #: Days Syncthing keeps a copy of anything deleted or overwritten in that
+    #: folder.  0 switches the trash can off.
+    versioning_days: int = 30
+    #: Where Syncthing's own web interface listens.  It binds to localhost out
+    #: of the box, which on a frame with no browser means nobody can open it.
+    gui_lan: bool = True
+    gui_port: int = 8384
+
+
+@dataclass
 class GeoConfig:
     enabled: bool = False
     contact: str = ""                     # required by the Nominatim usage policy
@@ -305,6 +340,7 @@ class Config:
     slideshow: SlideshowConfig = field(default_factory=SlideshowConfig)
     viewer: ViewerConfig = field(default_factory=ViewerConfig)
     library: LibraryConfig = field(default_factory=LibraryConfig)
+    sync: SyncConfig = field(default_factory=SyncConfig)
     geo: GeoConfig = field(default_factory=GeoConfig)
     mqtt: MqttConfig = field(default_factory=MqttConfig)
     http: HttpConfig = field(default_factory=HttpConfig)

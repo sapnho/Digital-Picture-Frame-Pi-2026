@@ -247,7 +247,14 @@
       </div>
       <button class="btn sheet-close" id="sheet-close" type="button">Close</button>
     </div>
-    <div class="sheet-body"><div class="form" id="sheet-form"></div></div>
+    <div class="sheet-body">
+      <!-- A job that is about another program rather than about a setting
+           fills this in: Syncthing's card says what Syncthing is actually
+           doing, and offers the two or three things a settings page can
+           usefully do about it. -->
+      <div id="sheet-extra" hidden></div>
+      <div class="form" id="sheet-form"></div>
+    </div>
     <a class="sheet-rest linkish" id="sheet-rest" href="#"></a>
     <div class="sheet-foot is-clean">
       <button class="btn btn-primary" id="sheet-save" type="button">Save to config file</button>

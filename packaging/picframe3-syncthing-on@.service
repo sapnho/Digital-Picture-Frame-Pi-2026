@@ -1,0 +1,26 @@
+# Switches Syncthing on for one user: installs the package if it is missing,
+# then enables and starts syncthing@<user>.
+#
+# This exists so that the frame -- which runs with NoNewPrivileges=yes and has
+# no sudo -- can offer "turn Syncthing on" in its settings page without being
+# given the ability to run anything as root. The unit takes no arguments but
+# the user name, and 60-picframe3-syncthing.rules lets the frame's own user
+# start this one instance and nothing else.
+#
+# Installed by `picframe3 setup` as
+# /etc/systemd/system/picframe3-syncthing-on@.service.
+
+[Unit]
+Description=Switch Syncthing on for %i (picframe3)
+Documentation=https://github.com/sapnho/Digital-Picture-Frame-Pi-2026
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Long enough for an apt install over a slow line on a Pi, short enough that
+# a wedged package manager does not leave the unit "activating" for ever --
+# which is what the settings page reads as "still working".
+TimeoutStartSec=900
+ExecStart=/usr/local/lib/picframe3/syncthing-helper on %i
+RemainAfterExit=no

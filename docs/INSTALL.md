@@ -57,7 +57,7 @@ short series of questions:
 ```
 1. This machine            confirms the Pi model and the display it found
 2. Where your pictures are
-3. Copying pictures over the network    optional Samba share
+3. Getting photographs onto the frame   Syncthing, a file share, or both
 4. Controlling it from your phone       the web interface and its port
 5. Home Assistant                       optional MQTT
 6. How it should look                   interval, transition, mats,
@@ -111,20 +111,50 @@ install.
 
 Do not skip `picframe3 setup`: besides writing the configuration it installs
 the systemd unit, the udev rule that makes `/dev/input/event*` readable by the
-`input` group, and the polkit rule that lets the frame reconnect its own Wi-Fi.
+`input` group, the polkit rule that lets the frame reconnect its own Wi-Fi,
+and the two oneshot units that let the settings page switch Syncthing on and
+off without the frame ever having any other way to run something as root.
 </details>
 
 ---
 
 ## Step 3 — Add pictures and index them
 
-If you said yes to the network share, the frame is already visible from your
-computer — drag a folder onto it:
+Question 3 of the setup offered two ways of getting photographs onto the
+frame, and you can have both.
+
+**Syncthing** pairs the frame with your phone, your Mac, your PC or a NAS once
+and then keeps a folder in step by itself — a photograph taken this afternoon
+is on the wall this afternoon, wherever you took it. Nothing passes through
+anybody else's server; the devices talk to each other directly. After the
+setup, the frame prints its own device id and the address of Syncthing's page
+on it:
+
+```
+http://frame.local:8384/
+```
+
+To pair, add that device id in Syncthing on the other machine (Actions → Show
+ID gives you its id in return), or paste the other machine's id into the
+frame's settings page under **Getting photographs onto the frame** — the same
+card shows what Syncthing is doing, and can install it later if you said no
+during the setup. Then accept the shared folder on the other side.
+
+The frame's folder is **send & receive** by default, which means a photograph
+you Remove on the frame is removed from the phone that sent it as well.
+There are two safety nets under that: Syncthing keeps its own copy of anything
+deleted for 30 days (`.stversions` inside the picture folder), and the frame's
+own **Removed** tab can put a picture back. If you would rather the frame
+never sent anything back at all, set **Which way photographs travel** to
+*Receive only*.
+
+**A file share** makes the frame appear in Finder or Explorer, so you can drag
+a folder onto it while you are on the same network:
 
 - **macOS:** Finder → Go → Connect to Server → `smb://frame.local/Pictures`
 - **Windows:** Explorer → `\\frame\Pictures`
 
-Otherwise:
+Or, with neither:
 
 ```bash
 scp -r ~/Photos/Italy2025 pi@frame.local:~/Pictures/
@@ -278,7 +308,10 @@ picframe3 uninstall
 ```
 
 That stops and removes the service, the `/usr/local/bin/picframe3` shim, the
-udev rule, the polkit rule and the Samba share. Your configuration, index and
+udev rule, the polkit rules, the Samba share and the two units that switch
+Syncthing on and off. Syncthing itself is left installed, along with its
+folders and its pairings: it may well be keeping folders that have nothing to
+do with the frame. Your configuration, index and
 photographs are left exactly where they are; delete
 `~/.local/share/picframe3/venv` if you also want the disk space back.
 
@@ -326,6 +359,12 @@ raise `viewer.upscale_limit` if you would rather it enlarged.
 `~/.local/share/picframe3/venv/bin/pip install pillow-heif`
 (`picframe3 doctor` prints the same command with the path your frame is
 actually running from.)
+
+**Photographs have stopped arriving over Syncthing** — `picframe3 sync` says
+where it stands: installed, running, which folder it keeps, who it is paired
+with and whether anything is waiting to be accepted. `picframe3 sync on`
+switches it back on, `picframe3 sync folder` re-creates the frame's folder if
+it has gone missing.
 
 **Videos do not play** — `picframe3 doctor` says whether GStreamer is visible.
 The usual cause is a venv created without `--system-site-packages`.

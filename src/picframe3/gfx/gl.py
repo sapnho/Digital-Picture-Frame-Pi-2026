@@ -10,16 +10,18 @@ import ctypes
 import logging
 from collections.abc import Sequence
 
-from .egl import _load
+from .egl import _LazyLib
 
 _log = logging.getLogger(__name__)
 
-# Importing this module loads the GLES library, and it used to insist on one
-# exact soname.  Anything that merely imports the graphics package -- the
-# overlay layout tests, the settings page, ``picframe3 doctor`` -- then failed
-# on a system whose Mesa ships only ``libGLESv2.so``.  The same fallback chain
-# EGL uses covers all of them.
-lib = _load("libGLESv2.so.2", "libGLESv2.so")
+# The GLES library is opened on the first call, not on import, and the soname
+# is a fallback chain rather than one exact name.  Both matter for the same
+# reason: anything that merely imports the graphics package -- the overlay
+# layout tests, the settings page, ``picframe3 transitions``, ``picframe3
+# doctor``, the packaging check in CI -- must work on a machine with no Mesa
+# at all.  ``doctor`` in particular exists to say that GLES is missing, which
+# it cannot do if importing it is what fails.
+lib = _LazyLib("libGLESv2.so.2", "libGLESv2.so", on_open=lambda handle: _describe(handle))
 
 # --- enums ---------------------------------------------------------------
 FALSE = 0
@@ -178,14 +180,30 @@ _protos = {
     "glDeleteFramebuffers": (None, [ctypes.c_int, _P(ctypes.c_uint)]),
 }
 
-for _name, (_ret, _args) in _protos.items():
-    try:
-        _fn = getattr(lib, _name)
-    except AttributeError:  # pragma: no cover
-        continue
-    _fn.restype = _ret
-    _fn.argtypes = _args
-    globals()[_name] = _fn
+def _describe(handle) -> None:
+    """Bind every prototype, once, when the library is actually opened."""
+    for name, (ret, args) in _protos.items():
+        try:
+            fn = getattr(handle, name)
+        except AttributeError:  # pragma: no cover - driver dependent
+            continue
+        fn.restype = ret
+        fn.argtypes = args
+        globals()[name] = fn
+
+
+def __getattr__(name: str):
+    """``gl.glClear`` opens the library and hands back the bound entry point.
+
+    PEP 562: this runs only for names the module does not already define, so
+    after the first call every entry point is an ordinary module global and
+    costs nothing.
+    """
+    if name in _protos:
+        lib.open()
+        if name in globals():
+            return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def check_error(context: str = "") -> None:

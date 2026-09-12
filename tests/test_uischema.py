@@ -79,6 +79,21 @@ def test_a_select_offers_the_value_it_currently_has(built):
             assert str(f["value"]) in offered, f"{f['key']} = {f['value']!r}"
 
 
+def test_a_labelled_option_list_wins_over_the_bare_choices(built):
+    """`sync.folder_type` is both validated against CHOICES and offered as a
+    labelled list. The page must draw the labels, not `sendreceive`."""
+    field = next(f for s in built["sections"] for f in s["fields"]
+                 if f["key"] == "sync.folder_type")
+    assert field["kind"] == "select"
+    assert field["choices"] is None, "the browser would draw the internal names"
+    assert field["options"] == "sync-directions"
+    labels = {o["name"]: o["label"] for o in built["options"]["sync-directions"]}
+    assert labels["sendreceive"].startswith("Send & receive")
+    # …and the frame still refuses anything that is not one of them.
+    assert uischema.CHOICES["sync.folder_type"] == [
+        "sendreceive", "receiveonly", "sendonly"]
+
+
 def test_the_schema_survives_a_round_trip_as_json(built):
     assert json.loads(json.dumps(built)) == built
 

@@ -1,0 +1,18 @@
+# Switches Syncthing off for one user: stops it and takes it out of the boot.
+#
+# The counterpart of picframe3-syncthing-on@.service. Nothing is uninstalled
+# and nothing is deleted -- the folder, the pairings and the photographs are
+# all still there, and switching it back on picks up where it left off.
+#
+# Installed by `picframe3 setup` as
+# /etc/systemd/system/picframe3-syncthing-off@.service.
+
+[Unit]
+Description=Switch Syncthing off for %i (picframe3)
+Documentation=https://github.com/sapnho/Digital-Picture-Frame-Pi-2026
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120
+ExecStart=/usr/local/lib/picframe3/syncthing-helper off %i
+RemainAfterExit=no

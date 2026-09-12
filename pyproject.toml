@@ -92,6 +92,10 @@ packages = ["src/picframe3"]
 "packaging/picframe3.service" = "picframe3/data/picframe3.service"
 "packaging/50-picframe3-network.rules" = "picframe3/data/50-picframe3-network.rules"
 "packaging/99-picframe3.rules" = "picframe3/data/99-picframe3.rules"
+"packaging/60-picframe3-syncthing.rules" = "picframe3/data/60-picframe3-syncthing.rules"
+"packaging/picframe3-syncthing-on@.service" = "picframe3/data/picframe3-syncthing-on@.service"
+"packaging/picframe3-syncthing-off@.service" = "picframe3/data/picframe3-syncthing-off@.service"
+"packaging/syncthing-helper.sh" = "picframe3/data/syncthing-helper.sh"
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "packaging", "config", "docs", "tests", "tools", "README.md",

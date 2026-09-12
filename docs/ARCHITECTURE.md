@@ -183,6 +183,32 @@ playlist, and adding a control surface means writing one file that talks to the
 bus. In `picframe` each interface reached into the viewer's internals, which is
 why the viewer had to know what `display_power` mode the user was on.
 
+## Getting photographs in
+
+Two roads, and the frame owns neither of them. The Samba share is a block in
+`smb.conf` the wizard writes between two markers, so it can be lifted back out
+without a parser. Syncthing is another program with its own web interface, and
+`picframe3.sync` is deliberately only the frame's side of it: which folder it
+should keep, which way photographs travel, where its page listens, who it is
+paired with — read and written over Syncthing's REST API on localhost, with
+the API key out of its own config file, which is readable because Syncthing
+runs as the same user as the frame.
+
+The three things that need root — installing the package, running it at boot,
+stopping it — are the interesting part, because the settings page offering
+them is a page that is deliberately open on the LAN. They go through two fixed
+oneshot units (`picframe3-syncthing-on@`, `picframe3-syncthing-off@`) that run
+a helper script knowing only the words `on` and `off`, and a polkit rule
+naming exactly those two units and `syncthing@` for one user. The frame's own
+unit sets `NoNewPrivileges=yes`, so there is no other route: "the web
+interface can install Syncthing" cannot widen into "the web interface can run
+anything as root", because the units take no argument but the user name.
+
+`manage-unit-files` is deliberately not granted — systemd exposes no unit name
+to polkit for it, so allowing it would mean allowing *any* unit to be enabled
+at boot. That is why enabling is inside the root helper rather than something
+the frame does itself.
+
 ## Testing without a Pi
 
 The `headless` backend creates a surfaceless EGL context and renders into a
@@ -208,8 +234,12 @@ It does not, and largely cannot, cover:
   the download path, the apt fallback that installs packages one at a time,
   the venv rebuild after a Python upgrade — is tested by hand.
 - **The wizard's system changes.** Writing the unit, the udev rule, the polkit
-  rule and the Samba block all need root and a real systemd, udev, polkit and
+  rules and the Samba block all need root and a real systemd, udev, polkit and
   Samba. The unit *text* is verified; the act of installing it is not.
+- **Syncthing itself.** The folder object, the addresses, the device ids and
+  the permission files are unit-tested; installing the package, enabling the
+  service and a real pairing between two machines are done by hand. A mock of
+  Syncthing's API would only ever test the mock.
 - **`/boot/firmware/cmdline.txt`.** No runner has one. The single-line rule and
   the backup are enforced in code and reviewed by reading.
 - **Real hardware.** No DRM master, no KMS page flip, no vsync, no DSI panel,

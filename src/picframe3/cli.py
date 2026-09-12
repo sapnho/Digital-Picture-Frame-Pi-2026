@@ -408,6 +408,40 @@ def cmd_doctor(args) -> int:
             if config.network.repair:
                 check("may mend its own connection", *_repair_permission())
 
+    # -- Syncthing, when the frame is meant to be running it
+    #
+    # A frame whose pictures arrive over Syncthing has a second thing that can
+    # be quietly broken: the service is off, or it is running but has no
+    # folder, and the photographs simply stop arriving. Nothing on the wall
+    # says so -- the last picture looks perfect -- so doctor asks.
+    if config.sync.enabled:
+        from . import sync as sync_module
+
+        state = sync_module.status(config)
+        if not state["installed"]:
+            ok &= check("Syncthing", False, "switched on, but not installed",
+                        "picframe3 sync on")
+        elif not state["running"]:
+            ok &= check("Syncthing", False, "installed, but not running",
+                        f"sudo systemctl start {state['unit']}")
+        elif state["error"]:
+            ok &= check("Syncthing", False, state["error"])
+        elif state["folder"] is None:
+            ok &= check("Syncthing", False, "running, but keeping no folder "
+                        "for the frame", "picframe3 sync folder")
+        else:
+            folder = state["folder"]
+            check("Syncthing", True,
+                  f"{state['version'] or 'running'} · {folder['path']} · "
+                  f"{folder['files']} files · "
+                  f"{len(state['devices'])} paired machine(s)")
+            if folder["need_bytes"]:
+                print(f"     → {folder['need_bytes'] / 1024 ** 2:.0f} MiB still "
+                      f"on its way in")
+            if state["pending"]:
+                print(f"     → {len(state['pending'])} machine(s) waiting to be "
+                      f"paired; accept them on the settings page")
+
     # -- the keyboard and the touchscreen
     #
     # Group membership is necessary and nowhere near sufficient. Raspberry Pi
@@ -545,6 +579,64 @@ def _literal(text: str):
         return text
 
 
+def cmd_sync(args) -> int:
+    """Syncthing from a terminal: where it stands, on, off, or re-align it.
+
+    The settings page does all of this, and this exists for the two occasions
+    it cannot: a frame whose web interface is switched off, and somebody on
+    the end of an SSH session who would rather see it written down.
+    """
+    setup_logging(args.log_level or "WARNING", "", False)
+    from . import sync as sync_module
+
+    config = Config.load(args.config)
+    action = args.action or "status"
+
+    try:
+        if action == "on":
+            config.sync.enabled = True
+            config.save()
+            print("switching Syncthing on — installing it if it is missing, "
+                  "which takes a minute or two…")
+            sync_module.apply(config, switch=True)
+        elif action == "off":
+            config.sync.enabled = False
+            config.save()
+            sync_module.apply(config, switch=False)
+            print("Syncthing stopped. Its folders, pairings and photographs "
+                  "are untouched.")
+            return 0
+        elif action == "folder":
+            sync_module.apply(config)
+    except sync_module.SyncError as exc:
+        print(f"✗ {exc}")
+        return 1
+
+    state = sync_module.status(config)
+    print(f"configured   {'on' if state['configured'] else 'off'}")
+    print(f"installed    {'yes' if state['installed'] else 'no'}")
+    print(f"running      {'yes' if state['running'] else 'no'}"
+          f"{' (starts with the Pi)' if state['enabled_at_boot'] else ''}")
+    if state["device_id"]:
+        print(f"this frame   {state['device_id']}")
+    if state["folder"]:
+        folder = state["folder"]
+        print(f"folder       {folder['path']}  ·  {folder['type']}  ·  "
+              f"{folder['files']} files  ·  {folder['state'] or 'idle'}")
+    elif state["installed"]:
+        print("folder       not set up yet — run: picframe3 sync folder")
+    for device in state["devices"]:
+        print(f"paired with  {device['name']}  "
+              f"{'connected' if device['connected'] else 'offline'}"
+              f"{'' if device['shares_the_pictures'] else '  (not sharing the pictures)'}")
+    for device in state["pending"]:
+        print(f"waiting      {device['name'] or device['device_id'][:7]} wants to "
+              f"pair — accept it on the settings page, or in Syncthing itself")
+    if state["error"]:
+        print(f"note         {state['error']}")
+    return 0
+
+
 def cmd_demo(args) -> int:
     """Render sample frames offscreen -- useful before any hardware exists."""
     setup_logging(args.log_level or "INFO", "", False)
@@ -592,6 +684,10 @@ def cmd_uninstall(args) -> int:
         SAMBA_END,
         SERVICE_NAME,
         SERVICE_UNIT,
+        SYNC_HELPER,
+        SYNC_OFF_UNIT,
+        SYNC_ON_UNIT,
+        SYNC_POLKIT_RULE,
         UDEV_RULE,
         run_root,
         say,
@@ -613,6 +709,19 @@ def cmd_uninstall(args) -> int:
         if shutil.which("udevadm"):
             run_root(["udevadm", "control", "--reload"])
         say(f"removed {UDEV_RULE} (input and DRM device permissions)")
+
+    # The Syncthing switch, but never Syncthing itself: it may well be
+    # keeping folders that have nothing to do with the frame, and a package
+    # this uninstaller did not necessarily install is not its to remove.
+    leftovers = [path for path in (SYNC_POLKIT_RULE, SYNC_ON_UNIT,
+                                  SYNC_OFF_UNIT, SYNC_HELPER)
+                 if os.path.exists(path)]
+    if leftovers:
+        run_root(["rm", "-f", *leftovers])
+        run_root(["systemctl", "daemon-reload"])
+        say("removed the Syncthing switch (the units, the helper and the "
+            "polkit rule). Syncthing itself, its folders and its pairings "
+            "were left alone.")
 
     # Only our own shim. If something else put a picframe3 there -- a distro
     # package, a hand-written script -- removing it would be vandalism, and a
@@ -734,6 +843,13 @@ def build_parser() -> argparse.ArgumentParser:
     conf.add_argument("--get", metavar="KEY")
     conf.add_argument("--set", metavar="KEY=VALUE")
     conf.set_defaults(func=cmd_config)
+
+    syncp = sub.add_parser("sync", help="Syncthing: status, on, off, folder")
+    syncp.add_argument("action", nargs="?", default="status",
+                       choices=["status", "on", "off", "folder"],
+                       help="status (default), on, off, or folder to create "
+                            "or re-align the frame's folder")
+    syncp.set_defaults(func=cmd_sync)
 
     demo = sub.add_parser("demo", help="render sample frames to a PNG, offscreen")
     demo.add_argument("-o", "--output", default="picframe3-demo.png")
