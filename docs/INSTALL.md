@@ -152,6 +152,9 @@ never sent anything back at all, set **Which way photographs travel** to
 a folder onto it while you are on the same network:
 
 - **macOS:** Finder → Go → Connect to Server → `smb://frame.local/Pictures`
+  The share is set up with Samba's `fruit` layer, so Finder's metadata goes
+  into extended attributes rather than into a `._DSC1234.jpg` beside every
+  photograph.
 - **Windows:** Explorer → `\\frame\Pictures`
 
 Or, with neither:

@@ -25,6 +25,7 @@ Which screen to use and how hard to drive it.
 | `backend` | string | `'auto'` | `auto` uses the screen if there is one, otherwise renders offscreen. *(takes effect on restart)* |
 | `device` | str | None | `None` | `/dev/dri/card1`. Empty takes the first card with a connected output. *(takes effect on restart)* *(advanced)* |
 | `connector` | str | None | `None` | `HDMI-A-1`, `HDMI-A-2`, `DSI-1`… Empty takes the first connected output. *(takes effect on restart)* *(advanced)* |
+| `mode` | string | *(empty)* | `3840x2160@30`, `1920x1080`. Empty takes the mode the screen says it prefers, which is almost always right — name one when it is not: a 4K television asks for 2160p60, which a Pi 4 cannot drive without `hdmi_enable_4kp60` in `config.txt`. `picframe3 doctor` lists what this screen offers. *(takes effect on restart)* |
 | `rotate` | integer | `0` | 0 or 180. For a quarter turn rotate in the kernel (`video=HDMI-A-1:1080x1920M@60,rotate=90`) so the Pi reports a portrait mode. |
 | `vsync` | boolean | `True` | Page-flip on the vertical blank. Turning it off tears; it exists for debugging. *(takes effect on restart)* *(advanced)* |
 | `fps_limit` | number | `60.0` | Only applies while something is animating; a still picture draws no frames. *(takes effect on restart)* |
@@ -78,7 +79,8 @@ How a picture is composed on screen, and what is written over it.
 | `font` | str | None | `None` | Path to a .ttf. Empty finds DejaVu, Noto or Liberation. |
 | `show_text` | list of strings | `['title', 'caption', 'date', 'location']` | What is written over the picture, in the order it is written. |
 | `text_size` | integer | `34` | Caption type size, in pixels at 1080p. |
-| `text_seconds` | number | `16.0` | How long the caption stays up after each change. |
+| `text_seconds` | number | `16.0` | How long the caption stays up after each change. 0 writes nothing by itself — the caption then appears only when you ask for it. |
+| `peek_seconds` | number | `40.0` | How long the caption stays up when you *ask* for it — the Home Assistant button, the `i` key — rather than the seconds it gets by itself. A deliberate look wants longer than a glance. |
 | `text_justify` | string | `'L'` | Left, centred or right. A pair of portraits always centres each caption under its own picture. |
 | `text_opacity` | number | `1.0` | 0–1. *(advanced)* |
 | `text_margin_x` | integer | `64` | Gap from the side of the screen to the caption. *(advanced)* |
@@ -86,6 +88,7 @@ How a picture is composed on screen, and what is written over it.
 | `text_scrim` | number | `0.5` | Darkening behind the caption so it stays legible over a bright picture. 0–1. |
 | `text_separator` | string | `'  ·  '` | Written between the caption elements. |
 | `date_format` | string | `'%-d %B %Y'` | strftime: `%-d %B %Y` is "7 September 2026", `%d.%m.%Y` is "07.09.2026". |
+| `locale` | string | *(empty)* | Which language month and day names come out in: `de_DE.UTF-8`, `fr_FR.UTF-8`. Empty uses the system's own, which under systemd is usually English whatever the Pi is set to. The locale has to be generated on the Pi — `doctor` says whether it is. |
 | `show_clock` | boolean | `False` | A large clock over the picture. |
 | `clock_format` | string | `'%H:%M'` | strftime: `%H:%M` or `%-I:%M %p`. |
 | `clock_size` | integer | `120` | Type size, in pixels at 1080p. |

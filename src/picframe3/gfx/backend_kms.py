@@ -36,6 +36,7 @@ class KmsBackend(Backend):
         vsync: bool = True,
         width: int | None = None,
         height: int | None = None,
+        mode: str = "",
     ):
         # Every handle the partial teardown below may have to give back, so
         # that a failure half way through this constructor does not leave the
@@ -49,7 +50,7 @@ class KmsBackend(Backend):
         self._ctx = None
         self._surf = None
         try:
-            self._setup(device, connector, vsync, width, height)
+            self._setup(device, connector, vsync, width, height, mode)
         except BaseException:
             self._teardown()
             raise
@@ -61,10 +62,11 @@ class KmsBackend(Backend):
         vsync: bool,
         width: int | None,
         height: int | None,
+        mode: str = "",
     ) -> None:
         self._drm = drm.DrmDevice(device)
         self._drm.become_master()
-        self.output = self._drm.find_output(connector)
+        self.output = self._drm.find_output(connector, mode)
         self._vsync = vsync
         # ``vsync: false`` only means anything if the driver can flip outside
         # the vblank; without the capability the flip is queued normally and

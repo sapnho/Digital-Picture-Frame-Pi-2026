@@ -35,6 +35,10 @@ $("#prev").onclick = () => send("previous");
 $("#next").onclick = () => send("next");
 $("#pause").onclick = () => send("toggle_pause");
 $("#power").onclick = () => send("display_toggle");
+/* Both halves of one button: reveal the caption for viewer.peek_seconds, or
+   take it away again now. A frame configured with `text_seconds: 0` writes
+   nothing until this is pressed. */
+$("#caption").onclick = () => send(state?.show_info ? "info_hide" : "info_show");
 $("#del").onclick = async () => {
   if (!confirm("Move this picture out of the library?")) return;
   try {
@@ -153,6 +157,7 @@ function render(next) {
 
   $("#pause").textContent = state.paused ? "Resume" : "Pause";
   $("#power").textContent = state.display_on ? "Screen off" : "Screen on";
+  $("#caption").textContent = state.show_info ? "Hide caption" : "Show caption";
 
   if (!dragging) {
     brightness.value = Math.round((state.brightness ?? 1) * 100);

@@ -72,6 +72,7 @@ DIRECT: dict[str, str] = {
 
     "http.use_http": "http.enabled",
     "http.port": "http.port",
+    "model.locale": "viewer.locale",
     "http.username": "http.auth_user",
     "http.password": "http.auth_password",
 }
@@ -93,7 +94,6 @@ RETIRED: dict[str, str] = {
     "viewer.menu_autohide_tm": "the on-screen menu was replaced by the web UI",
     "model.image_attr": "all metadata is published; no allow-list needed",
     "model.db_file": "use library.database",
-    "model.locale": "the system locale is used",
     "model.sort_cols": "use slideshow.order (shuffle, date_desc, name, folder, …)",
     "model.update_interval": "inotify replaces polling; see library.rescan_interval",
     "http.path": "the web UI ships inside the package",
@@ -165,6 +165,19 @@ def migrate(old_path: str, *, new_path: str | None = None) -> tuple[Config, list
                   if w in show_text.lower()]
         if wanted:
             config.set("viewer.show_text", wanted)
+        else:
+            # An empty show_text in picframe usually did not mean "never write
+            # anything": it meant "nothing by default", with the text switched
+            # on from Home Assistant when somebody wanted to know where a
+            # photograph was taken.  picframe3 says that differently -- list
+            # the elements, and give them no time of their own -- and a
+            # migration that only copied the emptiness across would leave the
+            # Show-the-caption button with nothing to show.
+            notes.append(
+                "viewer.show_text was empty: if you switched the text on from "
+                "Home Assistant, list the elements you want (e.g. date, "
+                "location) and set viewer.text_seconds: 0 — the caption then "
+                "appears only when asked for, for viewer.peek_seconds")
 
     keys = _get(old, "model.key_list")
     if keys:

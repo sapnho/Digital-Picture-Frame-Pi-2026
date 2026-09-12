@@ -38,6 +38,15 @@ class DisplayConfig:
     backend: str = "auto"                 # auto | kms | headless
     device: str | None = None          # /dev/dri/card1; None = autodetect
     connector: str | None = None       # HDMI-A-1; None = first connected
+    #: Which mode to set, as ``1920x1080`` or ``3840x2160@30``.  Empty takes
+    #: the connector's preferred mode, which is the right answer for almost
+    #: every panel.  It is not the right answer when the preferred mode is one
+    #: the Pi cannot actually drive -- a 4K television asks for 2160p60, which
+    #: needs ``hdmi_enable_4kp60`` on a Pi 4 and is beyond the Pi 4's pixel
+    #: clock without it -- or when a panel offers several and lies about which
+    #: it likes.  A mode the connector does not list is refused with the list
+    #: of the ones it does, rather than rendering somewhere nobody can see.
+    mode: str = ""
     #: 0 or 180.  A quarter turn is done by the kernel instead
     #: (``video=HDMI-A-1:1080x1920M@60,rotate=90`` in cmdline.txt) so the Pi
     #: reports a portrait mode and every layer works in real pixels.
@@ -105,6 +114,13 @@ class ViewerConfig:
     )
     text_size: int = 34
     text_seconds: float = 16.0
+    #: How long the caption stays up when it is *asked* for -- the Home
+    #: Assistant button, the ``i`` key -- rather than the few seconds it gets
+    #: by itself after each change.  A deliberate look wants longer than a
+    #: glance, and picframe had one number for both: making the reveal last
+    #: meant every slide's caption lasting too.  Setting ``text_seconds: 0``
+    #: and leaving this long is the "captions only when I ask" frame.
+    peek_seconds: float = 40.0
     text_justify: str = "L"
     text_opacity: float = 1.0
     text_margin_x: int = 64
@@ -114,6 +130,10 @@ class ViewerConfig:
     #: information; "\n" puts each element on its own line.
     text_separator: str = "  ·  "
     date_format: str = "%-d %B %Y"
+    #: Which language month and day names come out in: ``de_DE.UTF-8``,
+    #: ``fr_FR.UTF-8``, ``en_GB.UTF-8``.  Empty leaves the process locale
+    #: alone.  This is picframe's ``model.locale``.
+    locale: str = ""
 
     show_clock: bool = False
     clock_format: str = "%H:%M"
@@ -477,6 +497,49 @@ class Config:
 
     def copy(self) -> Config:
         return copy.deepcopy(self)
+
+
+# --------------------------------------------------------------------------
+# Locale
+# --------------------------------------------------------------------------
+
+def set_time_locale(name: str) -> bool:
+    """Make ``%B``, ``%b`` and ``%A`` come out in the owner's language.
+
+    A frame writes one date per picture, so "7 September 2026" on a German
+    wall is the kind of small wrongness that never stops being noticed.
+    picframe had ``model.locale``; picframe3 inherited the process locale
+    instead, which under systemd on Raspberry Pi OS Lite is ``C`` -- English,
+    whatever ``raspi-config`` was told, because nothing exports ``LANG`` to a
+    service.
+
+    Returns whether the locale is now in force.  A locale the system has not
+    generated cannot be set, and saying so beats leaving the dates in English
+    with no explanation -- ``doctor`` reports it too.
+    """
+    if not name:
+        return True
+
+    import locale as locale_module
+
+    tried: list[str] = []
+    for candidate in (name, name.replace("-", "_"),
+                      f"{name}.UTF-8", f"{name}.utf8"):
+        if candidate in tried:
+            continue
+        tried.append(candidate)
+        try:
+            locale_module.setlocale(locale_module.LC_TIME, candidate)
+            _log.info("date and time names in %s", candidate)
+            return True
+        except locale_module.Error:
+            continue
+    _log.warning(
+        "locale %r is not available on this system, so dates stay in the "
+        "default language; generate it with 'sudo dpkg-reconfigure locales' "
+        "(or add it to /etc/locale.gen and run 'sudo locale-gen')", name,
+    )
+    return False
 
 
 # --------------------------------------------------------------------------

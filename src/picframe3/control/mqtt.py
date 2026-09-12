@@ -316,7 +316,24 @@ class MqttBridge:
             self._submit(Command(
                 Action.PAUSE if low in ("on", "true", "1") else Action.RESUME,
                 source="mqtt"))
-        elif name in ("next", "previous", "rescan", "delete", "restart"):
+        elif name == "captions":
+            # One switch for "is there a caption at all", so the frame can be
+            # left with `text_seconds: 0` -- nothing written over the picture
+            # until somebody asks -- which is how picframe's owners used its
+            # text switches.
+            self._submit(Command(
+                Action.INFO_SHOW if low in ("on", "true", "1") else Action.INFO_HIDE,
+                source="mqtt"))
+        elif name == "caption_fields":
+            # A comma-separated list, like the tags box: "date, location".
+            # Split here rather than relying on the config layer to coerce a
+            # string into a list, so an empty box means "write nothing".
+            wanted = [part.strip() for part in payload.split(",") if part.strip()]
+            self._submit(Command(
+                Action.SET_CONFIG, {"key": "viewer.show_text", "value": wanted},
+                source="mqtt"))
+        elif name in ("next", "previous", "rescan", "delete", "restart",
+                      "info_show"):
             # Every one of these is an announced button.  `restart` was missing
             # here while being announced, so Home Assistant showed a Restart
             # button that did nothing at all and logged "unhandled topic".
@@ -629,6 +646,27 @@ class MqttBridge:
                 "payload_on": "on", "payload_off": "off",
                 "state_on": "ON", "state_off": "OFF",
                 "icon": "mdi:pause",
+            }),
+            ("switch", "captions", {
+                **base,
+                "name": "Captions",
+                "unique_id": f"picframe3_{uid}_captions",
+                "command_topic": self.entity_topic("captions"),
+                "value_template": "{{ 'ON' if value_json.show_info else 'OFF' }}",
+                "payload_on": "on", "payload_off": "off",
+                "state_on": "ON", "state_off": "OFF",
+                "icon": "mdi:format-text",
+            }),
+            ("text", "caption_fields", {
+                **base,
+                "name": "Caption elements",
+                "unique_id": f"picframe3_{uid}_caption_fields",
+                "command_topic": self.entity_topic("caption_fields"),
+                "value_template":
+                    "{{ value_json.caption_fields | default([], true) | join(', ') }}",
+                "max": 255,
+                "icon": "mdi:text-short",
+                "entity_category": "config",
             }),
             ("number", "interval", {
                 **base,
@@ -951,6 +989,9 @@ class MqttBridge:
         ]
         for action, label, icon in (
             ("next", "Next picture", "mdi:skip-next"),
+            # The one picframe never had: read the caption *now*, for
+            # `viewer.peek_seconds`, without leaving it up for ever.
+            ("info_show", "Show the caption", "mdi:message-text-outline"),
             ("previous", "Previous picture", "mdi:skip-previous"),
             ("rescan", "Rescan library", "mdi:folder-refresh"),
             ("restart", "Restart the frame", "mdi:restart"),

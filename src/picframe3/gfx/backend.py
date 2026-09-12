@@ -109,6 +109,7 @@ def create_backend(
     device: str | None = None,
     connector: str | None = None,
     vsync: bool = True,
+    mode: str = "",
 ) -> Backend:
     """Instantiate a backend.
 
@@ -131,7 +132,7 @@ def create_backend(
 
                 return backend_kms.KmsBackend(
                     device=device, connector=connector, vsync=vsync,
-                    width=width, height=height,
+                    width=width, height=height, mode=mode,
                 )
             if name == "headless":
                 return backend_headless.HeadlessBackend(

@@ -27,6 +27,12 @@ display:
   # HDMI-A-1, HDMI-A-2, DSI-1… Empty takes the first connected output.
   # (restart) (advanced)
   connector: null
+  # 3840x2160@30, 1920x1080. Empty takes the mode the screen says it
+  # prefers, which is almost always right — name one when it is not: a 4K
+  # television asks for 2160p60, which a Pi 4 cannot drive without
+  # hdmi_enable_4kp60 in config.txt. picframe3 doctor lists what this screen
+  # offers. (restart)
+  mode: ''
   # 0 or 180. For a quarter turn rotate in the kernel
   # (video=HDMI-A-1:1080x1920M@60,rotate=90) so the Pi reports a portrait
   # mode.
@@ -118,7 +124,13 @@ viewer:
   # What is written over the picture, in the order it is written.
   show_text: [title, caption, date, location]
   text_size: 34           # Caption type size, in pixels at 1080p.
-  text_seconds: 16.0      # How long the caption stays up after each change.
+  # How long the caption stays up after each change. 0 writes nothing by
+  # itself — the caption then appears only when you ask for it.
+  text_seconds: 16.0
+  # How long the caption stays up when you *ask* for it — the Home Assistant
+  # button, the i key — rather than the seconds it gets by itself. A
+  # deliberate look wants longer than a glance.
+  peek_seconds: 40.0
   # Left, centred or right. A pair of portraits always centres each caption
   # under its own picture.
   text_justify: L
@@ -131,6 +143,11 @@ viewer:
   text_separator: '  ·  ' # Written between the caption elements.
   # strftime: %-d %B %Y is "7 September 2026", %d.%m.%Y is "07.09.2026".
   date_format: '%-d %B %Y'
+  # Which language month and day names come out in: de_DE.UTF-8,
+  # fr_FR.UTF-8. Empty uses the system's own, which under systemd is usually
+  # English whatever the Pi is set to. The locale has to be generated on the
+  # Pi — doctor says whether it is.
+  locale: ''
   show_clock: false       # A large clock over the picture.
   clock_format: '%H:%M'   # strftime: %H:%M or %-I:%M %p.
   clock_size: 120         # Type size, in pixels at 1080p.

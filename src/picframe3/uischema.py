@@ -67,6 +67,7 @@ NOTES = {
     "display.rotate": "0 or 180. For a quarter turn rotate in the kernel (`video=HDMI-A-1:1080x1920M@60,rotate=90`) so the Pi reports a portrait mode.",
     "display.device": "`/dev/dri/card1`. Empty takes the first card with a connected output.",
     "display.connector": "`HDMI-A-1`, `HDMI-A-2`, `DSI-1`… Empty takes the first connected output.",
+    "display.mode": "`3840x2160@30`, `1920x1080`. Empty takes the mode the screen says it prefers, which is almost always right — name one when it is not: a 4K television asks for 2160p60, which a Pi 4 cannot drive without `hdmi_enable_4kp60` in `config.txt`. `picframe3 doctor` lists what this screen offers.",
     "display.vsync": "Page-flip on the vertical blank. Turning it off tears; it exists for debugging.",
     "display.fps_limit": "Only applies while something is animating; a still picture draws no frames.",
     "display.background": "Red, green, blue, alpha, each 0–1. Shown around a picture that does not fill the screen.",
@@ -106,13 +107,15 @@ NOTES = {
     "viewer.show_text": "What is written over the picture, in the order it is written.",
     "viewer.text_separator": "Written between the caption elements.",
     "viewer.text_size": "Caption type size, in pixels at 1080p.",
-    "viewer.text_seconds": "How long the caption stays up after each change.",
+    "viewer.text_seconds": "How long the caption stays up after each change. 0 writes nothing by itself — the caption then appears only when you ask for it.",
+    "viewer.peek_seconds": "How long the caption stays up when you *ask* for it — the Home Assistant button, the `i` key — rather than the seconds it gets by itself. A deliberate look wants longer than a glance.",
     "viewer.text_justify": "Left, centred or right. A pair of portraits always centres each caption under its own picture.",
     "viewer.text_opacity": "0–1.",
     "viewer.text_margin_x": "Gap from the side of the screen to the caption.",
     "viewer.text_margin_y": "Gap above and below the caption inside its band.",
     "viewer.text_scrim": "Darkening behind the caption so it stays legible over a bright picture. 0–1.",
     "viewer.date_format": "strftime: `%-d %B %Y` is \"7 September 2026\", `%d.%m.%Y` is \"07.09.2026\".",
+    "viewer.locale": "Which language month and day names come out in: `de_DE.UTF-8`, `fr_FR.UTF-8`. Empty uses the system's own, which under systemd is usually English whatever the Pi is set to. The locale has to be generated on the Pi — `doctor` says whether it is.",
     "viewer.show_clock": "A large clock over the picture.",
     "viewer.clock_format": "strftime: `%H:%M` or `%-I:%M %p`.",
     "viewer.clock_size": "Type size, in pixels at 1080p.",
@@ -211,6 +214,9 @@ LABELS = {
     "recent_days": "Treat photographs as new for (days)",
     "reshuffle_after": "Reshuffle after (rounds)",
     "text_seconds": "Caption stays up for (s)",
+    "peek_seconds": "When asked for, stays up for (s)",
+    "viewer.locale": "Language for dates",
+    "display.mode": "Screen mode",
     "transition_choices": "Transitions “random” may use",
     "fit_choices": "What “auto” may do with a mismatched picture",
     "mat_style": "Mat styles",
@@ -459,6 +465,7 @@ LIMITS: dict[str, tuple[float | None, float | None]] = {
     "viewer.text_opacity": (0.0, 1.0),
     "viewer.text_scrim": (0.0, 1.0),
     "viewer.text_seconds": (0.0, None),
+    "viewer.peek_seconds": (0.0, 3600.0),
     "viewer.clock_size": (6, 512),
     "viewer.clock_opacity": (0.0, 1.0),
     "viewer.blur_amount": (0.0, None),
@@ -723,8 +730,13 @@ def _state_captions(c) -> str:
     written = [CAPTION_SHORT.get(name, name) for name in (v.show_text or [])]
     if not written:
         return "Nothing written over the picture"
+    # `text_seconds: 0` is a frame that writes nothing until it is asked to,
+    # which is a different frame from one whose caption lasts 16 seconds --
+    # and the card has to say which of the two this is.
+    when = (f"up for {_n(v.text_seconds)} s" if v.text_seconds > 0
+            else "only when asked for")
     return (f"{_list(written, 4)} — {JUSTIFY_SHORT.get(v.text_justify, v.text_justify)}, "
-            f"{v.text_size} px, up for {_n(v.text_seconds)} s")
+            f"{v.text_size} px, {when}")
 
 
 def _state_library(c) -> str:
@@ -797,7 +809,10 @@ def _state_screen(c) -> str:
     turn = {0: "Upright", 180: "Upside down"}.get(int(d.rotate or 0), f"{d.rotate}°")
     backend = {"auto": "automatic backend", "kms": "kms backend",
                "headless": "no screen — headless"}.get(d.backend, d.backend)
-    return f"{turn} · brightness {_ratio(d.brightness)} · {backend}"
+    mode = d.mode.strip() if d.mode else ""
+    return " · ".join(filter(None, [
+        mode or None, turn, f"brightness {_ratio(d.brightness)}", backend,
+    ]))
 
 
 def _state_places(c) -> str:
@@ -870,7 +885,8 @@ JOBS = [
     {"name": "captions", "kicker": "Captions", "title": "What is written over the picture",
      "section": "viewer", "state": _state_captions,
      "fields": ["viewer.show_text", "viewer.text_size", "viewer.text_seconds",
-                "viewer.text_justify", "viewer.date_format"]},
+                "viewer.peek_seconds", "viewer.text_justify",
+                "viewer.date_format", "viewer.locale"]},
     {"name": "library", "kicker": "Library", "title": "Where the photographs come from",
      "section": "library", "state": _state_library,
      "fields": ["library.picture_folders", "library.subfolder",
@@ -893,7 +909,8 @@ JOBS = [
      "fields": ["power.enabled", "power.schedule", "power.dim_schedule"]},
     {"name": "screen", "kicker": "Screen", "title": "The panel itself",
      "section": "display", "state": _state_screen,
-     "fields": ["display.backend", "display.rotate", "display.brightness"]},
+     "fields": ["display.mode", "display.backend", "display.rotate",
+                "display.brightness"]},
     {"name": "places", "kicker": "Places", "title": "Naming where a photo was taken",
      "section": "geo", "state": _state_places,
      "fields": ["geo.enabled", "geo.contact", "geo.language", "geo.detail",

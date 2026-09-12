@@ -12,7 +12,7 @@ from typing import Any
 
 from . import __version__, uischema
 from . import settings as settings_module
-from .config import Config
+from .config import Config, set_time_locale
 from .control.power import BacklightControl, PowerSchedule
 from .events import Action, Bus, Command, State
 from .gfx import Renderer, create_backend, transitions
@@ -168,11 +168,13 @@ class PicFrame:
     # ------------------------------------------------------------------
     def setup(self) -> None:
         cfg = self.config
+        set_time_locale(cfg.viewer.locale)
         self.backend = create_backend(
             cfg.display.backend,
             device=cfg.display.device,
             connector=cfg.display.connector,
             vsync=cfg.display.vsync,
+            mode=cfg.display.mode,
         )
         self.backend.make_current()
         self.renderer = Renderer(
@@ -707,6 +709,26 @@ class PicFrame:
         self.renderer.set_overlay("info", placement.image, x=placement.x, y=placement.y,
                                   alpha=0.0, z=10)
 
+    def _peek_seconds(self, payload: dict[str, Any] | None = None) -> float:
+        """How long a caption asked for by hand stays up.
+
+        ``{"seconds": 90}`` in the command wins, then ``viewer.peek_seconds``,
+        then the automatic caption time -- so a frame that has never heard of
+        peeking behaves exactly as it did.  A deliberate reveal is a different
+        act from the caption that comes with each picture, and wanting to read
+        it for a minute should not mean every slide's caption lasting a minute.
+        """
+        asked = (payload or {}).get("seconds")
+        if asked is not None:
+            try:
+                value = float(asked)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0:
+                return value
+        return (self.config.viewer.peek_seconds
+                or self.config.viewer.text_seconds)
+
     @staticmethod
     def _ease(t: float) -> float:
         """Smoothstep: flat at both ends, steepest in the middle.
@@ -724,9 +746,13 @@ class PicFrame:
         The second value drives the render loop: while it is true the loop has
         to keep drawing, because nothing else on the frame is changing.
         """
-        fade = max(0.001, min(1.5, self.config.viewer.text_seconds / 4))
         start = self._slide_started + self.config.slideshow.transition_time
         end = self._info_until
+        # A quarter of however long this caption is up for, so a 40-second
+        # reveal fades like a 16-second one rather than snapping on -- and so
+        # that `text_seconds: 0` (captions only when asked for) does not make
+        # every reveal instant.
+        fade = max(0.001, min(1.5, (end - start) / 4))
         if self.paused:
             return 1.0, False
         if now < start:
@@ -873,17 +899,23 @@ class PicFrame:
         elif action is Action.BRIGHTNESS:
             value = float(payload.get("value", 1.0))
             self.set_brightness(value)
-        elif action in (Action.INFO_TOGGLE, Action.INFO_SHOW):
-            self.show_info = not self.show_info if action is Action.INFO_TOGGLE else True
+        elif action in (Action.INFO_TOGGLE, Action.INFO_SHOW, Action.INFO_HIDE):
+            if action is Action.INFO_HIDE:
+                self.show_info = False
+            elif action is Action.INFO_TOGGLE:
+                self.show_info = not self.show_info
+            else:
+                self.show_info = True
             if self.current:
                 self._build_info_overlay(self.current)
+            if self.show_info and self.current:
                 # Fade it in from wherever it is, rather than snapping it on:
                 # the fade is measured from the slide's start, so start the
                 # caption's clock now.  (This line used to be a no-op --
                 # _slide_started is never in the future.)
                 self._slide_started = (time.monotonic()
                                        - self.config.slideshow.transition_time)
-                self._info_until = time.monotonic() + self.config.viewer.text_seconds
+                self._info_until = time.monotonic() + self._peek_seconds(payload)
             self._dirty = True
         elif action is Action.CLOCK_TOGGLE:
             self.config.viewer.show_clock = not self.config.viewer.show_clock
@@ -1327,6 +1359,7 @@ class PicFrame:
             interval=self.config.slideshow.interval,
             order=self.playlist.order if self.playlist else "shuffle",
             show_info=self.show_info,
+            caption_fields=list(self.config.viewer.show_text or []),
             show_clock=self.config.viewer.show_clock,
             playlist_size=self.playlist.size if self.playlist else 0,
             playlist_position=self.playlist.position if self.playlist else 0,

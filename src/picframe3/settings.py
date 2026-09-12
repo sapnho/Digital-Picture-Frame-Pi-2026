@@ -26,6 +26,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import uischema
+from .config import set_time_locale
 from .control.power import PowerSchedule
 from .gfx import transitions
 from .media import geocode as geocode_module
@@ -73,6 +74,10 @@ class ConfigApplier:
     # ------------------------------------------------------------------
     def _on_viewer(self, key: str) -> None:
         frame = self.frame
+        if key.endswith(".locale"):
+            # Process-wide, so it has to be set rather than passed: strftime
+            # reads LC_TIME from the C library, not from an argument.
+            set_time_locale(frame.config.viewer.locale)
         frame.loader.options = frame._prepare_options()
         # The next picture may already be prepared with the old mat, fit or
         # headroom.  Without throwing that away, every viewer change appeared

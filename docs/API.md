@@ -12,7 +12,7 @@ Every control surface produces the same command. The actions are:
 | `delete` | — | move the current picture to `library.deleted_folder` |
 | `display_on`, `display_off`, `display_toggle` | — | panel power (DRM DPMS) |
 | `brightness` | `{"value": 0.0–1.0}` | dim without turning off |
-| `info_toggle`, `info_show` | — | the caption overlay |
+| `info_toggle`, `info_show`, `info_hide` | `info_show` takes `{"seconds": 90}` | the caption overlay. `info_show` reveals it for `viewer.peek_seconds`; a frame with `text_seconds: 0` writes nothing until asked |
 | `clock_toggle` | — | the clock overlay |
 | `set_config` | `{"key": "slideshow.interval", "value": 120}` | any setting, live |
 | `set_filters` | see below | narrow the playlist |
@@ -213,6 +213,9 @@ Topics, with `mqtt.topic_prefix` defaulting to `picframe` and `device_id` to
 | `picframe/picframe/display/set` | in | `on` / `off` |
 | `picframe/picframe/brightness/set` | in | `0`–`255` |
 | `picframe/picframe/pause/set` | in | `on` / `off` |
+| `picframe/picframe/captions/set` | in | `on` / `off` — write a caption at all |
+| `picframe/picframe/caption_fields/set` | in | `date, location` — which elements |
+| `picframe/picframe/info_show/set` | in | any payload reveals the caption for `viewer.peek_seconds` |
 | `picframe/picframe/next/set` … | in | any payload triggers it |
 | `picframe/picframe/interval/set` | in | seconds |
 | `picframe/picframe/transition/set` | in | a transition name |
@@ -277,6 +280,14 @@ itself and the frame merges it into the filter already in force:
   whole filter as attributes
 - `binary_sensor.<name>_filter_active`
 - `button.<name>_show_everything_again`
+
+**The caption**, for a frame that keeps it off and asks for it when somebody
+wants to know where a photograph was taken — which is what picframe's owners
+built out of its text switches:
+
+- `switch.<name>_captions` — whether anything is written over the picture
+- `text.<name>_caption_elements` — `date, location` (config)
+- `button.<name>_show_the_caption` — reveals it for `viewer.peek_seconds`
 
 - `binary_sensor.<name>_scanning`
 - `binary_sensor.<name>_restart_needed` — on when a setting has been changed

@@ -17,6 +17,7 @@ import ctypes
 import ctypes.util
 import logging
 import os
+import re
 import select
 import time
 from collections.abc import Iterator
@@ -270,6 +271,25 @@ class FlipResult:
     completions: int = 0
 
 
+def mode_name(m: ModeInfo) -> str:
+    """``3840x2160@60`` -- how a mode is written in config and in ``doctor``."""
+    return f"{m.hdisplay}x{m.vdisplay}@{m.refresh_hz:.0f}"
+
+
+def parse_mode(text: str) -> tuple[int, int, float | None] | None:
+    """``"3840x2160@30"`` -> ``(3840, 2160, 30.0)``; refresh optional.
+
+    Returns None for anything that is not a mode, so the caller can say so
+    and carry on with the preferred mode rather than failing to start.
+    """
+    m = re.match(r"^\s*(\d{2,5})\s*[x\u00d7]\s*(\d{2,5})"
+                 r"\s*(?:[@/]\s*(\d{1,3}(?:\.\d+)?))?\s*(?:hz)?\s*$",
+                 text.strip(), re.IGNORECASE)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), float(m.group(3)) if m.group(3) else None
+
+
 @dataclass
 class Output:
     connector_id: int
@@ -278,6 +298,11 @@ class Output:
     crtc_id: int
     encoder_id: int
     mm_size: tuple[int, int]
+    #: Every mode this connector offers, as ``mode_name`` writes them.  Kept
+    #: on the Output because the connector is freed before anyone outside can
+    #: ask, and ``doctor`` has to be able to print the list when the mode
+    #: somebody configured is not in it.
+    modes: tuple[str, ...] = ()
 
     @property
     def width(self) -> int:
@@ -348,12 +373,17 @@ class DrmDevice:
         return cards[0]
 
     # -- discovery ---------------------------------------------------------
-    def outputs(self, include_unknown: bool = True) -> list[Output]:
-        """Connected outputs with their preferred mode.
+    def outputs(self, include_unknown: bool = True,
+                mode: str = "") -> list[Output]:
+        """Connected outputs, each with the mode that will be set on it.
 
         ``include_unknown`` keeps connectors whose state the driver reports as
         "unknown" -- composite out and some DSI panels do this, and treating
         them as disconnected is a known regression in wlroots-based stacks.
+
+        ``mode`` is ``display.mode``: a specific mode to use instead of the
+        connector's preferred one, for the panel whose preference the Pi
+        cannot actually drive.
         """
         res = lib.drmModeGetResources(self.fd)
         if not res:
@@ -372,7 +402,7 @@ class DrmDevice:
                     )
                     if not ok or c.count_modes == 0:
                         continue
-                    mode = self._pick_mode(c)
+                    chosen = self._pick_mode(c, mode)
                     crtc_id = self._pick_crtc(r, c)
                     if crtc_id is None:
                         _log.warning("no free CRTC for connector %s", c.name)
@@ -381,10 +411,12 @@ class DrmDevice:
                         Output(
                             connector_id=c.connector_id,
                             name=c.name,
-                            mode=ModeInfo.from_buffer_copy(mode),
+                            mode=ModeInfo.from_buffer_copy(chosen),
                             crtc_id=crtc_id,
                             encoder_id=c.encoder_id,
                             mm_size=(c.mmWidth, c.mmHeight),
+                            modes=tuple(mode_name(c.modes[j])
+                                        for j in range(c.count_modes)),
                         )
                     )
                 finally:
@@ -394,7 +426,38 @@ class DrmDevice:
         return found
 
     @staticmethod
-    def _pick_mode(c: Connector) -> ModeInfo:
+    def _pick_mode(c: Connector, want: str = "") -> ModeInfo:
+        """The mode to set: the one asked for, else the connector's preferred.
+
+        A panel's preferred mode is right almost always, and wrong in one
+        situation that matters: a 4K television asks for 2160p60, which a Pi 4
+        cannot clock without ``hdmi_enable_4kp60`` and which some HDMI cables
+        will not carry.  Naming the mode is the way out, and a name the
+        connector does not offer is a warning naming what it does offer --
+        never a refusal to start, because the frame is on a wall.
+        """
+        if want:
+            asked = parse_mode(want)
+            if asked is None:
+                _log.warning("display.mode %r is not a mode like 1920x1080 or "
+                             "3840x2160@30; using the preferred mode", want)
+            else:
+                width, height, hz = asked
+                fits = [
+                    c.modes[i] for i in range(c.count_modes)
+                    if (c.modes[i].hdisplay, c.modes[i].vdisplay) == (width, height)
+                    and (hz is None or abs(c.modes[i].refresh_hz - hz) <= 0.5)
+                ]
+                if fits:
+                    # Several can match when no refresh was given: take the
+                    # preferred one if it is among them, otherwise the fastest.
+                    fits.sort(key=lambda m: (bool(m.type & DRM_MODE_TYPE_PREFERRED),
+                                             m.refresh_hz), reverse=True)
+                    return fits[0]
+                offered = ", ".join(dict.fromkeys(
+                    mode_name(c.modes[i]) for i in range(c.count_modes)))
+                _log.warning("%s does not offer %s; using its preferred mode. "
+                             "It offers: %s", c.name, want, offered)
         best = c.modes[0]
         for i in range(c.count_modes):
             m = c.modes[i]
@@ -426,8 +489,8 @@ class DrmDevice:
                     return r.crtcs[j]
         return None
 
-    def find_output(self, name: str | None) -> Output:
-        outs = self.outputs()
+    def find_output(self, name: str | None, mode: str = "") -> Output:
+        outs = self.outputs(mode=mode)
         if not outs:
             raise RuntimeError(f"{self.path} has no connected output")
         if name:
@@ -659,8 +722,12 @@ class DrmDevice:
             self.fd = -1
 
 
-def list_outputs() -> Iterator[tuple[str, Output]]:
-    """Enumerate every output on every card.  Used by ``picframe3 doctor``."""
+def list_outputs(mode: str = "") -> Iterator[tuple[str, Output]]:
+    """Enumerate every output on every card.  Used by ``picframe3 doctor``.
+
+    ``mode`` is passed through so that what doctor prints is the mode the
+    frame would really set, not the one it would have set without the config.
+    """
     import glob
 
     for card in sorted(glob.glob("/dev/dri/card*")):
@@ -669,7 +736,7 @@ def list_outputs() -> Iterator[tuple[str, Output]]:
         except OSError:
             continue
         try:
-            for out in dev.outputs():
+            for out in dev.outputs(mode=mode):
                 yield card, out
         except Exception:  # pragma: no cover
             continue

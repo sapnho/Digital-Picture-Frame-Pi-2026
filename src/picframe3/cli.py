@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+import time
 
 from . import __version__
 from .config import DEFAULT_CONFIG_PATHS, Config
@@ -241,16 +242,61 @@ def cmd_doctor(args) -> int:
         config = Config()
         ok = False
 
+    # -- the language dates come out in
+    wanted_locale = (config.viewer.locale or "").strip()
+    if wanted_locale:
+        from .config import set_time_locale
+
+        # set_time_locale says so in the log when it cannot; here the ✗ line
+        # and its fix say it better, so keep the warning out of the report.
+        logging.disable(logging.WARNING)
+        try:
+            applied = set_time_locale(wanted_locale)
+        finally:
+            logging.disable(logging.NOTSET)
+        if applied:
+            check("date language", True,
+                  f"{wanted_locale} — {time.strftime(config.viewer.date_format)}")
+        else:
+            ok &= check(
+                "date language", False,
+                f"{wanted_locale} is not generated on this system",
+                "sudo dpkg-reconfigure locales   (tick it, then restart the frame)",
+            )
+
     # -- graphics
     try:
         from .gfx import drm
 
-        outputs = list(drm.list_outputs())
+        wanted_mode = (config.display.mode or "").strip()
+        outputs = list(drm.list_outputs(mode=wanted_mode))
         if outputs:
             for card, out in outputs:
                 print(f"   {card}: {out.name} {out.width}x{out.height}"
                       f"@{out.mode.refresh_hz:.2f}Hz")
             check("DRM display", True, f"{len(outputs)} connected output(s)")
+            if wanted_mode:
+                asked = drm.parse_mode(wanted_mode)
+                if asked is None:
+                    ok &= check("display.mode", False,
+                                f"“{wanted_mode}” is not a mode",
+                                "write it as 3840x2160, or 3840x2160@30")
+                else:
+                    width, height, hz = asked
+                    using = [out for _, out in outputs
+                             if (out.mode.hdisplay, out.mode.vdisplay) == (width, height)
+                             and (hz is None or abs(out.mode.refresh_hz - hz) <= 0.5)]
+                    if using:
+                        check("display.mode", True, drm.mode_name(using[0].mode))
+                    else:
+                        # The whole point of the check: a mode the screen does
+                        # not offer is silently ignored at startup, and the
+                        # frame then runs at a resolution nobody chose.
+                        offered = ", ".join(dict.fromkeys(
+                            name for _, out in outputs for name in out.modes))
+                        ok &= check("display.mode", False,
+                                    f"“{wanted_mode}” is not offered by this screen",
+                                    f"this screen offers: {offered}")
         else:
             ok &= check("DRM display", False, "no connected outputs",
                         "check the HDMI cable, or run with --backend headless to test")

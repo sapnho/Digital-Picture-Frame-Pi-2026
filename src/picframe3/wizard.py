@@ -561,7 +561,25 @@ def share_config(share_name: str, folder: str, user: str, *,
         "   force create mode = 0664",
         "   directory mask = 0775",
         "   force directory mode = 0775",
-        "   veto files = /._*/.DS_Store/.Spotlight-V100/.TemporaryItems/.Trashes/",
+        # macOS has to put a file's Finder metadata and resource fork
+        # somewhere.  Left to itself over SMB it writes them *beside* the
+        # photograph as `._DSC1234.jpg` -- one per file, in every folder, and
+        # they come back every time Finder so much as looks at the share.
+        # These six lines send them into real extended attributes instead,
+        # which is what `vfs objects = catia fruit streams_xattr` is for:
+        # `fruit` is the Apple compatibility layer, `streams_xattr` gives it
+        # somewhere to write, and `catia` maps the characters Samba would
+        # otherwise refuse.  The order of the three matters.
+        "   vfs objects = catia fruit streams_xattr",
+        "   fruit:metadata = stream",
+        "   fruit:resource = xattr",
+        "   fruit:posix_rename = yes",
+        "   fruit:delete_empty_adfiles = yes",
+        # Not vetoed: a `._` file that arrives from somewhere else -- a USB
+        # copy, an old backup -- should be visible rather than un-writable,
+        # and the scanner skips dot-files anyway.
+        "   fruit:veto_appledouble = no",
+        "   veto files = /.DS_Store/.Spotlight-V100/.TemporaryItems/.Trashes/",
         "   delete veto files = yes",
         SAMBA_END,
         "",

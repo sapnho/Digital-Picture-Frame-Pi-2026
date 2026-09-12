@@ -34,7 +34,8 @@ class Action(StrEnum):
     DISPLAY_TOGGLE = "display_toggle"
     BRIGHTNESS = "brightness"     # payload: {"value": 0.0-1.0}
     INFO_TOGGLE = "info_toggle"
-    INFO_SHOW = "info_show"
+    INFO_SHOW = "info_show"       # payload: {"seconds": float} -- reveal for a while
+    INFO_HIDE = "info_hide"
     CLOCK_TOGGLE = "clock_toggle"
     SET_CONFIG = "set_config"     # payload: {"key": "slideshow.interval", "value": ...}
     SET_FILTERS = "set_filters"
@@ -94,6 +95,11 @@ class State:
     order: str = "shuffle"
     show_info: bool = True
     show_clock: bool = False
+    #: Which caption elements are written, in order.  Part of the state
+    #: document because a control surface has to be able to *show* what it is
+    #: offering to change -- a caption box in Home Assistant that does not
+    #: know what the caption currently says is worse than no box.
+    caption_fields: list[str] = field(default_factory=list)
     playlist_size: int = 0
     playlist_position: int = 0
     #: The shuffle round in progress, and how many pictures in it have not had

@@ -26,7 +26,8 @@ Picture folders, interval, fade time, shuffle and reshuffle settings, portrait
 pairing, recent-days weighting, the caption fields and their size, justification
 and opacity, the date format, mat colours and borders, blur settings, Ken
 Burns, the clock, the deleted-pictures folder, geocoding, your empty-library
-picture (`no_files_img` → `viewer.no_files_img`), and the MQTT and HTTP
+picture (`no_files_img` → `viewer.no_files_img`), the language dates are
+written in (`model.locale` → `viewer.locale`), and the MQTT and HTTP
 settings.
 
 ## What does not, and why
@@ -35,7 +36,7 @@ settings.
 |---|---|
 | `use_sdl2`, `use_glx` | there is no SDL and no X server; the frame talks to DRM/KMS |
 | `display_power`, `display_hdmi` | display power is DRM DPMS on every Pi — one path, no choice to make. If autodetection picks the wrong output, set `display.connector: HDMI-A-2` |
-| `display_x/y/w/h` | the frame always uses the output's native mode |
+| `display_x/y/w/h` | the frame uses the output's mode; to pin one, `display.mode: 3840x2160@30` |
 | `shader`, `blend_type` | transitions are built in: `picframe3 transitions` lists fifteen. `blend`→`fade`, `burn`→`burn`, `bump`→`bump` |
 | `fps` | the loop is adaptive — full rate while something moves, **no frames at all** while a still picture is up |
 | `mat_resource_folder` | mats are generated, including the paper grain. Nothing to install |
@@ -75,6 +76,17 @@ a background trickle that fills the rest of the library in at the one request
 per second OpenStreetMap asks for. Turning `geo.enabled` on after the library
 is already indexed therefore works — no re-index needed. `picframe3 scan`
 resolves everything outstanding in one go, and `--regeocode` starts over.
+
+**An empty `show_text` means something different.** In picframe an empty
+`show_text` was often not "never write anything" but "nothing by default" —
+with the text switched on from Home Assistant when somebody wanted to know
+where a photograph was taken. picframe3 says that in two settings instead:
+list the elements in `viewer.show_text`, and set `viewer.text_seconds: 0` so
+they get no time of their own. The caption then appears only when it is asked
+for — the **Show the caption** button in Home Assistant, the `i` key, the
+button in the web interface — and stays up for `viewer.peek_seconds`
+(40 seconds by default, rather than the 16 a caption gets after each change).
+`migrate` says so when it finds an empty `show_text`.
 
 **Fades look lighter in the middle.** They are blended in linear light now.
 The old midpoint was too dark; this is the fix, not a regression.

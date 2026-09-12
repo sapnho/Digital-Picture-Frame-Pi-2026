@@ -50,10 +50,33 @@ def test_writes_land_as_the_frames_own_user(open_share):
     assert "   force directory mode = 0775" in got
 
 
-def test_macos_clutter_is_kept_out_of_the_library():
+def test_macos_metadata_goes_into_xattrs_rather_than_beside_the_photograph():
+    """The `._DSC1234.jpg` problem, solved where it starts.
+
+    Vetoing `._*` (which this share used to do) hides the files and makes
+    writing one fail; it does not stop macOS wanting somewhere to put a
+    file's Finder metadata. The `fruit` layer gives it somewhere -- real
+    extended attributes -- so the files are never created. Samba needs all
+    three VFS modules, in this order, for that to work.
+    """
     got = lines(open_share=True)
-    veto = next(ln for ln in got if "veto files" in ln)
-    assert ".DS_Store" in veto and "._*" in veto
+    assert "   vfs objects = catia fruit streams_xattr" in got
+    assert "   fruit:metadata = stream" in got
+    assert "   fruit:resource = xattr" in got
+
+
+def test_an_appledouble_file_from_elsewhere_stays_visible():
+    """A `._` file off a USB stick or an old backup should be an ordinary
+    file, not an invisible one the owner cannot delete over the share."""
+    got = lines(open_share=True)
+    assert "   fruit:veto_appledouble = no" in got
+    assert not any("._*" in ln for ln in got)
+
+
+def test_finder_and_spotlight_droppings_are_still_kept_out():
+    got = lines(open_share=True)
+    veto = next(ln for ln in got if ln.strip().startswith("veto files"))
+    assert ".DS_Store" in veto and ".Spotlight-V100" in veto
     assert "   delete veto files = yes" in got
 
 
