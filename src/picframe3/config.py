@@ -101,6 +101,9 @@ class ViewerConfig:
     text_margin_x: int = 64
     text_margin_y: int = 36
     text_scrim: float = 0.5
+    #: Written between the caption elements.  " · " reads as one line of
+    #: information; "\n" puts each element on its own line.
+    text_separator: str = "  ·  "
     date_format: str = "%-d %B %Y"
 
     show_clock: bool = False

@@ -94,6 +94,11 @@ class State:
     show_clock: bool = False
     playlist_size: int = 0
     playlist_position: int = 0
+    #: The shuffle round in progress, and how many pictures in it have not had
+    #: their turn yet.  Together they say, at a glance, whether the frame is
+    #: working through the library evenly.
+    playlist_round: int = 1
+    playlist_remaining: int = 0
     scanning: bool = False
     library: dict[str, Any] = field(default_factory=dict)
     current: dict[str, Any] = field(default_factory=dict)

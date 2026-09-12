@@ -121,8 +121,18 @@ function render(next) {
   if (cur.folder) bits.push(cur.folder.split("/").pop());
   $("#subtitle").textContent = bits.join("  ·  ");
 
+  const FIT_WORDS = {
+    cover: "cropped to fill the screen",
+    contain: "whole, on a plain background",
+    blur: "whole, on a blurred background",
+    mat: "whole, in a mat",
+  };
   const chips = [];
+  if (cur.shown_as) chips.push(`Shown ${FIT_WORDS[cur.shown_as] || cur.shown_as}`);
   if (cur.caption) chips.push(cur.caption);
+  // Pixel size, because "why was this cropped?" is nearly always answered by
+  // comparing the picture's shape with the panel's.
+  if (cur.width && cur.height) chips.push(`${fmt(cur.width)} × ${fmt(cur.height)}`);
   if (cur.model) chips.push([cur.make, cur.model].filter(Boolean).join(" ").replace(/^(\S+) \1/, "$1"));
   if (cur.f_number) chips.push(`f/${cur.f_number}`);
   if (cur.exposure_time) chips.push(cur.exposure_time);
@@ -150,6 +160,9 @@ function render(next) {
     ["Pictures", fmt(lib.files)],
     ["Videos", fmt(lib.videos)],
     ["In playlist", fmt(state.playlist_size)],
+    ["Round", `${fmt(state.playlist_round)} · ${fmt(state.playlist_remaining)} left`],
+    ["Times shown", lib.shown_max === lib.shown_min
+      ? fmt(lib.shown_min) : `${fmt(lib.shown_min)}–${fmt(lib.shown_max)}`],
     ["Next in", state.paused ? "paused" : `${Math.round(state.next_change_in || 0)}s`],
     ["Frame rate", `${state.fps ?? 0}/s`],
     ["Uptime", duration(state.uptime)],
@@ -227,7 +240,11 @@ const FIELDS = [
   ["slideshow.kenburns", "Ken Burns pan & zoom", "bool"],
   ["slideshow.portrait_pairs", "Pair portrait photos", "bool"],
   ["viewer.fit", "Fit", "select", ["auto", "cover", "contain", "blur", "mat"]],
-  ["viewer.mat_style", "Mat style", "select", ["single", "double", "bevel", "float", "float_shadow", "polaroid", "random"]],
+  ["viewer.mat_style", "Mat styles (tick more than one to rotate)", "styles"],
+  ["viewer.show_text", "Caption elements", "fields"],
+  ["viewer.text_separator", "Between elements", "select", ["  ·  ", " – ", ", ", "\n"]],
+  ["viewer.date_format", "Date format", "text"],
+  ["viewer.mat_outer_border", "Mat width", "number"],
   ["viewer.show_clock", "Show clock", "bool"],
   ["viewer.clock_format", "Clock format", "text"],
   ["viewer.text_seconds", "Caption seconds", "number"],
@@ -236,9 +253,16 @@ const FIELDS = [
   ["library.subfolder", "Only this subfolder", "text"],
 ];
 
+/* The separator is stored as the literal characters that go between two
+   caption elements, and a newline cannot be shown in a <select>. */
+const SEPARATOR_LABELS = { "  ·  ": "Dot  ·", " – ": "Dash  –", ", ": "Comma  ,",
+                           "\n": "One element per line" };
+
 async function loadSettings() {
   const cfg = await api("/api/config");
   const transitions = await api("/api/transitions");
+  const captionFields = await api("/api/caption-fields").catch(() => []);
+  const matStyles = await api("/api/mat-styles").catch(() => []);
   const form = $("#settings");
   form.innerHTML = "";
   for (const [key, label, kind, choices] of FIELDS) {
@@ -248,17 +272,25 @@ async function loadSettings() {
     let control;
     if (kind === "bool") {
       control = `<input type="checkbox" data-key="${key}" ${value ? "checked" : ""}>`;
+    } else if (kind === "fields") {
+      control = pickList(key, value || [], captionFields, true);
+    } else if (kind === "styles") {
+      control = pickList(key, String(value || "").toLowerCase().split(/[\s,]+/)
+                                .filter(Boolean), matStyles, false);
     } else if (kind === "select" || kind === "transition") {
       const opts = (kind === "transition" ? ["random", ...transitions] : choices)
-        .map((c) => `<option ${c === value ? "selected" : ""}>${c}</option>`).join("");
+        .map((c) => `<option value="${escapeHtml(c)}" ${c === value ? "selected" : ""}>` +
+                    `${escapeHtml(SEPARATOR_LABELS[c] ?? c)}</option>`).join("");
       control = `<select data-key="${key}">${opts}</select>`;
     } else {
-      control = `<input type="${kind}" step="any" data-key="${key}" value="${value ?? ""}">`;
+      control = `<input type="${kind}" step="any" data-key="${key}" value="${escapeHtml(value ?? "")}">`;
     }
     wrap.innerHTML = `<label>${label}</label>${control}<div class="hint">${key}</div>`;
+    if (kind === "fields" || kind === "styles") wrap.classList.add("field-wide");
     form.appendChild(wrap);
   }
   form.querySelectorAll("[data-key]").forEach((el) => {
+    if (el.dataset.kind === "list") return;          // handled by pickList
     el.onchange = () => {
       const value = el.type === "checkbox" ? el.checked
         : el.type === "number" ? Number(el.value) : el.value;
@@ -266,6 +298,60 @@ async function loadSettings() {
       $("#saved").textContent = `${el.dataset.key} = ${value}  (not yet written to disk)`;
     };
   });
+  form.querySelectorAll("[data-pick-list]").forEach(wirePickList);
+}
+
+/* ---- tick-and-reorder list ----------------------------------------------
+   Used for the caption elements, where order is the whole point ("Place ·
+   Date" and "Date · Place" are different captions), and for the mat styles,
+   where it is not: ticking several means "rotate between these".
+   `ordered` sends a JSON array; otherwise a space-separated string, which is
+   the form picframe used and the config still accepts. */
+function pickList(key, chosen, available, ordered) {
+  const known = available.length ? available
+    : chosen.map((name) => ({ name, label: name }));
+  const byName = Object.fromEntries(known.map((f) => [f.name, f.label]));
+  const rows = [
+    ...chosen.filter((n) => n in byName).map((n) => ({ name: n, on: true })),
+    ...known.filter((f) => !chosen.includes(f.name)).map((f) => ({ name: f.name, on: false })),
+  ].map(({ name, on }) => `
+    <li data-name="${name}" class="${on ? "on" : ""}">
+      <label><input type="checkbox" ${on ? "checked" : ""}>
+        <span>${escapeHtml(byName[name])}</span></label>
+      ${ordered ? `<button type="button" data-move="-1" title="Move up">▲</button>
+      <button type="button" data-move="1" title="Move down">▼</button>` : ""}
+    </li>`).join("");
+  return `<ol class="caption-list" data-pick-list data-key="${key}" data-kind="list"
+              data-ordered="${ordered ? 1 : 0}">${rows}</ol>`;
+}
+
+function wirePickList(list) {
+  const ordered = list.dataset.ordered === "1";
+  const commit = () => {
+    const names = [...list.querySelectorAll("li")]
+      .filter((li) => li.querySelector("input").checked)
+      .map((li) => li.dataset.name);
+    const value = ordered ? names : (names.join(" ") || "single");
+    send("set_config", { key: list.dataset.key, value });
+    $("#saved").textContent =
+      `${list.dataset.key} = ${ordered ? `[${names.join(", ")}]` : value}` +
+      "  (not yet written to disk)";
+  };
+  list.onclick = (e) => {
+    const move = e.target.closest("[data-move]");
+    if (!move) return;
+    const li = move.closest("li");
+    const up = Number(move.dataset.move) < 0;
+    const sibling = up ? li.previousElementSibling : li.nextElementSibling;
+    if (!sibling) return;
+    up ? list.insertBefore(li, sibling) : list.insertBefore(sibling, li);
+    commit();
+  };
+  list.onchange = (e) => {
+    if (e.target.type !== "checkbox") return;
+    e.target.closest("li").classList.toggle("on", e.target.checked);
+    commit();
+  };
 }
 
 $("#save").onclick = async () => {

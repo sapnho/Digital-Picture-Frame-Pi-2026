@@ -34,7 +34,7 @@ Pacing and sequencing: how long each picture stays, how it changes, what comes n
 | `interval` | number | `180.0` |  |
 | `transition` | string | `'fade'` | Any name from `picframe3 transitions`, or `random`. |
 | `transition_time` | number | `2.5` |  |
-| `order` | string | `'shuffle'` | shuffle · random · date_desc · date_asc · name · folder · recent · least_played |
+| `order` | string | `'shuffle'` | shuffle · random · date_desc · date_asc · name · folder · recent · least_played. `shuffle` gives every picture exactly one turn per round, in a fresh random order each round, and keeps the round in the index so reboots, rescans and newly copied photographs do not rob the pictures still waiting. `random` has no memory and can repeat. |
 | `recent_days` | integer | `7` | Pictures newer than this are shown first in each shuffle round. |
 | `reshuffle_after` | integer | `1` |  |
 | `portrait_pairs` | boolean | `False` |  |
@@ -68,7 +68,8 @@ How a picture is composed on screen, and what is written over it.
 | `mat_auto_inner_color` | boolean | `True` |  |
 | `mat_bevel_width` | integer | `5` |  |
 | `font` | str | None | `None` |  |
-| `show_text` | list of strings | `['title', 'caption', 'date', 'location']` | Any of: title, caption, name, date, location, folder, camera, exposure. |
+| `show_text` | list of strings | `['title', 'caption', 'date', 'location']` | Any of: title, caption, name, date, location, folder, camera, exposure. The order is the order they are written; the Settings tab edits this list. |
+| `text_separator` | string | `'  ·  '` | Written between the elements above. `"\n"` puts each on its own line. |
 | `text_size` | integer | `34` |  |
 | `text_seconds` | number | `16.0` |  |
 | `text_justify` | string | `'L'` |  |

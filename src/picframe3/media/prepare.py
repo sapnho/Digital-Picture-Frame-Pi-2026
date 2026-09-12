@@ -183,6 +183,12 @@ def prepare(
     else:
         out = _fit_cover(src, target)
 
+    # Say, on the record, how this picture was laid out.  "Why was that one
+    # cropped?" is the single most common question about a frame, and the
+    # honest answer -- which of the five paths above ran -- is otherwise
+    # invisible from the outside.
+    out.info["picframe3_fit"] = fit
+
     for img in loaded:
         if img is not out:
             try:

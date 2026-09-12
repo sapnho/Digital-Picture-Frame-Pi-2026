@@ -31,15 +31,15 @@ levels.
 
 from __future__ import annotations
 
-import colorsys
 import hashlib
 import logging
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 _log = logging.getLogger(__name__)
 
@@ -47,6 +47,20 @@ STYLES = (
     "float", "float_shadow", "float_wrap", "polaroid",
     "single", "single_bevel", "double", "double_bevel",
 )
+
+#: Plain English for the settings page.  ``polaroid`` names its own quirk,
+#: because a print sitting high on its board looks like a centring bug to
+#: anyone who did not choose it deliberately.
+STYLE_LABELS = {
+    "float":        "Float — the print bare on the board",
+    "float_shadow": "Float with a drop shadow",
+    "float_wrap":   "Float in a coloured band",
+    "polaroid":     "Polaroid — deliberately low on the board, deep lower margin",
+    "single":       "Single mat",
+    "single_bevel": "Single mat, chamfered opening",
+    "double":       "Double mat",
+    "double_bevel": "Double mat, chamfered openings",
+}
 
 #: picframe's names, so a migrated config keeps working.
 ALIASES = {
@@ -68,6 +82,8 @@ class MatStyle:
     outer_border: int = 75
     inner_border: int = 22
     texture: bool = True
+    #: Override the shipped board scan with your own greyscale image.
+    texture_file: str | None = None
     #: The inner mat is usually a smooth card against the textured outer board.
     inner_texture: bool = False
     #: When False the inner mat is a darker shade of the outer one rather than
@@ -106,50 +122,47 @@ class MatStyle:
 # Colour
 # --------------------------------------------------------------------------
 
-def dominant_color(image: Image.Image, samples: int = 64, clusters: int = 3) -> RGB:
-    """The photograph's leading colour, by k-means.
+def dominant_color(image: Image.Image, samples: int = 100, clusters: int = 3) -> RGB:
+    """The photograph's leading colour, by k-means -- picframe's method, kept.
 
-    An average is the obvious thing and the wrong thing: average a sunset
-    against a blue sky and you get grey.  Clustering keeps the colours that are
-    actually present, and the cluster is chosen by size weighted towards
-    saturated, mid-tone pixels so a large flat sky does not automatically win.
+    Two details matter, and both were wrong in the first version of this file.
+
+    *Which* cluster: the centroids are ranked by **saturation**, not by how many
+    pixels they own, and the most saturated wins.  A photograph that is
+    four-fifths grey sky and one-fifth red jacket should give a red mat; rank by
+    size and you get the sky.
+
+    *How much of it*: the colour is used **raw**.  Desaturating it towards a
+    pale museum board -- what this did before -- throws away the thing the
+    extraction was for, and every photograph ends up with the same off-white
+    mat.
     """
-    small = image.convert("RGB").resize((samples, samples), Image.BOX)
-    data = np.asarray(small, dtype=np.float32).reshape(-1, 3) / 255.0
+    small = image.convert("RGB").copy()
+    small.thumbnail((samples, samples))
+    data = np.asarray(small, dtype=np.float64).reshape(-1, 3)
     if len(data) == 0:
         return (128, 128, 128)
 
-    rng = np.random.default_rng(12345)          # deterministic: same photo, same mat
-    centres = data[rng.choice(len(data), size=min(clusters, len(data)), replace=False)]
-    labels = np.zeros(len(data), dtype=np.int32)
-    for _ in range(8):
-        distances = ((data[:, None, :] - centres[None, :, :]) ** 2).sum(axis=2)
-        new_labels = distances.argmin(axis=1)
-        if np.array_equal(new_labels, labels):
+    # Seeded, so the same photograph always produces the same mat.
+    rng = np.random.default_rng(20260912)
+    centroids = data[rng.choice(len(data), size=min(clusters, len(data)),
+                                replace=False)].copy()
+    for _ in range(10):
+        distances = ((data[:, None, :] - centroids[None, :, :]) ** 2).sum(axis=2)
+        nearest = distances.argmin(axis=1)
+        moved = 0.0
+        for k in range(len(centroids)):
+            members = data[nearest == k]
+            if len(members):
+                centre = members.mean(axis=0)
+                moved = max(moved, float(np.linalg.norm(centre - centroids[k])))
+                centroids[k] = centre
+        if moved < 5.0:
             break
-        labels = new_labels
-        for k in range(len(centres)):
-            member = data[labels == k]
-            if len(member):
-                centres[k] = member.mean(axis=0)
 
-    best, best_score = centres[0], -1.0
-    for k, centre in enumerate(centres):
-        share = float((labels == k).mean())
-        mx, mn = float(centre.max()), float(centre.min())
-        saturation = (mx - mn) / mx if mx > 0 else 0.0
-        midtone = 1.0 - abs(mx - 0.55) * 1.1
-        score = share * (0.35 + saturation) * max(midtone, 0.15)
-        if score > best_score:
-            best, best_score = centre, score
-    return tuple(int(round(c * 255)) for c in np.clip(best, 0, 1))  # type: ignore[return-value]
-
-
-def _shift(color: RGB, saturation: float, lightness: float) -> RGB:
-    r, g, b = (c / 255.0 for c in color)
-    h, _, s = colorsys.rgb_to_hls(r, g, b)
-    r, g, b = colorsys.hls_to_rgb(h, lightness, min(1.0, s * saturation))
-    return (int(round(r * 255)), int(round(g * 255)), int(round(b * 255)))
+    saturation = centroids.max(axis=1) - centroids.min(axis=1)
+    best = centroids[int(saturation.argmax())]
+    return tuple(int(round(c)) for c in np.clip(best, 0, 255))  # type: ignore[return-value]
 
 
 def _scale(color: RGB, factor: float) -> RGB:
@@ -157,10 +170,14 @@ def _scale(color: RGB, factor: float) -> RGB:
 
 
 def auto_colors(image: Image.Image, *, auto_inner: bool = True) -> tuple[RGB, RGB]:
-    """(outer, inner) mat colours: a pale board and a darker core line."""
-    base = dominant_color(image)
-    outer = _shift(base, 0.22, 0.84)
-    inner = _shift(base, 0.55, 0.34) if auto_inner else _scale(outer, 0.55)
+    """(outer, inner): the photograph's colour, and half of it for the core.
+
+    Half is picframe's ``__get_darker_shade(colour, 0.5)`` -- a literal halving
+    of the RGB values, which keeps the hue and reads as the same board in
+    shadow.
+    """
+    outer = dominant_color(image)
+    inner = _scale(outer, 0.5 if auto_inner else 0.35)
     return outer, inner
 
 
@@ -168,13 +185,45 @@ def auto_colors(image: Image.Image, *, auto_inner: bool = True) -> tuple[RGB, RG
 # Texture
 # --------------------------------------------------------------------------
 
-_texture_cache: dict[tuple[int, int, int], Image.Image] = {}
+#: The board scan picframe shipped, kept because it is the look people
+#: recognise.  It is a luminance ramp, not a picture: ``ImageOps.colorize``
+#: tints it from black to the mat colour, and that gradient is what gives the
+#: board depth instead of a flat fill.  Stored greyscale at 1440p rather than
+#: the original 4000x2250 RGB — the other two channels carried nothing, and the
+#: difference on a 1080p panel measures under half a percent.
+TEXTURE_FILE = Path(__file__).resolve().parents[1] / "data" / "mat_texture.jpg"
+
+_texture_cache: dict[tuple[str, int, int], Image.Image] = {}
+
+
+def board_texture(size: tuple[int, int],
+                  path: str | None = None) -> Image.Image | None:
+    """The board's luminance map at ``size``, or None if it cannot be read."""
+    source = Path(path).expanduser() if path else TEXTURE_FILE
+    key = (str(source), size[0], size[1])
+    cached = _texture_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        with Image.open(source) as handle:
+            texture = handle.convert("L").resize(size, Image.BICUBIC)
+    except (OSError, ValueError) as exc:
+        _log.info("mat texture %s unavailable (%s); falling back to generated grain",
+                  source, exc)
+        return None
+    if len(_texture_cache) > 4:
+        _texture_cache.clear()
+    _texture_cache[key] = texture
+    return texture
+
+
+_grain_cache: dict[tuple[int, int, int], Image.Image] = {}
 
 
 def paper_texture(size: tuple[int, int], seed: int = 0) -> Image.Image:
     """Museum-board grain: fine noise plus faint fibres, as a greyscale mask."""
     key = (size[0], size[1], seed)
-    cached = _texture_cache.get(key)
+    cached = _grain_cache.get(key)
     if cached is not None:
         return cached
     rng = np.random.default_rng(seed)
@@ -186,18 +235,29 @@ def paper_texture(size: tuple[int, int], seed: int = 0) -> Image.Image:
     field = (field - field.min()) / max(float(np.ptp(field)), 1e-6)
     img = Image.fromarray((field * 255).astype(np.uint8), "L")
     img = img.resize(size, Image.BICUBIC).filter(ImageFilter.GaussianBlur(0.4))
-    if len(_texture_cache) > 6:
-        _texture_cache.clear()
-    _texture_cache[key] = img
+    if len(_grain_cache) > 6:
+        _grain_cache.clear()
+    _grain_cache[key] = img
     return img
 
 
-def _board(size: tuple[int, int], color: RGB, textured: bool, seed: int) -> Image.Image:
-    board = Image.new("RGB", size, color)
+def _board(size: tuple[int, int], color: RGB, textured: bool, seed: int,
+           texture_file: str | None = None) -> Image.Image:
+    """A sheet of mat board in ``color``, filling ``size``."""
     if not textured:
-        return board
+        return Image.new("RGB", size, color)
+
+    texture = board_texture(size, texture_file)
+    if texture is not None:
+        # The scan runs from black to the mat colour, so the paper's own
+        # unevenness shades the board.  This is picframe's step, and it is what
+        # stops the mat reading as a flat rectangle of paint.
+        return ImageOps.colorize(texture, black="black", white=color)
+
+    # No texture file: generate grain instead, so a stripped-down install
+    # still gets a board rather than a poster-paint fill.
     grain = paper_texture(size, seed)
-    arr = np.asarray(board, dtype=np.float32)
+    arr = np.asarray(Image.new("RGB", size, color), dtype=np.float32)
     g = (np.asarray(grain, dtype=np.float32) / 255.0 - 0.5)[..., None]
     arr = np.clip(arr * (1.0 + g * 0.16) + g * 6.0, 0, 255)
     return Image.fromarray(arr.astype(np.uint8), "RGB")
@@ -314,7 +374,7 @@ def apply(
 
     unit = min(sw, sh) / 1080.0
     grain_seed = int(hashlib.sha1((seed or "0").encode()).hexdigest()[:8], 16) % 10_000
-    canvas = _board((sw, sh), outer, style.texture, grain_seed)
+    canvas = _board((sw, sh), outer, style.texture, grain_seed, style.texture_file)
 
     border = max(8, int(style.outer_border * unit))
     bevel = max(2, int(style.bevel_width * unit)) if chosen.endswith("bevel") else 0
@@ -361,7 +421,7 @@ def apply(
     inner_board: Image.Image | None = None
     if core and (double or wrap):
         inner_board = _board((sw, sh), inner, style.texture and style.inner_texture,
-                             grain_seed + 7)
+                             grain_seed + 7, style.texture_file)
 
     for img, pos in placements:
         photo_box = (pos[0], pos[1], pos[0] + img.width, pos[1] + img.height)

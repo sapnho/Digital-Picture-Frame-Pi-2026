@@ -235,6 +235,21 @@ class HttpServer:
 
             return transitions.names()
 
+        @api.get("/api/caption-fields", dependencies=guard)
+        async def caption_fields():
+            """What can be written over a picture, and what to call it."""
+            from ..gfx.overlays import CAPTION_FIELDS
+
+            return [{"name": name, "label": label} for name, label in CAPTION_FIELDS]
+
+        @api.get("/api/mat-styles", dependencies=guard)
+        async def mat_styles():
+            """The mat styles, with the wording the settings page uses."""
+            from ..media.mat import STYLE_LABELS, STYLES
+
+            return [{"name": name, "label": STYLE_LABELS.get(name, name)}
+                    for name in STYLES]
+
         @api.get("/api/health")
         async def health():
             return {"ok": True, "uptime": round(time.monotonic() - self.app.started, 1)}

@@ -30,7 +30,7 @@ from ..media.metadata import PhotoMeta
 
 _log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS files (
     duration      REAL,
     play_count    INTEGER NOT NULL DEFAULT 0,
     last_played   REAL,
+    -- The shuffle round in which this picture was last shown.  A round covers
+    -- every picture exactly once, so "has it been shown yet this round?" is a
+    -- single indexed comparison, and it survives reboots, rescans and new
+    -- files arriving over Samba in the middle of a round.
+    play_round    INTEGER NOT NULL DEFAULT 0,
     hidden        INTEGER NOT NULL DEFAULT 0,
     indexed_at    REAL    NOT NULL
 );
@@ -215,7 +220,24 @@ class Library:
         if version > SCHEMA_VERSION:
             _log.warning("index was written by a newer picframe3 (v%d); proceeding read-only-ish",
                          version)
-        # Future migrations chain here; v1 is the initial schema.
+        # v2 added files.play_round.  An index written by v1 has every picture
+        # at round 0, which means "not yet shown in the round we are in now" --
+        # exactly the right starting state, so there is nothing to backfill.
+        # The column is added here rather than in the schema script because
+        # CREATE TABLE IF NOT EXISTS will not alter a table that already
+        # exists, and the index on it would then fail on every old library.
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
+        if "play_round" not in columns:
+            with conn:
+                conn.execute("ALTER TABLE files ADD COLUMN "
+                             "play_round INTEGER NOT NULL DEFAULT 0")
+            _log.info("index upgraded to schema v2 (added play_round)")
+        with conn:
+            conn.execute("CREATE INDEX IF NOT EXISTS files_round ON files(play_round)")
+        if version < SCHEMA_VERSION:
+            with conn:
+                conn.execute("INSERT OR REPLACE INTO meta(key, value) "
+                             "VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
 
     # -- writing -----------------------------------------------------------
     def needs_reindex(self, path: str, mtime: float, size: int) -> bool:
@@ -299,13 +321,57 @@ class Library:
             conn.execute("UPDATE files SET location=? WHERE id=?", (location, file_id))
             conn.execute("UPDATE search SET location=? WHERE rowid=?", (location or "", file_id))
 
-    def mark_played(self, file_id: int) -> None:
+    def mark_played(self, file_id: int, play_round: int | None = None) -> None:
+        """Record that a picture has just been shown.
+
+        ``play_round`` is the shuffle round it was shown in; passing it is what
+        lets the playlist answer "which pictures are still owed a turn?" from
+        the index rather than from an in-memory cursor that a reboot or a
+        rescan would throw away.
+        """
         conn = self.connect()
         with conn:
-            conn.execute(
-                "UPDATE files SET play_count=play_count+1, last_played=? WHERE id=?",
-                (time.time(), file_id),
-            )
+            if play_round is None:
+                conn.execute(
+                    "UPDATE files SET play_count=play_count+1, last_played=? WHERE id=?",
+                    (time.time(), file_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE files SET play_count=play_count+1, last_played=?, "
+                    "play_round=? WHERE id=?",
+                    (time.time(), play_round, file_id),
+                )
+
+    def mark_round(self, file_ids: Iterable[int], play_round: int) -> None:
+        """Stamp the pictures the playlist has just handed out for this round.
+
+        Separate from :meth:`mark_played` on purpose: this is bookkeeping for
+        the shuffle and must happen exactly when the playlist advances, while
+        play_count is about what a viewer actually saw.
+        """
+        ids = list(file_ids)
+        if not ids:
+            return
+        conn = self.connect()
+        with conn:
+            conn.executemany("UPDATE files SET play_round=? WHERE id=?",
+                             [(play_round, i) for i in ids])
+
+    def play_stats(self) -> dict[str, float]:
+        """How evenly the library is actually being shown."""
+        row = self.connect().execute(
+            "SELECT COUNT(*) AS n, MIN(play_count) AS lo, MAX(play_count) AS hi, "
+            "AVG(play_count) AS avg, SUM(play_count = 0) AS never "
+            "FROM files WHERE hidden = 0"
+        ).fetchone()
+        return {
+            "files": row["n"] or 0,
+            "min": row["lo"] or 0,
+            "max": row["hi"] or 0,
+            "average": round(row["avg"] or 0.0, 2),
+            "never_shown": row["never"] or 0,
+        }
 
     def set_hidden(self, file_id: int, hidden: bool = True) -> None:
         with self.connect() as conn:
@@ -438,12 +504,19 @@ class Library:
             "SUM(is_video) AS videos, "
             "SUM(CASE WHEN hidden=1 THEN 1 ELSE 0 END) AS hidden, "
             "MIN(taken_at) AS oldest, MAX(taken_at) AS newest, "
-            "SUM(size) AS bytes FROM files"
+            "SUM(size) AS bytes, "
+            "MIN(CASE WHEN hidden=0 THEN play_count END) AS shown_min, "
+            "MAX(CASE WHEN hidden=0 THEN play_count END) AS shown_max, "
+            "SUM(CASE WHEN hidden=0 AND play_count=0 THEN 1 ELSE 0 END) AS never_shown "
+            "FROM files"
         ).fetchone()
         return {
             "files": row["files"] or 0,
             "videos": row["videos"] or 0,
             "hidden": row["hidden"] or 0,
+            "shown_min": row["shown_min"] or 0,
+            "shown_max": row["shown_max"] or 0,
+            "never_shown": row["never_shown"] or 0,
             "oldest": row["oldest"],
             "newest": row["newest"],
             "bytes": row["bytes"] or 0,

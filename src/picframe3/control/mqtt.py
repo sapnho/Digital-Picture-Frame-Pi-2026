@@ -208,6 +208,21 @@ class MqttBridge:
         }
 
     async def _announce(self, client) -> None:
+        entities = self.discovery_entities()
+        for component, object_id, payload in entities:
+            topic = (f"{self.config.discovery_prefix}/{component}/"
+                     f"picframe3_{self.config.device_id}/{object_id}/config")
+            clean = {k: v for k, v in payload.items() if v is not None}
+            await client.publish(topic, json.dumps(clean), qos=1, retain=True)
+        _log.info("published Home Assistant discovery for %d entities", len(entities))
+
+    def discovery_entities(self) -> list[tuple[str, str, dict[str, Any]]]:
+        """Every entity the frame offers Home Assistant.
+
+        Built as data rather than published inline so it can be checked -- that
+        the unique ids really are unique, and that no template reads a field
+        the frame does not actually publish.
+        """
         from ..gfx import transitions
 
         device = self._device()
@@ -280,6 +295,89 @@ class MqttBridge:
                 "json_attributes_template": "{{ value_json.current | tojson }}",
                 "icon": "mdi:image",
             }),
+            # -- what is on the screen, broken out ------------------------
+            # The whole record already rides along as attributes of "Current
+            # picture", but attributes cannot be put on a dashboard, used in a
+            # condition or spoken by a TTS automation without templating.  One
+            # entity per fact is what makes those things one click each.
+            ("sensor", "title", {
+                **base,
+                "name": "Title",
+                "unique_id": f"picframe3_{uid}_title",
+                "value_template":
+                    "{{ value_json.current.title or value_json.current.caption "
+                    "or value_json.current.basename | default('') }}",
+                "icon": "mdi:format-title",
+            }),
+            ("sensor", "taken", {
+                **base,
+                "name": "Taken",
+                "unique_id": f"picframe3_{uid}_taken",
+                # Pre-formatted as ISO 8601 with an offset by the frame: a bare
+                # Unix timestamp is not accepted by a timestamp sensor, and
+                # templating one in Jinja loses the local zone.
+                "value_template":
+                    "{{ value_json.current.taken_iso if value_json.current.taken_iso "
+                    "else None }}",
+                "device_class": "timestamp",
+                "icon": "mdi:calendar-clock",
+            }),
+            ("sensor", "place", {
+                **base,
+                "name": "Place",
+                "unique_id": f"picframe3_{uid}_place",
+                # Latitude and longitude come along as attributes, which is
+                # what a map card reads.
+                "value_template": "{{ value_json.current.location | default('') }}",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ {'latitude': value_json.current.latitude, "
+                    "'longitude': value_json.current.longitude, "
+                    "'source_type': 'gps'} | tojson }}",
+                "icon": "mdi:map-marker",
+            }),
+            ("sensor", "tags", {
+                **base,
+                "name": "Tags",
+                "unique_id": f"picframe3_{uid}_tags",
+                "value_template": "{{ value_json.current.tags_text | default('') }}",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ {'tags': value_json.current.tags | default([])} | tojson }}",
+                "icon": "mdi:tag-multiple",
+            }),
+            ("sensor", "camera", {
+                **base,
+                "name": "Camera",
+                "unique_id": f"picframe3_{uid}_camera",
+                "value_template": "{{ value_json.current.model | default('') }}",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ {'make': value_json.current.make, "
+                    "'lens': value_json.current.lens, "
+                    "'f_number': value_json.current.f_number, "
+                    "'exposure_time': value_json.current.exposure_time, "
+                    "'iso': value_json.current.iso, "
+                    "'focal_length': value_json.current.focal_length} | tojson }}",
+                "icon": "mdi:camera",
+            }),
+            ("sensor", "folder", {
+                **base,
+                "name": "Folder",
+                "unique_id": f"picframe3_{uid}_folder",
+                "value_template":
+                    "{{ (value_json.current.folder | default('')).split('/') | last }}",
+                "icon": "mdi:folder-image",
+            }),
+            ("sensor", "shown_as", {
+                **base,
+                "name": "Laid out as",
+                "unique_id": f"picframe3_{uid}_shown_as",
+                "value_template": "{{ value_json.current.shown_as | default('') }}",
+                "icon": "mdi:crop",
+                "entity_category": "diagnostic",
+            }),
+            # -- how evenly the library is being shown --------------------
             ("sensor", "pictures", {
                 **base,
                 "name": "Pictures indexed",
@@ -287,6 +385,30 @@ class MqttBridge:
                 "value_template": "{{ value_json.library.files | default(0) }}",
                 "state_class": "measurement",
                 "icon": "mdi:image-multiple",
+            }),
+            ("sensor", "round", {
+                **base,
+                "name": "Shuffle round",
+                "unique_id": f"picframe3_{uid}_round",
+                "value_template": "{{ value_json.playlist_round | default(1) }}",
+                "state_class": "total_increasing",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ {'remaining': value_json.playlist_remaining, "
+                    "'times_shown_min': value_json.library.shown_min, "
+                    "'times_shown_max': value_json.library.shown_max, "
+                    "'never_shown': value_json.library.never_shown} | tojson }}",
+                "icon": "mdi:shuffle-variant",
+                "entity_category": "diagnostic",
+            }),
+            ("sensor", "remaining", {
+                **base,
+                "name": "Left in this round",
+                "unique_id": f"picframe3_{uid}_remaining",
+                "value_template": "{{ value_json.playlist_remaining | default(0) }}",
+                "state_class": "measurement",
+                "icon": "mdi:counter",
+                "entity_category": "diagnostic",
             }),
             ("binary_sensor", "scanning", {
                 **base,
@@ -314,9 +436,4 @@ class MqttBridge:
                 "entity_category": "config" if action == "rescan" else None,
             }))
 
-        for component, object_id, payload in entities:
-            topic = (f"{self.config.discovery_prefix}/{component}/"
-                     f"picframe3_{uid}/{object_id}/config")
-            clean = {k: v for k, v in payload.items() if v is not None}
-            await client.publish(topic, json.dumps(clean), qos=1, retain=True)
-        _log.info("published Home Assistant discovery for %d entities", len(entities))
+        return entities

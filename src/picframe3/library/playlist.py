@@ -4,8 +4,10 @@ The selection logic is separated from both the index and the renderer so it can
 be reasoned about (and tested) on its own.  It covers the things that actually
 matter on a frame that runs for years:
 
-* a shuffle that does not repeat itself within a round, and that survives a
-  reboot because the round and position are persisted;
+* a shuffle that gives every picture exactly one turn per round, in a fresh
+  random order each round, and that survives reboots, rescans and pictures
+  arriving over the network in the middle of a round -- because "already had
+  its turn this round" is a column in the index, not a cursor in memory;
 * newly added photographs jumping the queue for a while, because that is what
   people want to see after a trip;
 * filters (folder, tag, date, rating, free text) that compose;
@@ -18,6 +20,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+import uuid
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -27,6 +30,9 @@ from .db import Library, Record
 
 _log = logging.getLogger(__name__)
 
+#: ``shuffle``      every picture once per round, random order, no repeats
+#: ``random``       a fresh shuffle with no memory: repeats are possible
+#: ``least_played`` strictly the picture that has been shown fewest times
 ORDER_MODES = ("shuffle", "random", "date_desc", "date_asc", "name", "folder",
                "recent", "least_played")
 
@@ -98,7 +104,14 @@ class Playlist:
 
         self._ids: list[int] = []
         self._pos = -1
-        self._round = int(library.get_state("playlist_round", 0)) if persist else 0
+        # Rounds are 1-based so that a file's default play_round of 0 means
+        # "never shown", which is exactly what a freshly indexed picture is.
+        self._round = max(1, int(library.get_state("playlist_round", 1))) if persist else 1
+        self._seed = str(library.get_state("playlist_seed", "")) if persist else ""
+        if not self._seed:
+            self._seed = uuid.uuid4().hex
+            if persist:
+                library.set_state("playlist_seed", self._seed)
         self._passes = 0
         self._history: deque[list[int]] = deque(maxlen=history_size)
         self._future: deque[list[int]] = deque()
@@ -174,27 +187,62 @@ class Playlist:
         current = self.current_ids
         where, params = self._where()
         rows = self.library.connect().execute(
-            f"SELECT f.id, f.is_portrait, f.taken_at, f.mtime FROM files f "
+            f"SELECT f.id, f.is_portrait, f.taken_at, f.mtime, f.play_round FROM files f "
             f"WHERE {where} ORDER BY {self._order_sql()}",
             params,
         ).fetchall()
-        ids = [r["id"] for r in rows]
-        if self.order in ("shuffle", "random"):
-            ids = self._shuffled(rows)
-        self._ids = ids
+        if self.order == "shuffle":
+            self._ids, self._pos = self._round_order(rows)
+        elif self.order == "random":
+            self._ids = self._shuffled(rows)
+            self._pos = -1
+        else:
+            self._ids = [r["id"] for r in rows]
+            self._pos = -1
         self._future.clear()
-        if current:
+        if current and self.order != "shuffle":
             try:
                 self._pos = self._ids.index(current[0]) - 1
             except ValueError:
                 self._pos = -1
-        _log.info("playlist: %d pictures (order=%s%s)", len(ids), self.order,
-                  ", filtered" if self.filters.active else "")
-        return len(ids)
+        _log.info("playlist: %d pictures (order=%s%s)%s", len(self._ids), self.order,
+                  ", filtered" if self.filters.active else "",
+                  f", {len(self._ids) - self._pos - 1} left in round {self._round}"
+                  if self.order == "shuffle" else "")
+        return len(self._ids)
+
+    def _rng(self) -> random.Random:
+        """A different order every round, and a different one on every frame.
+
+        Seeding from the round number alone -- which this did at first -- means
+        every picture frame in the world shows round 7 in the same order, and
+        that a frame reset to round 7 repeats an order its owner has already
+        seen.  The installation seed fixes both while keeping the round itself
+        reproducible for as long as it lasts.
+        """
+        return random.Random(f"{self._seed}:{self._round}")
+
+    def _round_order(self, rows: Sequence[Any]) -> tuple[list[int], int]:
+        """Pictures already shown this round, then the rest in random order.
+
+        Everything that matters about fairness is in the split.  A picture is
+        owed a turn until its ``play_round`` catches up with the current round,
+        so the queue is rebuilt correctly after a reboot, after a rescan, and
+        when a hundred new photographs land in the folder halfway through --
+        they simply join the pictures still waiting, instead of restarting the
+        round and letting the unlucky half never come up.
+        """
+        done = [r["id"] for r in rows if (r["play_round"] or 0) >= self._round]
+        todo = [r for r in rows if (r["play_round"] or 0) < self._round]
+        if not todo and done:
+            # Everything has had its turn; the next call to next() opens the
+            # next round rather than stalling on an empty tail.
+            return done, len(done) - 1
+        return done + self._shuffled(todo), len(done) - 1
 
     def _shuffled(self, rows: Sequence[Any]) -> list[int]:
         """Shuffle, but float recent additions to the front of the round."""
-        rng = random.Random(f"picframe3-{self._round}")
+        rng = self._rng()
         cutoff = time.time() - self.recent_days * 86400 if self.recent_days > 0 else None
         recent: list[int] = []
         rest: list[int] = []
@@ -220,6 +268,16 @@ class Playlist:
     @property
     def position(self) -> int:
         return self._pos
+
+    @property
+    def round(self) -> int:
+        """The shuffle round now in progress; stamped onto every picture shown."""
+        return self._round
+
+    @property
+    def remaining(self) -> int:
+        """How many pictures are still owed a turn in this round."""
+        return max(0, len(self._ids) - self._pos - 1)
 
     def _advance_group(self) -> list[int]:
         """Take the next one or two ids, honouring portrait pairing."""
@@ -250,7 +308,8 @@ class Playlist:
                 self.library.set_state("playlist_round", self._round)
             self.refresh()
             self._pos = -1
-        _log.debug("playlist wrapped (round %d)", self._round)
+        _log.info("playlist: round %d complete, starting round %d",
+                  self._round - 1, self._round)
 
     def next(self) -> list[Record]:
         if self._future:
@@ -262,6 +321,8 @@ class Playlist:
         if self.current_ids:
             self._history.append(list(self.current_ids))
         self.current_ids = ids
+        if self.persist:
+            self.library.mark_round(ids, self._round)
         self._save_position()
         return [r for r in (self.library.get(i) for i in ids) if r is not None]
 
@@ -304,6 +365,11 @@ class Playlist:
         })
 
     def _restore_position(self) -> None:
+        # A shuffle round rebuilds its own position from play_round, which is
+        # more reliable than a saved cursor: the cursor goes stale the moment
+        # a file is added or removed while the frame is off.
+        if self.order == "shuffle":
+            return
         state = self.library.get_state("playlist_position") or {}
         pos = state.get("pos")
         if isinstance(pos, int) and 0 <= pos < len(self._ids):

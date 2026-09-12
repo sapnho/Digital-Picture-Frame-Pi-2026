@@ -19,11 +19,69 @@ def test_mat_fills_the_screen_exactly():
     assert out.size == (1920, 1080)
 
 
-def test_mat_colours_come_from_the_image():
+def test_mat_colour_is_the_photograph_s_own_colour():
+    """Not a pale board tinted towards it — the colour itself.
+
+    Washing it out was the regression: every photograph then produced the same
+    off-white mat, which is the opposite of extracting a colour.
+    """
     warm = mat.auto_colors(_photo(200, 200, (200, 80, 40)))[0]
     cool = mat.auto_colors(_photo(200, 200, (40, 80, 200)))[0]
     assert warm != cool
-    assert all(c > 150 for c in warm), "outer mat should be a pale board"
+    assert max(warm) - min(warm) > 80, "the mat lost the photograph's saturation"
+    assert warm[0] > warm[2] and cool[2] > cool[0], "hue should survive"
+
+
+def test_the_most_saturated_cluster_wins_not_the_biggest():
+    """A grey photograph with a small red subject gets a red mat.
+
+    picframe ranked the k-means centroids by saturation for exactly this
+    reason; ranking by pixel count gives you the sky every time.
+    """
+    from PIL import ImageDraw
+
+    img = Image.new("RGB", (100, 100), (150, 152, 155))       # 80% flat grey
+    ImageDraw.Draw(img).rectangle([0, 80, 100, 100], fill=(190, 45, 40))
+    r, g, b = mat.dominant_color(img)
+    assert r > 150 and g < 90 and b < 90, f"got {(r, g, b)} instead of the red"
+
+
+def test_the_inner_mat_is_half_the_outer():
+    outer, inner = mat.auto_colors(_photo(200, 200, (200, 80, 40)))
+    assert all(abs(i - o * 0.5) <= 1 for o, i in zip(outer, inner, strict=True))
+
+
+def test_the_board_uses_the_shipped_paper_scan():
+    """The texture is the look people recognise; a flat fill is not it."""
+    assert mat.TEXTURE_FILE.exists(), "mat_texture.jpg is missing from the package"
+    texture = mat.board_texture((320, 180))
+    assert texture is not None and texture.mode == "L"
+    assert texture.size == (320, 180)
+
+    import numpy as np
+
+    # Measured at panel size: the scan is 2560x1440, and squeezing it into a
+    # postage stamp averages its grain away, which would test the resampler
+    # rather than the board.
+    panel = (1920, 1080)
+    textured = mat.apply([_photo(900, 1200)], panel,
+                         mat.MatStyle(style="single", texture=True))
+    flat = mat.apply([_photo(900, 1200)], panel,
+                     mat.MatStyle(style="single", texture=False))
+    # A strip of pure board down the left edge, clear of the print and of the
+    # hairline around it.
+    # Per channel: a whole-array std is dominated by the gap between R, G and B
+    # rather than by the variation within each of them, which is the grain.
+    strip = lambda im: np.asarray(im.crop((8, 8, 120, 1072)),  # noqa: E731
+                                  dtype=float).std(axis=(0, 1)).mean()
+    assert strip(flat) < 0.01, "a flat fill should be perfectly flat"
+    assert strip(textured) > 2.0, "no grain in the board"
+
+
+def test_a_missing_texture_file_falls_back_instead_of_failing():
+    out = mat.apply([_photo(900, 1200)], (320, 180),
+                    mat.MatStyle(style="single", texture_file="/nope/missing.jpg"))
+    assert out.size == (320, 180)
 
 
 def test_every_mat_style_renders():
@@ -118,3 +176,24 @@ def test_unreadable_file_returns_none(tmp_path):
 def test_placeholder_is_drawn():
     img = prepare.placeholder((640, 480), "No pictures", "looked in ~/Pictures")
     assert img.size == (640, 480)
+
+
+def test_prepare_records_how_the_picture_was_laid_out(tmp_path):
+    """So the frame can answer "why was that one cropped?" out loud."""
+    path = tmp_path / "p.jpg"
+    _photo(1600, 900).save(path)
+    meta = PhotoMeta(path=str(path), width=1600, height=900)
+    for fit in ("cover", "contain", "blur", "mat"):
+        out = prepare.prepare([meta], (1280, 720), prepare.PrepareOptions(fit=fit))
+        assert out.info["picframe3_fit"] == fit
+
+    # auto on a 16:9 picture and a 16:9 panel: nothing to mat, nothing to crop.
+    out = prepare.prepare([meta], (1280, 720), prepare.PrepareOptions(fit="auto"))
+    assert out.info["picframe3_fit"] == "cover"
+
+    # auto on a portrait picture: matted rather than cropped.
+    portrait = tmp_path / "q.jpg"
+    _photo(900, 1200).save(portrait)
+    out = prepare.prepare([PhotoMeta(path=str(portrait), width=900, height=1200)],
+                          (1280, 720), prepare.PrepareOptions(fit="auto"))
+    assert out.info["picframe3_fit"] == "mat"

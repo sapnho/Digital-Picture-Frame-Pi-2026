@@ -82,3 +82,40 @@ def test_info_lines_pick_the_requested_fields():
 def test_paused_is_appended():
     meta = PhotoMeta(path="/a/b.jpg", title="X")
     assert overlays.format_info_lines(meta, ["title"], paused=True)[-1] == "PAUSED"
+
+
+# -- caption elements ------------------------------------------------------
+# "What is written over the photograph" is a user-facing choice made in the
+# Settings tab, so the list of available elements and the order the user puts
+# them in both have to be honoured exactly.
+
+def _rich_meta():
+    return PhotoMeta(path="/photos/Normandy/lobster.jpg", title="Lunch",
+                     caption="Carteret", make="Apple", model="iPhone 15",
+                     f_number=1.6, exposure_time="1/2300s", iso=50,
+                     focal_length=5.96, taken_at=1720974125.0)
+
+
+def test_every_offered_caption_element_actually_produces_something():
+    """Nothing may be offered in Settings that the frame then ignores."""
+    meta = _rich_meta()
+    for name, label in overlays.CAPTION_FIELDS:
+        lines = overlays.format_info_lines(meta, [name], location="Carteret, France")
+        assert lines, f"{name} ({label}) produced no text"
+
+
+def test_caption_elements_are_written_in_the_order_chosen():
+    meta = _rich_meta()
+    forward = overlays.format_info_lines(meta, ["date", "location"],
+                                         location="Carteret")
+    reverse = overlays.format_info_lines(meta, ["location", "date"],
+                                         location="Carteret")
+    assert forward == list(reversed(reverse))
+
+
+def test_the_separator_is_configurable():
+    style = TextStyle(size=28)
+    one_line = overlays.info_bar(["Lunch", "Carteret"], SCREEN, style, separator=" · ")
+    stacked = overlays.info_bar(["Lunch", "Carteret"], SCREEN, style, separator="\n")
+    assert stacked.image.height > one_line.image.height, \
+        "a newline separator should put each element on its own line"

@@ -39,6 +39,11 @@ class PreparedSlide:
     def primary(self) -> PhotoMeta:
         return self.metas[0]
 
+    @property
+    def fit(self) -> str:
+        """How the picture was laid out: cover, contain, blur or mat."""
+        return str(self.image.info.get("picframe3_fit", "")) if self.image else ""
+
 
 class SlideLoader:
     def __init__(

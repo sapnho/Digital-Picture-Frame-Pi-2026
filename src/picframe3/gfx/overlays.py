@@ -17,7 +17,25 @@ from PIL import Image
 from . import textstyle
 from .textstyle import TextStyle
 
-SEPARATOR = "  ·  "
+DEFAULT_SEPARATOR = "  ·  "
+
+#: Every caption element picframe3 knows how to write, with the wording the
+#: settings page uses.  The frame writes the chosen elements in the order the
+#: user puts them in, which is why ``viewer.show_text`` is a list and not a
+#: set of switches.
+CAPTION_FIELDS: tuple[tuple[str, str], ...] = (
+    ("title",    "Title"),
+    ("caption",  "Caption or description"),
+    ("name",     "File name"),
+    ("date",     "Date taken"),
+    ("location", "Place"),
+    ("folder",   "Folder"),
+    ("camera",   "Camera"),
+    ("exposure", "Exposure (f-stop, speed, ISO, focal length)"),
+)
+
+#: Just the names, for validation.
+CAPTION_FIELD_NAMES = tuple(name for name, _ in CAPTION_FIELDS)
 
 
 @dataclass
@@ -34,6 +52,7 @@ def info_bar(
     *,
     scrim_fraction: float = 0.26,
     scrim_opacity: float = 0.55,
+    separator: str | None = None,
 ) -> Placement | None:
     """Caption block anchored to the bottom of the screen, over a gradient.
 
@@ -43,7 +62,8 @@ def info_bar(
     captions, not one describing only the left-hand picture.
     """
     columns = _as_columns(lines)
-    texts = [SEPARATOR.join(t for t in col if t) for col in columns]
+    joiner = DEFAULT_SEPARATOR if separator is None else separator
+    texts = [joiner.join(t for t in col if t) for col in columns]
     if not any(texts):
         return None
 

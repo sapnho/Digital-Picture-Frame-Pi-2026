@@ -97,8 +97,23 @@ Discovered automatically under one device:
 - `number.<name>_seconds_per_picture`
 - `select.<name>_transition`, `select.<name>_order`
 - `sensor.<name>_current_picture` — filename, with all metadata as attributes
+- `sensor.<name>_title` — title, else caption, else filename
+- `sensor.<name>_taken` — a real `timestamp` entity, so Home Assistant can
+  format it and automations can compare it
+- `sensor.<name>_place` — the place name, with `latitude` / `longitude` /
+  `source_type: gps` as attributes, which a map card reads directly
+- `sensor.<name>_tags` — comma-separated, with the list itself as an attribute
+- `sensor.<name>_camera` — model, with make, lens, aperture, shutter, ISO and
+  focal length as attributes
+- `sensor.<name>_folder`
+- `sensor.<name>_laid_out_as` — mat · cover · contain · blur (diagnostic)
 - `sensor.<name>_pictures_indexed`
+- `sensor.<name>_shuffle_round`, `sensor.<name>_left_in_this_round` — how far
+  through the current pass over the library the frame is (diagnostic)
 - `binary_sensor.<name>_scanning`
+
+All of them read one retained JSON document on `…/state`, so adding entities
+costs no extra traffic.
 
 ## The overlay hook
 

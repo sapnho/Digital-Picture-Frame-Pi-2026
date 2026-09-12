@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import time
+from datetime import datetime
 from typing import Any
 
 from . import __version__
@@ -54,6 +55,8 @@ class PicFrame:
         self.power = PowerSchedule(config.power.schedule, config.power.dim_schedule)
 
         self.current: list[Record] = []
+        #: How the picture on screen was laid out (cover/contain/blur/mat).
+        self._current_fit = ""
         self.paused = bool(config.slideshow.paused)
         self.show_info = True
         self.display_on = True
@@ -332,6 +335,7 @@ class PicFrame:
         self._capture_request: asyncio.Future | None = None
         self._location_backfill_at = 0.0
         self.current = group
+        self._current_fit = prepared.fit
         kb = self.config.slideshow.kenburns and not prepared.is_video
         texture = Texture.from_image(
             prepared.image, srgb=True, mipmap=not prepared.is_video
@@ -355,7 +359,7 @@ class PicFrame:
         self._dirty = True
 
         for record in group:
-            self.library.mark_played(record.id)
+            self.library.mark_played(record.id, self.playlist.round)
         self._build_info_overlay(group)
         self._info_until = self._slide_started + self.config.viewer.text_seconds
         self._request_location(group)
@@ -514,6 +518,7 @@ class PicFrame:
                              self.config.viewer.text_justify,
                              self.config.viewer.text_opacity),
             scrim_opacity=self.config.viewer.text_scrim,
+            separator=self.config.viewer.text_separator,
         )
         if placement is None:
             self.renderer.set_overlay("info", None)
@@ -925,6 +930,8 @@ class PicFrame:
             show_clock=self.config.viewer.show_clock,
             playlist_size=self.playlist.size if self.playlist else 0,
             playlist_position=self.playlist.position if self.playlist else 0,
+            playlist_round=self.playlist.round if self.playlist else 1,
+            playlist_remaining=self.playlist.remaining if self.playlist else 0,
             scanning=self._scanning,
             library=self.library.stats() if self.library else {},
             current=self._current_payload(record),
@@ -947,6 +954,17 @@ class PicFrame:
             return {}
         payload = record.as_dict()
         payload["paired_with"] = [r.path for r in self.current[1:]]
+        payload["shown_as"] = self._current_fit
+        # Pre-formatted for consumers that cannot template: Home Assistant's
+        # timestamp sensors want ISO 8601 with an offset, and its attribute
+        # cards want a string rather than a list.
+        payload["taken_iso"] = (
+            datetime.fromtimestamp(record.taken_at).astimezone().isoformat()
+            if record.taken_at else None
+        )
+        payload["tags_text"] = ", ".join(record.tags or ())
+        payload["has_position"] = (record.latitude is not None
+                                   and record.longitude is not None)
         return payload
 
     def _video_payload(self) -> dict[str, Any]:

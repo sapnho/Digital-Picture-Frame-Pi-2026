@@ -26,6 +26,14 @@ slideshow:
   transition_time: 2.5    # seconds
   order: shuffle          # shuffle | random | date_desc | date_asc | name |
                           # folder | recent | least_played
+                          #   shuffle — every picture exactly one turn per
+                          #     round, in a fresh random order each round.  The
+                          #     round is kept in the index, so a reboot, a
+                          #     rescan, or a hundred new photographs arriving
+                          #     over Samba do not rob the pictures still
+                          #     waiting for their turn.
+                          #   random  — no memory at all; repeats are possible
+                          #   least_played — strictly the least-shown picture
   recent_days: 7          # pictures newer than this jump the queue
   reshuffle_after: 1      # complete passes before reshuffling
   portrait_pairs: false   # show two upright photos side by side
@@ -48,6 +56,9 @@ viewer:
                           # spaces means "choose from these", as picframe did.
                           # picframe's own names (float_polaroid,
                           # float_color_wrap, double_flat) are accepted too.
+                          # Note: "polaroid" deliberately sits the print high
+                          # with a deep lower margin.  If pictures look badly
+                          # centred, this style is usually why.
   mat_tolerance: 0.01     # how different the shapes must be before "auto" mats
   mat_outer_color: null   # [r, g, b]; null derives it from the photograph
   mat_inner_color: null
@@ -68,6 +79,10 @@ viewer:
   show_text: [title, caption, date, location]
                           # any of: title caption name date location folder
                           #         camera exposure
+                          # The order here is the order they are written, and
+                          # the Settings tab edits this list directly.
+  text_separator: "  ·  " # written between the elements above;
+                          # "\n" puts each one on its own line
   text_size: 34
   text_seconds: 16.0      # how long the caption stays up after each change
   text_justify: L         # L | C | R
