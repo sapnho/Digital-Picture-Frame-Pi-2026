@@ -1,4 +1,42 @@
-:root {
+/* Two palettes, one set of names.  The frame lives in a room, and a web page
+   that is a slab of black at eleven in the morning is as wrong as one that is
+   a slab of white at eleven at night — so the page follows the device, and can
+   be pinned either way.  index.html stamps data-theme on <html> before the
+   first paint, from the stored choice or the system setting, so there is no
+   flash of the wrong theme.  Every colour below is a token: nothing anywhere
+   else in this file names a colour, which is what makes a second palette five
+   lines of work instead of an afternoon. */
+:root, :root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f5f8;
+  --panel: #ffffff;
+  --panel-2: #eef0f4;
+  --line: #d8dbe2;
+  --text: #14171c;
+  --muted: #5d6473;
+  --accent: #2f6fdb;
+  --accent-ink: #ffffff;         /* text on an accent-filled button */
+  --accent-hover: #2359b8;
+  --danger: #c03642;
+  --danger-tint: #fbecee;
+  --ok: #1f9d63;
+  --bar-bg: rgba(244,245,248,.85);
+  --btn-hover: #e3e6ec;
+  --input-bg: #ffffff;
+  /* Translucent overlays: black over a light page, white over a dark one, so
+     one rule works in both. */
+  --tint: rgba(20,23,28,.05);
+  --tint-2: rgba(20,23,28,.09);
+  --tint-3: rgba(20,23,28,.22);
+  --faint: #787f8d;
+  /* A photograph is judged against a neutral dark ground in both themes, the
+     way it would be in a frame — a letterboxed picture floating on white
+     reads as a broken layout. */
+  --stage-bg: #14161a;
+  --radius: 14px;
+}
+
+:root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #0d0e11;
   --panel: #16181d;
@@ -7,10 +45,41 @@
   --text: #e8eaef;
   --muted: #969cab;
   --accent: #6ea8fe;
+  --accent-ink: #08101f;
+  --accent-hover: #86b8ff;
   --danger: #e5646d;
-  --radius: 14px;
+  --danger-tint: #2a1b1e;
+  --ok: #48c78e;
+  --bar-bg: rgba(13,14,17,.85);
+  --btn-hover: #262a33;
+  --input-bg: rgba(0,0,0,.25);
+  --tint: rgba(255,255,255,.08);
+  --tint-2: rgba(255,255,255,.11);
+  --tint-3: rgba(255,255,255,.24);
+  --faint: #6a7282;
+  --stage-bg: #0b0c0f;
+}
+
+/* If the stamping script never runs — scripting off, a stale cached page —
+   the system setting still decides rather than leaving a light page on a dark
+   device. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --bg: #0d0e11; --panel: #16181d; --panel-2: #1d2027; --line: #2a2e37;
+    --text: #e8eaef; --muted: #969cab; --accent: #6ea8fe; --accent-ink: #08101f;
+    --accent-hover: #86b8ff; --danger: #e5646d; --danger-tint: #2a1b1e;
+    --ok: #48c78e; --bar-bg: rgba(13,14,17,.85); --btn-hover: #262a33;
+    --input-bg: rgba(0,0,0,.25);
+    --tint: rgba(255,255,255,.08); --tint-2: rgba(255,255,255,.11);
+    --tint-3: rgba(255,255,255,.24); --faint: #6a7282; --stage-bg: #0b0c0f;
+  }
 }
 * { box-sizing: border-box; }
+/* The UA rule for [hidden] is display:none at the lowest specificity, so any
+   element rule that sets display beats it -- which is how the hidden preview
+   <img> was still taking 260px of the stage and drawing a line across it. */
+[hidden] { display: none !important; }
 html, body { margin: 0; padding: 0; }
 body {
   background: var(--bg);
@@ -27,13 +96,13 @@ body {
   display: flex; flex-wrap: wrap; gap: 12px;
   align-items: center; justify-content: space-between;
   padding: 12px clamp(16px, 4vw, 32px);
-  background: rgba(13,14,17,.85);
+  background: var(--bar-bg);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 16px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); transition: background .3s; }
-.dot.on { background: #48c78e; box-shadow: 0 0 10px #48c78e88; }
+.dot.on { background: var(--ok); box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 55%, transparent); }
 .tabs { display: flex; gap: 4px; }
 .tab {
   background: none; border: 0; color: var(--muted);
@@ -41,6 +110,12 @@ body {
 }
 .tab:hover { color: var(--text); }
 .tab.is-active { background: var(--panel-2); color: var(--text); }
+#theme {
+  font: inherit; font-size: 13px; color: var(--muted); cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 999px; padding: 7px 10px;
+}
+#theme:hover { color: var(--text); }
 
 main { padding: clamp(16px, 4vw, 32px); max-width: 1180px; margin: 0 auto; }
 .view { display: none; }
@@ -49,7 +124,7 @@ main { padding: clamp(16px, 4vw, 32px); max-width: 1180px; margin: 0 auto; }
 /* ---- now playing ---- */
 .stage {
   position: relative;
-  background: var(--panel);
+  background: var(--stage-bg);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   overflow: hidden;
@@ -58,7 +133,7 @@ main { padding: clamp(16px, 4vw, 32px); max-width: 1180px; margin: 0 auto; }
 }
 .stage img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .empty { color: var(--muted); padding: 40px; text-align: center; }
-.progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: #ffffff14; }
+.progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--tint); }
 .progress span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .9s linear; }
 
 .badge-live {
@@ -85,12 +160,12 @@ main { padding: clamp(16px, 4vw, 32px); max-width: 1180px; margin: 0 auto; }
   border: 1px solid var(--line); border-radius: 10px;
   padding: 9px 16px; transition: background .15s, border-color .15s;
 }
-.btn:hover { background: #262a33; }
+.btn:hover { background: var(--btn-hover); }
 .btn:active { transform: translateY(1px); }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #08101f; font-weight: 600; }
-.btn-primary:hover { background: #86b8ff; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn-danger { color: var(--danger); }
-.btn-danger:hover { background: #2a1b1e; }
+.btn-danger:hover { background: var(--danger-tint); border-color: var(--danger); }
 
 .sliders { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .sliders label { display: block; font-size: 13px; color: var(--muted); }
@@ -122,7 +197,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin-top: 6px; }
 .card {
   margin: 0;                 /* the UA stylesheet gives <figure> 40px side margins */
   position: relative; border: 1px solid var(--line); border-radius: 12px;
-  overflow: hidden; background: var(--panel); cursor: pointer; aspect-ratio: 1;
+  overflow: hidden; background: var(--stage-bg); cursor: pointer; aspect-ratio: 1;
 }
 .card img { width: 100%; height: 100%; object-fit: cover; display: block;
             transition: transform .35s ease, opacity .3s; opacity: 0; }
@@ -140,7 +215,8 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin-top: 6px; }
 }
 
 /* ---- settings ---- */
-.form { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.form { display: grid; gap: 12px; align-items: start;
+         grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .field {
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 12px; padding: 12px 14px;
@@ -152,16 +228,42 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin-top: 6px; }
 }
 .field input[type=checkbox] { width: auto; accent-color: var(--accent); }
 .field .hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+.field .hint code { font-size: 11px; background: var(--tint); padding: 0 4px; border-radius: 4px; }
+.field .hint.key { color: var(--faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.field textarea {
+  width: 100%; background: var(--input-bg); color: inherit; font: 12px/1.5 ui-monospace,
+  SFMono-Regular, Menlo, monospace; border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px; resize: vertical;
+}
+.field input.bad, .field textarea.bad { border-color: var(--danger); }
+
+/* ---- settings sections ---- */
+.settings-group { margin: 0 0 28px; }
+.settings-group h2 { font-size: 15px; margin: 0 0 2px; }
+.settings-group > .muted { margin: 0 0 12px; font-size: 12.5px; }
+.badge-restart {
+  margin-left: 8px; font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 6px; opacity: .7;
+}
+label.inline { display: flex; align-items: center; gap: 6px; font-size: 13px;
+               color: var(--muted); white-space: nowrap; }
+label.inline input { width: auto; accent-color: var(--accent); }
 
 /* ---- caption elements ---- */
 .field-wide { grid-column: 1 / -1; }
-.caption-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.caption-list {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 4px;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+}
+/* The caption elements are a sequence, so they stay in one column: two
+   columns would make "what comes after what" a puzzle. */
+.caption-list[data-ordered] { grid-template-columns: 1fr; }
 .caption-list li {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px;
-  background: #ffffff08; color: var(--muted);
+  background: var(--tint); color: var(--muted);
 }
-.caption-list li.on { color: inherit; background: #ffffff12; border-color: #ffffff2e; }
+.caption-list li.on { color: inherit; background: var(--tint-2); border-color: var(--tint-3); }
 .caption-list label {
   display: flex; align-items: center; gap: 8px;
   flex: 1; margin: 0; font-size: 13.5px; color: inherit; cursor: pointer;
@@ -171,7 +273,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin-top: 6px; }
   background: none; border: 1px solid var(--line); color: var(--muted);
   border-radius: 6px; width: 26px; height: 24px; cursor: pointer; line-height: 1;
 }
-.caption-list button:hover { color: inherit; border-color: #ffffff3d; }
+.caption-list button:hover { color: inherit; border-color: var(--tint-3); }
 pre { white-space: pre-wrap; font-size: 12.5px; }
 
 @media (max-width: 560px) {

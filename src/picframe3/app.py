@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from . import __version__
+from . import __version__, uischema
 from .config import Config
 from .control.power import BacklightControl, PowerSchedule
 from .events import Action, Bus, Command, State
@@ -729,6 +729,8 @@ class PicFrame:
     def _apply_setting(self, key: str, value: Any) -> None:
         if not key:
             return
+        if key in uischema.SECRETS and value == uischema.REDACTED:
+            return          # a masked secret read back and written unchanged
         try:
             applied = self.config.set(key, value)
         except (KeyError, ValueError, TypeError) as exc:
@@ -755,6 +757,11 @@ class PicFrame:
             self._restyle_locations()
         elif section == "display" and key.endswith("brightness"):
             self.set_brightness(self.config.display.brightness)
+        elif section == "display" and key.endswith("background"):
+            self.renderer.background = tuple(self.config.display.background)
+        elif section == "logging" and key.endswith("level"):
+            logging.getLogger().setLevel(
+                getattr(logging, str(self.config.logging.level).upper(), logging.INFO))
         elif section == "display" and key.endswith("rotate"):
             self.renderer.rotate = self.config.display.rotate
             self._clock_minute = None

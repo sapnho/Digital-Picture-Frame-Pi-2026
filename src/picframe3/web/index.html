@@ -3,8 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#101114">
+<meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101114" media="(prefers-color-scheme: dark)">
 <title>Picture Frame</title>
+<script>
+  /* Stamped before the stylesheet paints, so the page never flashes the wrong
+     theme on its way to the right one.  Deliberately tiny and inline: a
+     separate file would be fetched after the first paint, which is the flash
+     this exists to prevent.  "auto" leaves no attribute, so the CSS media
+     query decides and keeps following the device if the user changes it. */
+  (function () {
+    var choice = "auto";
+    try { choice = localStorage.getItem("picframe3-theme") || "auto"; } catch (e) {}
+    if (choice === "light" || choice === "dark") {
+      document.documentElement.dataset.theme = choice;
+    }
+  })();
+</script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,6 +33,11 @@
     <button class="tab is-active" data-view="now">Now playing</button>
     <button class="tab" data-view="library">Library</button>
     <button class="tab" data-view="settings">Settings</button>
+    <select id="theme" title="Light or dark" aria-label="Theme">
+      <option value="auto">Auto</option>
+      <option value="light">Light</option>
+      <option value="dark">Dark</option>
+    </select>
   </nav>
 </header>
 
@@ -71,7 +91,13 @@
 
   <!-- ----------------------------------------------------- Settings -->
   <section id="view-settings" class="view">
-    <form id="settings" class="form"></form>
+    <div class="toolbar">
+      <input id="settings-search" type="search" autocomplete="off"
+             placeholder="Search every setting…">
+      <label class="inline"><input id="settings-advanced" type="checkbox">
+        Show advanced</label>
+    </div>
+    <form id="settings"></form>
     <div class="controls">
       <button id="save" class="btn btn-primary" type="button">Save to config file</button>
       <button id="reload" class="btn" type="button">Reload from file</button>

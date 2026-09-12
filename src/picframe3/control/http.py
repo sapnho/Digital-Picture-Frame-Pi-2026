@@ -144,7 +144,21 @@ class HttpServer:
         # -- configuration ---------------------------------------------
         @api.get("/api/config", dependencies=guard)
         async def get_config():
-            return self.app.config.as_dict()
+            from ..uischema import redact
+
+            return redact(self.app.config.as_dict())
+
+        @api.get("/api/config/schema", dependencies=guard)
+        async def config_schema():
+            """Every setting, with enough about each one to draw a control.
+
+            Generated from the dataclasses, so the settings page cannot fall
+            behind the code: a field added to the config appears here, and on
+            the page, without anyone remembering to list it.
+            """
+            from ..uischema import schema
+
+            return schema(self.app.config)
 
         @api.patch("/api/config", dependencies=guard)
         async def patch_config(body: dict, persist: bool = Query(False)):

@@ -232,107 +232,180 @@ async function loadLibrary() {
 }
 
 /* ------------------------------------------------------------- settings */
-const FIELDS = [
-  ["slideshow.interval", "Seconds per picture", "number"],
-  ["slideshow.transition", "Transition", "transition"],
-  ["slideshow.transition_choices", "Transitions \"random\" may use (none ticked = all)", "transitions"],
-  ["slideshow.transition_time", "Transition length (s)", "number"],
-  ["slideshow.order", "Order", "select", ["shuffle", "random", "date_desc", "date_asc", "name", "folder", "recent", "least_played"]],
-  ["slideshow.kenburns", "Ken Burns pan & zoom", "bool"],
-  ["slideshow.portrait_pairs", "Pair portrait photos", "bool"],
-  ["viewer.fit", "Fit", "select", ["auto", "cover", "contain", "blur", "mat"]],
-  ["viewer.fit_choices", "What \"auto\" may do with a picture that does not match the screen (none ticked = mat)", "fits"],
-  ["viewer.mat_style", "Mat styles (tick more than one to rotate)", "styles"],
-  ["viewer.show_text", "Caption elements", "fields"],
-  ["viewer.text_separator", "Between elements", "select", ["  ·  ", " – ", ", ", "\n"]],
-  ["viewer.date_format", "Date format", "text"],
-  ["viewer.mat_outer_border", "Mat width", "number"],
-  ["viewer.show_clock", "Show clock", "bool"],
-  ["viewer.clock_format", "Clock format", "text"],
-  ["viewer.text_seconds", "Caption seconds", "number"],
-  ["viewer.text_size", "Caption size", "number"],
-  ["display.brightness", "Brightness", "number"],
-  ["library.subfolder", "Only this subfolder", "text"],
-  ["geo.detail", "Place names", "geo-detail"],
-  ["geo.suppress", "Never show these place names", "csv"],
-];
+/* The whole page is generated from /api/config/schema, which is generated from
+   the config dataclasses.  A hand-written list here is how a settings page ends
+   up missing exactly the settings nobody thought about. */
 
-/* The separator is stored as the literal characters that go between two
-   caption elements, and a newline cannot be shown in a <select>. */
-const SEPARATOR_LABELS = { "  ·  ": "Dot  ·", " – ": "Dash  –", ", ": "Comma  ,",
-                           "\n": "One element per line" };
+let SCHEMA = null;
 
 async function loadSettings() {
-  const cfg = await api("/api/config");
-  const transitions = await api("/api/transitions");
-  const captionFields = await api("/api/caption-fields").catch(() => []);
-  const matStyles = await api("/api/mat-styles").catch(() => []);
-  const fitModes = await api("/api/fits").catch(() => []);
-  const geoDetail = await api("/api/geo-detail").catch(() => []);
+  SCHEMA = await api("/api/config/schema");
+  drawSettings();
+}
+
+function drawSettings() {
   const form = $("#settings");
+  const query = ($("#settings-search")?.value || "").trim().toLowerCase();
+  const showAdvanced = !!$("#settings-advanced")?.checked;
   form.innerHTML = "";
-  for (const [key, label, kind, choices] of FIELDS) {
-    const value = key.split(".").reduce((o, k) => (o ?? {})[k], cfg);
-    const wrap = document.createElement("div");
-    wrap.className = "field";
-    let control;
-    if (kind === "bool") {
-      control = `<input type="checkbox" data-key="${key}" ${value ? "checked" : ""}>`;
-    } else if (kind === "fields") {
-      control = pickList(key, value || [], captionFields, true, true);
-    } else if (kind === "styles") {
-      control = pickList(key, String(value || "").toLowerCase().split(/[\s,]+/)
-                                .filter(Boolean), matStyles, false, false);
-    } else if (kind === "fits") {
-      control = pickList(key, value || [], fitModes, true, false);
-    } else if (kind === "transitions") {
-      control = pickList(key, value || [],
-                         (transitions || []).map((n) => ({ name: n, label: n })),
-                         true, false);
-    } else if (kind === "geo-detail") {
-      const opts = geoDetail.map((g) =>
-        `<option value="${g.name}" ${g.name === value ? "selected" : ""}>` +
-        `${escapeHtml(g.label)}</option>`).join("");
-      control = `<select data-key="${key}">${opts}</select>`;
-    } else if (kind === "csv") {
-      control = `<input type="text" data-key="${key}" data-kind="csv" ` +
-                `value="${escapeHtml((value || []).join(", "))}" ` +
-                `placeholder="Germany, Hesse">`;
-    } else if (kind === "select" || kind === "transition") {
-      const opts = (kind === "transition" ? ["random", ...transitions] : choices)
-        .map((c) => `<option value="${escapeHtml(c)}" ${c === value ? "selected" : ""}>` +
-                    `${escapeHtml(SEPARATOR_LABELS[c] ?? c)}</option>`).join("");
-      control = `<select data-key="${key}">${opts}</select>`;
-    } else {
-      control = `<input type="${kind}" step="any" data-key="${key}" value="${escapeHtml(value ?? "")}">`;
-    }
-    wrap.innerHTML = `<label>${label}</label>${control}<div class="hint">${key}</div>`;
-    if (["fields", "styles", "fits", "transitions"].includes(kind)) {
-      wrap.classList.add("field-wide");
-    }
-    form.appendChild(wrap);
+  let shown = 0;
+
+  for (const section of SCHEMA.sections) {
+    const visible = section.fields.filter((f) => {
+      if (f.advanced && !showAdvanced && !query) return false;
+      if (!query) return true;
+      return (f.label + " " + f.key + " " + f.note).toLowerCase().includes(query);
+    });
+    if (!visible.length) continue;
+    shown += visible.length;
+
+    const block = document.createElement("section");
+    block.className = "settings-group";
+    block.innerHTML = `<h2>${escapeHtml(section.label)}</h2>` +
+                      `<p class="muted">${escapeHtml(section.prose)}</p>` +
+                      `<div class="form"></div>`;
+    const grid = block.querySelector(".form");
+    for (const f of visible) grid.appendChild(fieldControl(f));
+    form.appendChild(block);
   }
-  form.querySelectorAll("[data-key]").forEach((el) => {
-    if (el.dataset.kind === "list") return;          // handled by pickList
-    el.onchange = () => {
-      const value = el.type === "checkbox" ? el.checked
-        : el.type === "number" ? Number(el.value)
-        : el.dataset.kind === "csv"
-          ? el.value.split(",").map((s) => s.trim()).filter(Boolean)
-        : el.value;
-      send("set_config", { key: el.dataset.key, value });
-      $("#saved").textContent = `${el.dataset.key} = ${value}  (not yet written to disk)`;
-    };
-  });
+  if (!shown) {
+    form.innerHTML = `<p class="empty">Nothing matches “${escapeHtml(query)}”.</p>`;
+  }
+  form.querySelectorAll("[data-key]").forEach(wireControl);
   form.querySelectorAll("[data-pick-list]").forEach(wirePickList);
+}
+
+function optionList(name) {
+  return (SCHEMA.options && SCHEMA.options[name]) || [];
+}
+
+function fieldControl(f) {
+  const wrap = document.createElement("div");
+  wrap.className = "field";
+  const wide = ["pick", "pick-string", "json"].includes(f.kind);
+  if (wide) wrap.classList.add("field-wide");
+
+  let control;
+  switch (f.kind) {
+    case "bool":
+      control = `<input type="checkbox" data-key="${f.key}" data-kind="bool"` +
+                `${f.value ? " checked" : ""}>`;
+      break;
+    case "int":
+    case "number":
+      control = `<input type="number" step="${f.kind === "int" ? 1 : "any"}" ` +
+                `data-key="${f.key}" data-kind="${f.kind}" value="${f.value ?? ""}">`;
+      break;
+    case "secret":
+      control = `<input type="password" data-key="${f.key}" data-kind="text" ` +
+                `value="" autocomplete="new-password" ` +
+                `placeholder="${f.is_set ? "set — type to replace" : "not set"}">`;
+      break;
+    case "select": {
+      const opts = f.choices
+        ? f.choices.map((c) => ({ name: String(c), label: String(c) }))
+        : optionList(f.options);
+      const current = String(f.value ?? "");
+      control = `<select data-key="${f.key}" data-kind="select">` +
+        opts.map((o) => `<option value="${escapeHtml(o.name)}"` +
+          `${o.name === current ? " selected" : ""}>${escapeHtml(o.label)}</option>`).join("") +
+        `</select>`;
+      break;
+    }
+    case "pick":
+      control = pickList(f.key, f.value || [], optionList(f.options), true, f.ordered);
+      break;
+    case "pick-string":
+      control = pickList(f.key, String(f.value || "").toLowerCase().split(/[\s,]+/)
+                                 .filter(Boolean), optionList(f.options), false, false);
+      break;
+    case "csv":
+      control = `<input type="text" data-key="${f.key}" data-kind="csv" ` +
+                `value="${escapeHtml((f.value || []).join(", "))}" ` +
+                `placeholder="comma separated">`;
+      break;
+    case "numbers":
+      control = `<input type="text" data-key="${f.key}" data-kind="numbers" ` +
+                `value="${escapeHtml((f.value || []).join(", "))}" ` +
+                `placeholder="${f.nullable ? "empty = automatic" : "comma separated"}">`;
+      break;
+    case "json":
+      control = `<textarea rows="${jsonRows(f.value)}" data-key="${f.key}" ` +
+                `data-kind="json" spellcheck="false">` +
+                `${escapeHtml(JSON.stringify(f.value ?? null, null, 1))}</textarea>`;
+      break;
+    default:
+      control = `<input type="text" data-key="${f.key}" data-kind="text" ` +
+                `value="${escapeHtml(f.value ?? "")}">`;
+  }
+
+  const badge = f.live ? "" : `<span class="badge-restart" ` +
+    `title="Saved now; the frame picks it up when it restarts">restart</span>`;
+  wrap.innerHTML = `<label>${escapeHtml(f.label)}${badge}</label>${control}` +
+                   `<div class="hint">${markdownish(f.note)}</div>` +
+                   `<div class="hint key">${f.key}</div>`;
+  return wrap;
+}
+
+function jsonRows(value) {
+  return Math.min(14, Math.max(3, JSON.stringify(value ?? null, null, 1).split("\n").length));
+}
+
+/* Only backticks and ** ** — the notes are ours, not user input, but they are
+   still escaped first so a stray < in a strftime example cannot inject. */
+function markdownish(text) {
+  return escapeHtml(text || "")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
+
+function wireControl(el) {
+  if (el.dataset.kind === "list") return;          // handled by wirePickList
+  const commit = () => {
+    let value;
+    switch (el.dataset.kind) {
+      case "bool": value = el.checked; break;
+      case "int": value = Math.round(Number(el.value)); break;
+      case "number": value = Number(el.value); break;
+      case "csv":
+        value = el.value.split(",").map((s) => s.trim()).filter(Boolean);
+        break;
+      case "numbers": {
+        const parts = el.value.split(",").map((s) => s.trim()).filter(Boolean);
+        value = parts.length ? parts.map(Number) : null;
+        if (value && value.some((n) => Number.isNaN(n))) return note(el, "not a number");
+        break;
+      }
+      case "json":
+        try {
+          value = JSON.parse(el.value);
+        } catch (err) {
+          return note(el, `not valid JSON: ${err.message}`);
+        }
+        break;
+      default: value = el.value;
+    }
+    if (el.type === "password" && el.value === "") return;   // unchanged
+    el.classList.remove("bad");
+    send("set_config", { key: el.dataset.key, value });
+    $("#saved").textContent =
+      `${el.dataset.key} = ${el.type === "password" ? "••••••••" : JSON.stringify(value)}` +
+      "  (not yet written to the config file)";
+  };
+  el.onchange = commit;
+}
+
+function note(el, message) {
+  el.classList.add("bad");
+  $("#saved").textContent = `${el.dataset.key}: ${message} — not saved`;
 }
 
 /* ---- tick-and-reorder list ----------------------------------------------
    Used for the caption elements, where order is the whole point ("Place ·
-   Date" and "Date · Place" are different captions), and for the mat styles,
-   where it is not: ticking several means "rotate between these".
-   `ordered` sends a JSON array; otherwise a space-separated string, which is
-   the form picframe used and the config still accepts. */
+   Date" and "Date · Place" are different captions), and for the mat styles
+   and transitions, where it is not: ticking several means "choose between
+   these".  `asArray` sends a JSON array; otherwise a space-separated string,
+   which is the form picframe used and the config still accepts. */
 function pickList(key, chosen, available, asArray, reorder) {
   const known = (available.length ? available : chosen)
     .map((f) => (typeof f === "string" ? { name: f, label: f } : f));
@@ -341,14 +414,14 @@ function pickList(key, chosen, available, asArray, reorder) {
     ...chosen.filter((n) => n in byName).map((n) => ({ name: n, on: true })),
     ...known.filter((f) => !chosen.includes(f.name)).map((f) => ({ name: f.name, on: false })),
   ].map(({ name, on }) => `
-    <li data-name="${name}" class="${on ? "on" : ""}">
+    <li data-name="${escapeHtml(name)}" class="${on ? "on" : ""}">
       <label><input type="checkbox" ${on ? "checked" : ""}>
         <span>${escapeHtml(byName[name])}</span></label>
       ${reorder ? `<button type="button" data-move="-1" title="Move up">▲</button>
       <button type="button" data-move="1" title="Move down">▼</button>` : ""}
     </li>`).join("");
   return `<ol class="caption-list" data-pick-list data-key="${key}" data-kind="list"
-              data-array="${asArray ? 1 : 0}">${rows}</ol>`;
+              data-array="${asArray ? 1 : 0}"${reorder ? " data-ordered" : ""}>${rows}</ol>`;
 }
 
 function wirePickList(list) {
@@ -362,7 +435,7 @@ function wirePickList(list) {
     send("set_config", { key: list.dataset.key, value });
     $("#saved").textContent =
       `${list.dataset.key} = ${asArray ? `[${names.join(", ")}]` : value}` +
-      "  (not yet written to disk)";
+      "  (not yet written to the config file)";
   };
   list.onclick = (e) => {
     const move = e.target.closest("[data-move]");
@@ -380,6 +453,24 @@ function wirePickList(list) {
     commit();
   };
 }
+
+/* ------------------------------------------------------------------ theme */
+/* The choice lives in this browser, not in the frame's configuration: the
+   phone in a dark room and the laptop at the desk are looking at the same
+   frame and want different answers. */
+const themePicker = $("#theme");
+try {
+  themePicker.value = localStorage.getItem("picframe3-theme") || "auto";
+} catch (err) { themePicker.value = "auto"; }
+themePicker.onchange = () => {
+  const choice = themePicker.value;
+  if (choice === "auto") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = choice;
+  try { localStorage.setItem("picframe3-theme", choice); } catch (err) { /* private window */ }
+};
+
+$("#settings-search").oninput = () => { if (SCHEMA) drawSettings(); };
+$("#settings-advanced").onchange = () => { if (SCHEMA) drawSettings(); };
 
 $("#save").onclick = async () => {
   await api("/api/config?persist=true", { method: "PATCH", body: "{}" });

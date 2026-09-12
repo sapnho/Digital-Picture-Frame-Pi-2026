@@ -5,5 +5,5 @@ rendering straight onto DRM/KMS with no desktop session, GStreamer for video,
 an asyncio core, and a SQLite/FTS5 photo index.
 """
 
-__version__ = "3.4.0"
+__version__ = "3.6.0"
 __all__ = ["__version__"]

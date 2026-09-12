@@ -115,6 +115,31 @@ Discovered automatically under one device:
 All of them read one retained JSON document on `…/state`, so adding entities
 costs no extra traffic.
 
+## Configuration
+
+| endpoint | |
+|---|---|
+| `GET /api/config` | the whole configuration as JSON, with passwords masked as `••••••••` |
+| `GET /api/config/schema` | every setting with its type, label, explanation, legal values, default, and whether it takes effect without a restart — generated from the dataclasses, and what the Settings tab draws itself from |
+| `PATCH /api/config` | `{"slideshow.interval": 90}`; add `?persist=true` to write the config file |
+
+Writing the mask `••••••••` back to a password changes nothing, so reading the
+configuration, editing one key and sending it all back cannot blank a secret.
+
+## Light and dark
+
+The web interface follows the device by default and can be pinned either way
+from the picker in the header: **Auto · Light · Dark**. The choice is kept in
+that browser's local storage rather than in the frame's configuration — the
+phone in a dark bedroom and the laptop at the desk are looking at the same
+frame and want different answers. A tiny inline script stamps `data-theme` on
+`<html>` before the stylesheet paints, so a pinned page never flashes the
+other theme on its way to the right one; with scripting off, a
+`prefers-color-scheme` media query still delivers a whole palette.
+
+Photographs are shown against a neutral dark ground in both themes, the way
+they would be in a frame.
+
 ## The overlay hook
 
 If the PNG at `viewer.overlay_image` (default `/dev/shm/picframe-overlay.png`)
