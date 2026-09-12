@@ -24,7 +24,7 @@ Which screen to use and how hard to drive it.
 | `connector` | str | None | `None` | `HDMI-A-1`, `HDMI-A-2`, `DSI-1`… Empty takes the first connected output. *(takes effect on restart)* *(advanced)* |
 | `rotate` | integer | `0` | 0 or 180. For a quarter turn rotate in the kernel (`video=HDMI-A-1:1080x1920M@60,rotate=90`) so the Pi reports a portrait mode. |
 | `vsync` | boolean | `True` | Page-flip on the vertical blank. Turning it off tears; it exists for debugging. *(takes effect on restart)* *(advanced)* |
-| `fps_limit` | number | `30.0` | Only applies while something is animating; a still picture draws no frames. *(takes effect on restart)* |
+| `fps_limit` | number | `60.0` | Only applies while something is animating; a still picture draws no frames. With `vsync` on, the panel's refresh rate is the real ceiling. *(takes effect on restart)* |
 | `background` | list of numbers | `[0.0, 0.0, 0.0, 1.0]` | Red, green, blue, alpha, each 0–1. Shown around a picture that does not fill the screen. *(advanced)* |
 | `brightness` | number | `1.0` | 0–1, applied in the shader and to the backlight if there is one. |
 

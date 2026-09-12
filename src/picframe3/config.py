@@ -44,7 +44,7 @@ class DisplayConfig:
     rotate: int = 0
     vsync: bool = True
     #: Only applies while something is animating; a still picture draws nothing.
-    fps_limit: float = 30.0
+    fps_limit: float = 60.0
     background: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 1.0])
     brightness: float = 1.0
 

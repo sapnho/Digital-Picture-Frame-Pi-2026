@@ -16,7 +16,7 @@ display:
   rotate: 0               # 0 or 180.  For a quarter turn, rotate in the kernel:
                           #   video=HDMI-A-1:1080x1920M@60,rotate=90  in cmdline.txt
   vsync: true             # page-flip on the vblank; turn off only when debugging
-  fps_limit: 30.0         # cap while something is moving
+  fps_limit: 60.0         # cap while something is moving; vsync caps it too
   background: [0.0, 0.0, 0.0, 1.0]   # shown around a picture that does not fill the screen
   brightness: 1.0         # 0.0–1.0
 

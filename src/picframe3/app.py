@@ -73,6 +73,7 @@ class PicFrame:
         self._info_until = 0.0
         self._dirty = True
         self._frames = 0
+        self._last_frame_at = 0.0
         self._fps = 0.0
         self._fps_window = time.monotonic()
         self._scanning = False
@@ -245,8 +246,9 @@ class PicFrame:
                 self.renderer.draw(after_draw=self._capture_hook())
                 self._dirty = False
                 self._frames += 1
+                self._last_frame_at = time.monotonic()
 
-            await asyncio.sleep(self._sleep_for(now))
+            await asyncio.sleep(self._sleep_for(time.monotonic()))
 
     # ------------------------------------------------------------------
     # Screenshots
@@ -297,14 +299,28 @@ class PicFrame:
             return True
         if self._video_playing() or self._video_pending():
             return True
-        if self.config.slideshow.kenburns and r.current is not None and r.current.kenburns:
-            return now - r.current.started < r.current.duration
+        if (self.config.slideshow.kenburns and r.current is not None
+                and r.current.kenburns
+                and now - r.current.started < r.current.duration):
+            return True
+        # A caption fading in or out is the one thing that still moves on an
+        # otherwise finished frame.  Without this the loop would idle at two
+        # wake-ups a second and a 1.5 s fade would arrive in three visible
+        # steps instead of a fade.
+        if r.has_overlay("info") and self._info_fade(now)[1]:
+            return True
         return False
 
     def _sleep_for(self, now: float) -> float:
         cfg = self.config.display
         if self._animating(now):
-            return max(0.0, 1.0 / max(cfg.fps_limit, 1.0))
+            # On KMS the page flip already blocked until the vblank, so all
+            # that is left to wait is the rest of the frame budget.  Sleeping a
+            # whole frame *on top of* the flip would beat against the panel's
+            # refresh -- 50 ms one frame, 67 ms the next -- and that uneven
+            # cadence is exactly what an even fade shows up.
+            period = 1.0 / max(cfg.fps_limit, 1.0)
+            return max(0.0, period - (now - self._last_frame_at))
         # Nothing is moving.  On KMS the last flipped frame stays on screen, so
         # the loop can idle almost completely -- it only has to wake often
         # enough to notice a command or the next slide becoming due.
@@ -628,29 +644,49 @@ class PicFrame:
         self.renderer.set_overlay("info", placement.image, x=placement.x, y=placement.y,
                                   alpha=0.0, z=10)
 
+    @staticmethod
+    def _ease(t: float) -> float:
+        """Smoothstep: flat at both ends, steepest in the middle.
+
+        A straight ramp starts and stops abruptly, which reads as a snap even
+        at 30 fps; easing the two ends is what makes the caption look like it
+        is arriving rather than being switched on.
+        """
+        t = max(0.0, min(1.0, t))
+        return t * t * (3.0 - 2.0 * t)
+
+    def _info_fade(self, now: float) -> tuple[float, bool]:
+        """Caption opacity right now, and whether it is still on the move.
+
+        The second value drives the render loop: while it is true the loop has
+        to keep drawing, because nothing else on the frame is changing.
+        """
+        fade = max(0.001, min(1.5, self.config.viewer.text_seconds / 4))
+        start = self._slide_started + self.config.slideshow.transition_time
+        end = self._info_until
+        if self.paused:
+            return 1.0, False
+        if now < start:
+            # Wake up shortly before the fade is due, so its first step is not
+            # whatever the idle sleep happens to land on.
+            return 0.0, (start - now) <= 1.0
+        if now < start + fade:
+            return self._ease((now - start) / fade), True
+        if now < end - fade:
+            return 1.0, False
+        if now < end:
+            return self._ease((end - now) / fade), True
+        return 0.0, False
+
     def _tick_overlays(self, now: float) -> None:
         renderer = self.renderer
         if renderer is None:
             return
         # Info text: fade in after the transition, hold, fade out.
         if renderer.has_overlay("info"):
-            fade = min(1.5, self.config.viewer.text_seconds / 4)
-            start = self._slide_started + self.config.slideshow.transition_time
-            end = self._info_until
-            if self.paused:
-                alpha = 1.0
-            elif now < start:
-                alpha = 0.0
-            elif now < start + fade:
-                alpha = (now - start) / fade
-            elif now < end - fade:
-                alpha = 1.0
-            elif now < end:
-                alpha = max(0.0, (end - now) / fade)
-            else:
-                alpha = 0.0
+            alpha = self._info_fade(now)[0]
             current = renderer.overlays["info"].alpha
-            if abs(current - alpha) > 0.004:
+            if abs(current - alpha) > 0.001:
                 renderer.overlay_alpha("info", alpha)
                 self._dirty = True
 

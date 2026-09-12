@@ -66,7 +66,10 @@ The loop is adaptive, and this is the single biggest behavioural difference
 from pi3d:
 
 - **While something is moving** — a transition, a Ken Burns drift, a video, a
-  caption fading — it renders at `display.fps_limit`.
+  caption fading — it renders at `display.fps_limit`. With `vsync` on, the page
+  flip already blocks until the vblank, so the loop only sleeps out whatever is
+  left of the frame budget; sleeping a whole frame *after* the flip would beat
+  against the refresh rate and turn an even fade into an uneven one.
 - **While a still picture is on screen** it renders *nothing at all*. On KMS the
   last flipped frame stays on the panel by itself, so the correct number of
   frames to draw is zero. The loop wakes a few times a second only to notice
