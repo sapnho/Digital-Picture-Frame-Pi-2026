@@ -186,10 +186,13 @@ library:
   # Index at startup. Off is faster to start but new files wait for the
   # watch. (restart)
   scan_on_start: true
-  # Where “Remove” moves a picture. Nothing is ever unlinked, and every
-  # removal is written to removals.jsonl in this folder — when it went,
-  # where it came from, and what it was. The Removed tab reads that file and
-  # can put a picture back. (restart) (advanced)
+  # Where “Remove” moves a picture. Every removal is written to
+  # removals.jsonl in this folder — when it went, where it came from, and
+  # what it was. A removed picture also stays out of the slideshow if the
+  # file turns up again, under any name, from a sync or a backup; only “Show
+  # this again” on the Removed tab puts it back in. That tab reads the
+  # journal, can put a picture back, and can empty the trash: that deletes
+  # the files and keeps the lines about them. (restart) (advanced)
   deleted_folder: ~/.local/share/picframe3/deleted
   # Show only pictures whose path contains this. Pick one of your folders,
   # or type any part of a path. Empty shows everything.

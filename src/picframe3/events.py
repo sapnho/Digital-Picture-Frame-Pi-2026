@@ -29,6 +29,7 @@ class Action(StrEnum):
     JUMP = "jump"                 # payload: {"id": int} or {"path": str}
     DELETE = "delete"             # move the current picture out of the library
     RESTORE = "restore"           # payload: {"stored_as": str} -- undo a removal
+    RELEASE = "release"           # payload: {"stored_as": str} -- show it again
     DISPLAY_ON = "display_on"
     DISPLAY_OFF = "display_off"
     DISPLAY_TOGGLE = "display_toggle"

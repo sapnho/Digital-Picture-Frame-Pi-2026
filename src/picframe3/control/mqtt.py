@@ -885,6 +885,25 @@ class MqttBridge:
                 "icon": "mdi:image-remove",
                 "entity_category": "diagnostic",
             }),
+            # How many removed pictures are back on the disk.  Zero on a frame
+            # where removing works, and the moment it is not zero the cause is
+            # nearly always a two-way sync putting a picture back every time
+            # it is taken away.  The frame keeps them off the wall either way;
+            # this is so that it is visible rather than mysterious.
+            ("sensor", "came_back", {
+                **base,
+                "name": "Removed pictures that came back",
+                "unique_id": f"picframe3_{uid}_came_back",
+                "value_template": "{{ value_json.removed.came_back | default(0) }}",
+                "state_class": "measurement",
+                "json_attributes_topic": self.state_topic,
+                "json_attributes_template":
+                    "{{ {'held_out': value_json.removed.held, "
+                    "'last': value_json.removed.last_came_back, "
+                    "'found_at': value_json.removed.last_came_back_path} | tojson }}",
+                "icon": "mdi:image-sync-outline",
+                "entity_category": "diagnostic",
+            }),
             # -- which pictures are in the running ------------------------
             # picframe's Home Assistant card had these four boxes and they are
             # the reason people put the frame in Home Assistant at all: "only

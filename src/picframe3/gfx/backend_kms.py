@@ -171,7 +171,24 @@ class KmsBackend(Backend):
         if not bo:
             _log.error("gbm_surface_lock_front_buffer returned NULL; dropping frame")
             return
+        try:
+            self._present(bo)
+        except BaseException:
+            # A locked buffer that is never handed back is gone for good.  The
+            # GBM surface holds three or four; once they are all locked,
+            # eglSwapBuffers fails with EGL_BAD_ALLOC on every frame from then
+            # on and the screen stays black long after whatever caused it --
+            # only a restart brings the picture back.  Whatever goes wrong
+            # between locking a buffer and queueing it may cost this frame, but
+            # it must not cost the appliance.
+            if bo not in self._queued_bos and bo != self._front_bo:
+                # Unless it did reach the queue: releasing a buffer that is
+                # already booked as queued or on screen would hand GBM the
+                # same buffer twice.
+                gbm.lib.gbm_surface_release_buffer(self._gbm_surf, bo)
+            raise
 
+    def _present(self, bo: int) -> None:
         if not self._powered:
             # The CRTC is disabled, so the kernel would refuse this flip -- and
             # a frame that cannot be shown is not worth a framebuffer, a queue

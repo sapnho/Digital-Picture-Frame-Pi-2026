@@ -80,6 +80,28 @@ def test_finder_and_spotlight_droppings_are_still_kept_out():
     assert "   delete veto files = yes" in got
 
 
+@pytest.mark.parametrize("open_share", [True, False])
+def test_the_distros_home_shares_are_switched_off(open_share):
+    """Otherwise Finder shows a second, useless share beside the pictures.
+
+    Debian's `[homes]` carries `browseable = no`, which hides the `[homes]`
+    entry but *not* the per-user share it generates — that one inherits
+    `browseable` from `[global]`. A Mac connecting as Guest is mapped to
+    `nobody`, so Finder lists a "nobody" share pointing at `/nonexistent`.
+    """
+    got = lines(open_share=open_share)
+    assert "[homes]" in got
+    assert got[got.index("[homes]") + 1] == "   available = no"
+
+
+def test_the_home_shares_are_switched_off_before_the_picture_share():
+    """Section order decides which section a line lands in: `available = no`
+    has to sit under `[homes]`, not leak into the share below it."""
+    got = lines(open_share=True)
+    assert got.index("[homes]") < got.index("[Pictures]")
+    assert "   available = no" not in got[got.index("[Pictures]"):]
+
+
 def test_share_name_and_path_are_honoured():
     text = share_config("Fotos", "/mnt/photos", "frame", open_share=True)
     assert "[Fotos]" in text

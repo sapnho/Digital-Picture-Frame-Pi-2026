@@ -161,7 +161,16 @@ def test_an_old_index_upgrades_in_place(tmp_path):
     path = tmp_path / "old.db"
     v1 = re.sub(r"    -- The shuffle round.*?play_round    INTEGER NOT NULL DEFAULT 0,\n",
                 "", _SCHEMA, flags=re.S)
-    assert "play_round" not in v1, "the v1 schema stand-in still has the new column"
+    v1 = re.sub(r"    -- Deliberately kept out.*?digest        TEXT,\n",
+                "", v1, flags=re.S)
+    # ...and no holds table at all, which is what an index written before the
+    # held-out list existed actually looks like.
+    v1 = re.sub(r"-- Pictures that were removed.*?CREATE INDEX IF NOT EXISTS holds_size[^;]*;\n",
+                "", v1, flags=re.S)
+    files_table = v1.split("CREATE TABLE IF NOT EXISTS files")[1].split(");")[0]
+    for column in ("play_round", "held", "digest"):
+        assert column not in files_table, f"the v1 stand-in still has files.{column}"
+    assert "holds" not in v1, "the v1 schema stand-in still has the holds table"
     conn = sqlite3.connect(path)
     conn.executescript(v1)
     conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
@@ -170,9 +179,12 @@ def test_an_old_index_upgrades_in_place(tmp_path):
 
     upgraded = Library(str(path))
     columns = {r[1] for r in upgraded.connect().execute("PRAGMA table_info(files)")}
-    assert "play_round" in columns
+    assert {"play_round", "held", "digest"} <= columns
     assert upgraded.connect().execute(
-        "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+        "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "3"
+    # The held-out list is part of the upgrade, not only its two columns.
+    upgraded.hold("abc", size=7, path="/pics/a.jpg", stored_as="a.jpg")
+    assert upgraded.held_sizes() == {7}
 
 
 # -- the ways the library used to break the frame ---------------------------

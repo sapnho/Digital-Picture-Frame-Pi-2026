@@ -154,7 +154,9 @@ a folder onto it while you are on the same network:
 - **macOS:** Finder → Go → Connect to Server → `smb://frame.local/Pictures`
   The share is set up with Samba's `fruit` layer, so Finder's metadata goes
   into extended attributes rather than into a `._DSC1234.jpg` beside every
-  photograph.
+  photograph. `Pictures` is the only share the frame offers: Debian's Samba
+  otherwise hands a guest an empty share named after the account it was
+  mapped to — usually `nobody` — and the setup switches that off.
 - **Windows:** Explorer → `\\frame\Pictures`
 
 Or, with neither:
@@ -330,6 +332,29 @@ They are not supported: `picframe3 setup` says so, `picframe3 doctor` fails the
 OpenGL check, and starting the frame stops with a message naming the reason
 rather than limping along at one frame a second.
 
+**Video is where the two supported boards differ.** Photographs look the same
+on either; video does not.
+
+| | Pi 4 / 400 | Pi 5 |
+|---|---|---|
+| H.264 | hardware, up to 1080p60 | software (the CPU is fast enough) |
+| HEVC / H.265 | hardware, up to 4Kp60 | hardware |
+| In practice | **video up to 1080p** | **video up to 4K** |
+
+There is no 4K H.264 decoder on a Pi 4 at all, so such a file is decoded on the
+CPU and arrives at a few frames a second. And even where the decoder copes, a
+4K frame is 33 MB of RGBA that the pipeline writes, the player copies and the
+renderer uploads — around 4 GB/s at 30 fps, which is about all the memory
+bandwidth a Pi 4 has, with the 4K scanout wanting its share on top. So 1080p is
+the ceiling for video on a Pi 4 whatever the codec, and it is a comfortable
+one: 1080p plays smoothly there, on a 4K panel too.
+
+A **4K panel with 4K video** therefore means a Pi 5. Still photographs are
+shown at full 4K on both boards.
+
+`picframe3 doctor` says which board it is on and what that board will play, and
+the log names any file that is too large for it.
+
 ---
 
 ## Troubleshooting
@@ -371,6 +396,12 @@ it has gone missing.
 
 **Videos do not play** — `picframe3 doctor` says whether GStreamer is visible.
 The usual cause is a venv created without `--system-site-packages`.
+
+**A video stutters** — check the board and the clip against the table under
+[which Raspberry Pi](#which-raspberry-pi). On a Pi 4 anything above 1080p
+stutters and no setting will fix it; the log says so by name when such a file
+is indexed. Re-encoding those clips to 1080p, or moving the frame to a Pi 5,
+are the two ways out.
 
 **Console text over the picture** — add `consoleblank=0 logo.nologo
 vt.global_cursor_default=0 quiet` to `/boot/firmware/cmdline.txt`. The

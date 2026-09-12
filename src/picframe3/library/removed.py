@@ -61,10 +61,16 @@ class RemovalLog:
         self._cache_key: tuple[float, int] | None = None
 
     # -- writing -----------------------------------------------------------
-    def record(self, record: Any, stored_as: str, *, source: str = "") -> dict[str, Any]:
+    def record(self, record: Any, stored_as: str, *, source: str = "",
+               digest: str = "") -> dict[str, Any]:
         """Note one removal.  ``record`` is a :class:`~picframe3.library.db.Record`."""
         entry: dict[str, Any] = {
             "stored_as": stored_as,
+            # What the picture *is*, so that a copy of it arriving later under
+            # another name is still recognised as this removal.  In the journal
+            # as well as in the index, because the journal is the copy that
+            # survives losing the database.
+            "digest": digest or "",
             "removed_at": time.time(),
             "removed_iso": _iso(time.time()),
             "source": source or "",

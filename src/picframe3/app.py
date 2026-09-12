@@ -20,6 +20,7 @@ from .gfx import overlays as overlay_builders
 from .gfx.textstyle import TextStyle
 from .health import Health
 from .library.db import Library, Record
+from .library.digest import file_digest
 from .library.playlist import ANY_OTHER, Filters, Playlist
 from .library.removed import JOURNAL_NAME, RemovalLog
 from .library.scanner import Scanner
@@ -350,7 +351,12 @@ class PicFrame:
         while not self._stop.is_set():
             try:
                 now = time.monotonic()
-                self._tick_video()
+                if self.display_on:
+                    # With the panel off the film is paused (see set_display),
+                    # so there is nothing to poll and no deadline to push: the
+                    # slide that was up when the screen went dark is the slide
+                    # that is there when it comes back.
+                    self._tick_video()
                 self._tick_overlays(now)
 
                 if (not self.paused and self.display_on
@@ -358,7 +364,12 @@ class PicFrame:
                     await self._advance()
                     now = time.monotonic()
 
-                if self._dirty or self._animating(now):
+                wanted = self._dirty or self._animating(now)
+                # Drawing into a buffer nothing will present is pure heat.  The
+                # exception is a screenshot: /api/screenshot asks for a frame
+                # and is answered while the display is off, which is the whole
+                # point of being able to look at the frame from elsewhere.
+                if wanted and (self.display_on or self._capture_request is not None):
                     self.renderer.draw(after_draw=self._capture_hook())
                     self._dirty = False
                     self._frames += 1
@@ -454,6 +465,10 @@ class PicFrame:
         # Nothing is moving.  On KMS the last flipped frame stays on screen, so
         # the loop can idle almost completely -- it only has to wake often
         # enough to notice a command or the next slide becoming due.
+        if not self.display_on:
+            # And with the screen off nothing becomes due at all: the slideshow
+            # is on hold, so the loop only has to stay responsive to commands.
+            return 0.5
         until_change = max(0.0, self._next_change_at - now)
         return min(0.5, max(0.05, until_change))
 
@@ -580,6 +595,10 @@ class PicFrame:
             self._stats_at = now
             self._stats_cache = self.library.stats()
             self._removed_cache = self.removals.summary() if self.removals else {}
+            # Held-out pictures ride along in the same five-second cache: the
+            # number a watcher cares about is "how many removed pictures are
+            # back on the disk", and it belongs next to the removal counts.
+            self._removed_cache.update(self.library.hold_summary())
         return self._stats_cache
 
     def _removed_summary(self) -> dict[str, Any]:
@@ -894,6 +913,9 @@ class PicFrame:
             await self._delete_current(source=command.source)
         elif action is Action.RESTORE:
             await self._restore_removed(command.payload.get("stored_as", ""))
+        elif action is Action.RELEASE:
+            await self._release_removed(command.payload.get("stored_as", ""),
+                                        source=command.source)
         elif action in (Action.DISPLAY_ON, Action.DISPLAY_OFF, Action.DISPLAY_TOGGLE):
             want = (
                 True if action is Action.DISPLAY_ON
@@ -1114,12 +1136,38 @@ class PicFrame:
             _log.error("cannot move %s aside: %s", record.path, exc)
             return
         _log.info("moved %s to %s", record.path, destination)
+        # What the picture *is*, taken at its new home -- same bytes, and the
+        # old path is already gone.  This is what makes the removal stick: a
+        # deleted row is undone by any copy of the file landing back in the
+        # folder, and with a two-way sync, a restored backup or a USB stick
+        # that is not a hypothetical.  Off the event loop, because it reads the
+        # whole file and the deleted folder is often a share.
+        digest = await asyncio.get_running_loop().run_in_executor(
+            None, file_digest, destination)
         # Before forget(), never after: the database row is the only place the
         # title, the date taken, the place name and the tags exist, and
         # forget() deletes it.  Journal first and a removal stays explicable
         # even if the picture is never restored.
-        self.removals.record(record, os.path.basename(destination), source=source)
+        self.removals.record(record, os.path.basename(destination), source=source,
+                             digest=digest or "")
+        if digest:
+            self.library.hold(digest, size=record.size, path=record.path,
+                              stored_as=os.path.basename(destination))
+        else:
+            # Unreadable at the new path: the removal still works, it just
+            # cannot be recognised if the picture comes back.  Say so rather
+            # than quietly promising something weaker than usual.
+            _log.warning("could not read %s back to remember it; this removal is "
+                         "remembered by path only", destination)
         self.library.forget([record.path])
+        if digest:
+            # A second copy of the same photograph elsewhere in the library
+            # comes off the wall now rather than at the next scan.  Only files
+            # of exactly this size are read, which is nearly always none --
+            # and after forget(), so the row of the picture that has just been
+            # moved away is not one of them.
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._hold_existing_copies, digest, record.size)
         self.playlist.refresh()
         self.invalidate_stats()
         await self._advance()
@@ -1158,6 +1206,11 @@ class PicFrame:
             _log.error("cannot restore %s: %s", source_path, exc)
             return {"ok": False, "error": str(exc)}
         self.removals.mark_restored(entry["stored_as"], destination)
+        # Putting a picture back *is* saying it may be shown again, so the
+        # hold goes with it.  Without this the restore would move the file and
+        # the next scan would quietly hold it out again -- the picture back in
+        # its folder and still not on the wall, with nothing to explain it.
+        self._release_hold_for(entry)
         _log.info("restored %s to %s", entry["stored_as"], destination)
         if self.scanner is not None:
             await asyncio.get_running_loop().run_in_executor(
@@ -1169,6 +1222,64 @@ class PicFrame:
         self._dirty = True
         return {"ok": True, "path": destination,
                 "moved": destination != entry.get("original_path")}
+
+    def _hold_existing_copies(self, digest: str, size: int) -> int:
+        """Hold every indexed file that is the same picture.  Runs in a thread."""
+        held = 0
+        for file_id, path in self.library.files_sized(size):
+            if file_digest(path) != digest:
+                continue
+            self.library.mark_held(file_id, digest)
+            _log.info("%s is the same picture; holding it out too", path)
+            held += 1
+        return held
+
+    def _release_hold_for(self, entry: dict[str, Any]) -> bool:
+        """Clear the hold belonging to one journal line, however it is keyed.
+
+        The digest is in the journal from the version that introduced holds
+        onwards; a line written before that has none, so the hold is found by
+        the name the file was stored under instead.  Both, because a journal
+        that outlives the database is the whole point of it.
+        """
+        if self.library is None:
+            return False
+        digest = str(entry.get("digest") or "")
+        if not digest:
+            hold = self.library.hold_by_stored_as(str(entry.get("stored_as") or ""))
+            digest = hold["digest"] if hold is not None else ""
+        return self.library.release(digest) if digest else False
+
+    async def _release_removed(self, stored_as: str, source: str = "") -> dict[str, Any]:
+        """Say that a removed picture may be shown again.
+
+        Nothing else clears a hold.  That is the promise the held-out list
+        makes: a picture that was removed does not come back because a sync
+        put the file there again, because a backup was restored over the
+        folder, or because it arrived once more under a different name -- it
+        comes back when somebody says it may.
+        """
+        entry = None
+        if self.removals is not None:
+            entry = next(
+                (e for e in reversed(self.removals.entries(include_restored=True,
+                                                           include_purged=True))
+                 if e.get("stored_as") == stored_as), None)
+        hold = (self.library.hold_by_stored_as(stored_as)
+                if self.library is not None else None)
+        if entry is None and hold is None:
+            return {"ok": False, "error": f"nothing removed is called {stored_as!r}"}
+        released = (self._release_hold_for(entry) if entry is not None
+                    else self.library.release(hold["digest"]))
+        if not released:
+            return {"ok": False, "error": "that picture is not being held out"}
+        _log.info("%s may be shown again (asked by %s)", stored_as, source or "internal")
+        if self.playlist is not None:
+            self.playlist.refresh()
+        self.invalidate_stats()
+        self._dirty = True
+        return {"ok": True, "stored_as": stored_as,
+                "size": self.playlist.size if self.playlist is not None else 0}
 
     async def _purge_removed(self, stored_as: str, source: str = "") -> dict[str, Any]:
         """Delete one removed picture for good, and keep saying it existed.
@@ -1292,10 +1403,20 @@ class PicFrame:
         if not handled and self.backlight.available:
             self.backlight.set(self.config.display.brightness if on else 0.0)
             handled = True
-        if not handled:
+        if not handled and self.renderer is not None:
             # Last resort: black out in the shader so at least the picture goes.
             self.renderer.brightness = self.config.display.brightness if on else 0.0
+        if self.video is not None:
+            # A film must not run on in the dark.  It would be over -- or well
+            # past the part worth seeing -- by the time anyone looks again, and
+            # with sound on it would be playing to an empty room.  Resuming
+            # hands the pause back to whoever else may be holding it: a frame
+            # paused before the screen went off stays paused after it.
+            self.video.pause(not on or self.paused)
         if on:
+            # The picture that was up gets a full interval, not the remainder
+            # of one that ran out in the dark: whoever just switched the screen
+            # on should get to look at it.
             self._next_change_at = time.monotonic() + self.config.slideshow.interval
         self._dirty = True
         _log.info("display %s", "on" if on else "off")

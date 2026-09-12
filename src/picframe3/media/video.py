@@ -10,9 +10,12 @@ textures and drawn by the same renderer as the photographs -- so a video
 crossfades in and out exactly like a picture, keeps the overlays on top, and
 needs no compositor.
 
-GStreamer is the Raspberry Pi's native media stack: it uses the V4L2 stateless
-decoder for HEVC on a Pi 5 and the hardware H.264 decoder on a Pi 4, both
-through ``decodebin3``, with no configuration.
+GStreamer is the Raspberry Pi's native media stack: it reaches the V4L2
+decoders through ``decodebin3`` with no configuration -- the H.264 block and
+the HEVC block on a Pi 4, the HEVC block on a Pi 5 -- and falls back to the CPU
+for anything those cannot take.  What the boards can and cannot do is written
+down in ``_hw_decode_note`` below, which says so in the log rather than leaving
+a stuttering picture unexplained.
 """
 
 from __future__ import annotations
@@ -61,6 +64,58 @@ def _uri(path: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# What the board can decode
+# --------------------------------------------------------------------------
+
+_PI_MODEL: str | None = None
+
+
+def pi_model() -> str:
+    """The board name out of the device tree, cached; empty off a Pi."""
+    global _PI_MODEL
+    if _PI_MODEL is None:
+        _PI_MODEL = ""
+        for path in ("/proc/device-tree/model", "/sys/firmware/devicetree/base/model"):
+            try:
+                with open(path, "rb") as fh:
+                    _PI_MODEL = fh.read().decode(errors="replace").strip("\x00 \n")
+                break
+            except OSError:
+                continue
+    return _PI_MODEL
+
+
+def _hw_decode_note(width: int, height: int, codec: str = "",
+                    model: str | None = None) -> str | None:
+    """Why this clip will stutter on this board, or None if it will not.
+
+    A Pi 4 decodes H.264 up to 1080p60 and HEVC up to 4Kp60; there is no 4K
+    H.264 decoder on the chip, so such a file goes to the CPU and arrives at a
+    few frames a second.  Even where the decoder copes, a 4K frame is 33 MB of
+    RGBA that the pipeline writes, the player copies and the renderer uploads
+    -- some 4 GB/s at 30 fps, which is about all the memory bandwidth a Pi 4
+    has, and the 4K scanout wants its share too.  So on a Pi 4 the ceiling for
+    video is 1080p whatever the codec.  A Pi 5 has no H.264 decoder at all but
+    a CPU fast enough to do it in software, and three times the bandwidth.
+    """
+    model = pi_model() if model is None else model
+    if "Raspberry Pi 4" not in model and "Raspberry Pi 400" not in model:
+        return None
+    if width <= 1920 and height <= 1080:
+        return None
+    what = f"{width}x{height}"
+    if "h264" in codec or "avc" in codec:
+        why = ("the Pi 4 has no H.264 decoder above 1080p, so this is decoded "
+               "on the CPU")
+    elif "h265" in codec or "hevc" in codec:
+        why = ("the Pi 4 decodes HEVC in hardware, but a frame this size costs "
+               "more memory bandwidth than the board has")
+    else:
+        why = "a frame this size is beyond what the Pi 4 can move per frame"
+    return (f"{what} video: {why}. Expect stutter -- 1080p plays smoothly on "
+            f"this board, 4K wants a Pi 5.")
+
+# --------------------------------------------------------------------------
 # Probing
 # --------------------------------------------------------------------------
 
@@ -87,6 +142,11 @@ def probe(path: str, timeout: float = 5.0) -> dict | None:
             "orientation": 1,
             "taken_at": None,
         }
+        caps = v.get_caps()
+        note = _hw_decode_note(out["width"], out["height"],
+                               caps.to_string().lower() if caps else "")
+        if note:
+            _log.warning("%s: %s", os.path.basename(path), note)
         tags = info.get_tags()
         if tags is not None:
             ok, value = tags.get_string("image-orientation")

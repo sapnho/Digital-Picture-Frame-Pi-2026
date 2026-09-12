@@ -31,7 +31,7 @@ from ..media.metadata import PhotoMeta
 
 _log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -73,7 +73,14 @@ CREATE TABLE IF NOT EXISTS files (
     -- single indexed comparison, and it survives reboots, rescans and new
     -- files arriving over Samba in the middle of a round.
     play_round    INTEGER NOT NULL DEFAULT 0,
+    -- Unreadable, so not offered: a truncated download, a HEIC on a frame
+    -- without the plugin.  Cleared the moment the file changes on disk.
     hidden        INTEGER NOT NULL DEFAULT 0,
+    -- Deliberately kept out of the playlist because this picture was removed
+    -- once and has come back.  Nothing clears it but somebody saying so.
+    held          INTEGER NOT NULL DEFAULT 0,
+    -- SHA-256, filled in only for files that matched something in `holds`.
+    digest        TEXT,
     indexed_at    REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS files_folder  ON files(folder);
@@ -94,6 +101,28 @@ CREATE INDEX IF NOT EXISTS file_tags_tag ON file_tags(tag_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(
     path, title, caption, tags, location, tokenize='unicode61 remove_diacritics 2'
 );
+
+-- Pictures that were removed, remembered by their content rather than by
+-- their path.  A removal has to outlive the file coming back: Syncthing
+-- re-copies it, a backup is restored over the folder, the same photograph
+-- turns up again under another name.  Matching on `size` first is what keeps
+-- this cheap -- the size comes free with the scan's own stat, and only a file
+-- whose size is in this table is ever hashed.
+--
+-- A row is deleted when, and only when, somebody says the picture may be
+-- shown again.
+CREATE TABLE IF NOT EXISTS holds (
+    digest     TEXT    PRIMARY KEY,
+    size       INTEGER NOT NULL,
+    path       TEXT    NOT NULL,
+    basename   TEXT    NOT NULL,
+    stored_as  TEXT    NOT NULL DEFAULT '',
+    held_at    REAL    NOT NULL,
+    seen_at    REAL,
+    seen_path  TEXT    NOT NULL DEFAULT '',
+    seen_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS holds_size ON holds(size);
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -133,7 +162,7 @@ _COLUMNS = (
     "width", "height", "orientation", "is_portrait", "taken_at", "make", "model",
     "lens", "f_number", "exposure_time", "iso", "focal_length", "latitude",
     "longitude", "location", "title", "caption", "rating", "duration",
-    "play_count", "last_played", "hidden", "indexed_at",
+    "play_count", "last_played", "hidden", "held", "digest", "indexed_at",
 )
 
 
@@ -171,6 +200,8 @@ class Record:
     play_count: int
     last_played: float | None
     hidden: bool
+    held: bool
+    digest: str | None
     indexed_at: float
     tags: list[str] = None  # type: ignore[assignment]
 
@@ -318,6 +349,17 @@ class Library:
                 conn.execute("ALTER TABLE files ADD COLUMN "
                              "play_round INTEGER NOT NULL DEFAULT 0")
             _log.info("index upgraded to schema v2 (added play_round)")
+        # v3 added the held-out list: files.held / files.digest and the holds
+        # table.  An older index has nothing held, which is the right starting
+        # state -- every removal it knew about took its row with it.  Same
+        # reason as above for doing it here: CREATE TABLE IF NOT EXISTS does
+        # not alter a table that is already there.
+        if "held" not in columns:
+            with self.transaction():
+                conn.execute("ALTER TABLE files ADD COLUMN "
+                             "held INTEGER NOT NULL DEFAULT 0")
+                conn.execute("ALTER TABLE files ADD COLUMN digest TEXT")
+            _log.info("index upgraded to schema v3 (added held, digest)")
         with self.transaction():
             conn.execute("CREATE INDEX IF NOT EXISTS files_round ON files(play_round)")
             # The indices below are the ones the playlist's ORDER BY clauses
@@ -364,7 +406,8 @@ class Library:
         return not self.is_current(self.file_state(path), mtime, size)
 
     def upsert(self, meta: PhotoMeta, *, mtime: float, size: int,
-               location: str | None = None) -> int:
+               location: str | None = None, digest: str | None = None,
+               held: bool = False) -> int:
         folder = os.path.dirname(meta.path)
         basename = os.path.basename(meta.path)
         ext = os.path.splitext(basename)[1].lower()
@@ -375,7 +418,7 @@ class Library:
             meta.taken_at, meta.make, meta.model, meta.lens, meta.f_number,
             meta.exposure_time, meta.iso, meta.focal_length, meta.latitude,
             meta.longitude, location, meta.title, meta.caption, meta.rating,
-            meta.duration, time.time(),
+            meta.duration, int(bool(held)), digest, time.time(),
         )
         # One transaction for the row, its tags and its search entry: a file
         # that is in the index but in neither of the other two is invisible to
@@ -387,8 +430,9 @@ class Library:
                     path, folder, basename, ext, mtime, size, is_video,
                     width, height, orientation, is_portrait, taken_at, make, model,
                     lens, f_number, exposure_time, iso, focal_length, latitude,
-                    longitude, location, title, caption, rating, duration, indexed_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    longitude, location, title, caption, rating, duration,
+                    held, digest, indexed_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(path) DO UPDATE SET
                     folder=excluded.folder, basename=excluded.basename, ext=excluded.ext,
                     mtime=excluded.mtime, size=excluded.size, is_video=excluded.is_video,
@@ -402,6 +446,14 @@ class Library:
                     location=COALESCE(excluded.location, files.location),
                     title=excluded.title, caption=excluded.caption,
                     rating=excluded.rating, duration=excluded.duration,
+                    held=excluded.held,
+                    digest=COALESCE(excluded.digest, files.digest),
+                    -- This statement only runs for a file that is new or whose
+                    -- bytes have changed, so a picture hidden for being
+                    -- unreadable gets another chance the moment somebody
+                    -- replaces it -- which is exactly when the HEIC plugin has
+                    -- just been installed or the truncated download finished.
+                    hidden=0,
                     indexed_at=excluded.indexed_at
                 """,
                 values,
@@ -477,7 +529,7 @@ class Library:
         row = self.connect().execute(
             "SELECT COUNT(*) AS n, MIN(play_count) AS lo, MAX(play_count) AS hi, "
             "AVG(play_count) AS avg, SUM(play_count = 0) AS never "
-            "FROM files WHERE hidden = 0"
+            "FROM files WHERE hidden = 0 AND held = 0"
         ).fetchone()
         return {
             "files": row["n"] or 0,
@@ -490,6 +542,127 @@ class Library:
     def set_hidden(self, file_id: int, hidden: bool = True) -> None:
         with self.transaction() as conn:
             conn.execute("UPDATE files SET hidden=? WHERE id=?", (int(hidden), file_id))
+
+    # -- held-out pictures -------------------------------------------------
+    # A removal that only deletes a row is undone by any copy of the file
+    # landing back in the folder, and on a frame fed by Syncthing, a backup or
+    # a USB stick that happens.  So a removal is also remembered by the
+    # picture's content, and nothing but an explicit "show this again" clears
+    # it.  See :mod:`picframe3.library.digest` for why matching starts at the
+    # size rather than at the hash.
+
+    def hold(self, digest: str, *, size: int, path: str, stored_as: str = "",
+             when: float | None = None) -> None:
+        """Keep this picture out of the playlist until somebody says otherwise.
+
+        Idempotent, and deliberately not an ``INSERT OR REPLACE``: removing the
+        same photograph twice must not lose the sightings recorded against the
+        first removal.
+        """
+        if not digest:
+            return
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO holds (digest, size, path, basename, stored_as, held_at) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(digest) DO UPDATE SET "
+                "  size=excluded.size, path=excluded.path, "
+                "  basename=excluded.basename, stored_as=excluded.stored_as, "
+                "  held_at=excluded.held_at",
+                (digest, int(size), path, os.path.basename(path), stored_as or "",
+                 when if when is not None else time.time()),
+            )
+            # Any copy already in the index goes out of the playlist now,
+            # rather than at the next scan.  A second copy of the same
+            # photograph under another name is exactly the case this exists
+            # for, and it is already indexed.
+            conn.execute("UPDATE files SET held=1 WHERE digest=?", (digest,))
+
+    def release(self, digest: str) -> bool:
+        """Let it be shown again.  The one thing that clears a hold."""
+        if not digest:
+            return False
+        with self.transaction() as conn:
+            cur = conn.execute("DELETE FROM holds WHERE digest=?", (digest,))
+            conn.execute("UPDATE files SET held=0 WHERE digest=?", (digest,))
+        return cur.rowcount > 0
+
+    def files_sized(self, size: int) -> list[tuple[int, str]]:
+        """Indexed files that weigh exactly this much.
+
+        For the case of two copies of one photograph in the library: removing
+        one has to take the other off the wall too, and waiting for the next
+        scan to notice would leave the picture you just removed on the wall for
+        an hour.  Sized first, as everywhere else, so the caller hashes a
+        couple of files rather than the library.
+        """
+        return [(r["id"], r["path"]) for r in self.connect().execute(
+            "SELECT id, path FROM files WHERE size=? AND held=0", (int(size),))]
+
+    def mark_held(self, file_id: int, digest: str) -> None:
+        with self.transaction() as conn:
+            conn.execute("UPDATE files SET held=1, digest=? WHERE id=?",
+                         (digest, file_id))
+
+    def held_sizes(self) -> set[int]:
+        """The file sizes worth hashing.  Read once per scan, not per file."""
+        return {r["size"] for r in self.connect().execute("SELECT size FROM holds")}
+
+    def hold_for(self, digest: str) -> sqlite3.Row | None:
+        if not digest:
+            return None
+        return self.connect().execute(
+            "SELECT * FROM holds WHERE digest=?", (digest,)).fetchone()
+
+    def hold_by_stored_as(self, stored_as: str) -> sqlite3.Row | None:
+        """The hold that belongs to one line of the removal journal."""
+        if not stored_as:
+            return None
+        return self.connect().execute(
+            "SELECT * FROM holds WHERE stored_as=? ORDER BY held_at DESC LIMIT 1",
+            (stored_as,)).fetchone()
+
+    def note_seen(self, digest: str, path: str, when: float | None = None) -> None:
+        """Record that a held-out picture has turned up on disk again."""
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE holds SET seen_at=?, seen_path=?, seen_count=seen_count+1 "
+                "WHERE digest=?",
+                (when if when is not None else time.time(), path, digest),
+            )
+
+    def holds(self, *, came_back_only: bool = False) -> list[dict[str, Any]]:
+        rows = self.connect().execute(
+            "SELECT * FROM holds "
+            + ("WHERE seen_count > 0 " if came_back_only else "")
+            + "ORDER BY COALESCE(seen_at, held_at) DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def hold_summary(self) -> dict[str, Any]:
+        """What the state document and Home Assistant read.
+
+        ``came_back`` is the number that matters to somebody watching: it is
+        zero on a frame where removal simply works, and it stops being zero the
+        moment something -- nearly always a two-way sync -- keeps pushing a
+        removed photograph back onto the disk.
+        """
+        row = self.connect().execute(
+            "SELECT COUNT(*) AS n, "
+            "SUM(CASE WHEN seen_count > 0 THEN 1 ELSE 0 END) AS back "
+            "FROM holds"
+        ).fetchone()
+        last = self.connect().execute(
+            "SELECT basename, seen_path, seen_at FROM holds "
+            "WHERE seen_count > 0 ORDER BY seen_at DESC LIMIT 1"
+        ).fetchone()
+        return {
+            "held": row["n"] or 0,
+            "came_back": row["back"] or 0,
+            "last_came_back": (last["basename"] if last else "") or "",
+            "last_came_back_path": (last["seen_path"] if last else "") or "",
+            "last_came_back_at": (last["seen_at"] if last else None),
+        }
 
     def forget(self, paths: Iterable[str]) -> int:
         removed = 0
@@ -592,7 +765,7 @@ class Library:
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[Record]:
         return [self._hydrate(r) for r in self.connect().execute(sql, params)]
 
-    def count(self, where: str = "hidden=0", params: Sequence[Any] = ()) -> int:
+    def count(self, where: str = "hidden=0 AND held=0", params: Sequence[Any] = ()) -> int:
         return self.connect().execute(
             f"SELECT COUNT(*) AS n FROM files WHERE {where}", params
         ).fetchone()["n"]
@@ -601,7 +774,7 @@ class Library:
         return [
             (r["folder"], r["n"])
             for r in self.connect().execute(
-                "SELECT folder, COUNT(*) AS n FROM files WHERE hidden=0 "
+                "SELECT folder, COUNT(*) AS n FROM files WHERE hidden=0 AND held=0 "
                 "GROUP BY folder ORDER BY folder"
             )
         ]
@@ -612,7 +785,7 @@ class Library:
             for r in self.connect().execute(
                 "SELECT t.name, COUNT(*) AS n FROM tags t "
                 "JOIN file_tags ft ON ft.tag_id=t.id "
-                "JOIN files f ON f.id=ft.file_id AND f.hidden=0 "
+                "JOIN files f ON f.id=ft.file_id AND f.hidden=0 AND f.held=0 "
                 "GROUP BY t.name ORDER BY n DESC, t.name"
             )
         ]
@@ -629,7 +802,7 @@ class Library:
             (r["location"], r["n"])
             for r in self.connect().execute(
                 "SELECT location, COUNT(*) AS n FROM files "
-                "WHERE hidden=0 AND location IS NOT NULL AND location != '' "
+                "WHERE hidden=0 AND held=0 AND location IS NOT NULL AND location != '' "
                 "GROUP BY location ORDER BY n DESC, location"
             )
         ]
@@ -687,7 +860,7 @@ class Library:
         try:
             rows = self.connect().execute(
                 "SELECT f.* FROM search s JOIN files f ON f.id=s.rowid "
-                "WHERE search MATCH ? AND f.hidden=0 ORDER BY rank LIMIT ?",
+                "WHERE search MATCH ? AND f.hidden=0 AND f.held=0 ORDER BY rank LIMIT ?",
                 (query, limit),
             ).fetchall()
         except sqlite3.OperationalError as exc:
@@ -701,17 +874,20 @@ class Library:
             "SELECT COUNT(*) AS files, "
             "SUM(is_video) AS videos, "
             "SUM(CASE WHEN hidden=1 THEN 1 ELSE 0 END) AS hidden, "
+            "SUM(CASE WHEN held=1 THEN 1 ELSE 0 END) AS held, "
             "MIN(taken_at) AS oldest, MAX(taken_at) AS newest, "
             "SUM(size) AS bytes, "
-            "MIN(CASE WHEN hidden=0 THEN play_count END) AS shown_min, "
-            "MAX(CASE WHEN hidden=0 THEN play_count END) AS shown_max, "
-            "SUM(CASE WHEN hidden=0 AND play_count=0 THEN 1 ELSE 0 END) AS never_shown "
+            "MIN(CASE WHEN hidden=0 AND held=0 THEN play_count END) AS shown_min, "
+            "MAX(CASE WHEN hidden=0 AND held=0 THEN play_count END) AS shown_max, "
+            "SUM(CASE WHEN hidden=0 AND held=0 AND play_count=0 THEN 1 ELSE 0 END) "
+            "  AS never_shown "
             "FROM files"
         ).fetchone()
         return {
             "files": row["files"] or 0,
             "videos": row["videos"] or 0,
             "hidden": row["hidden"] or 0,
+            "held": row["held"] or 0,
             "shown_min": row["shown_min"] or 0,
             "shown_max": row["shown_max"] or 0,
             "never_shown": row["never_shown"] or 0,

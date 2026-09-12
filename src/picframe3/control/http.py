@@ -759,12 +759,21 @@ class HttpServer:
                 return []
             entries = log.entries(include_restored=include_restored,
                                   include_purged=include_purged, newest_first=True)
-            return [_removal(e, log.folder) for e in entries[:limit]]
+            # Which of these are still being held out, and which have turned up
+            # on the disk again.  One query for the page rather than one per
+            # row: the holds table is small, and the page draws two hundred.
+            holds = ({h["stored_as"]: h for h in self.app.library.holds()}
+                     if self.app.library is not None else {})
+            return [_removal(e, log.folder, holds.get(e.get("stored_as") or ""))
+                    for e in entries[:limit]]
 
         @api.get("/api/removed/summary", dependencies=guard)
         async def removed_summary():
             log = self.app.removals
-            return log.summary() if log is not None else {}
+            out = log.summary() if log is not None else {}
+            if self.app.library is not None:
+                out.update(self.app.library.hold_summary())
+            return out
 
         @api.post("/api/removed/empty", dependencies=guard)
         async def empty_trash():
@@ -803,6 +812,21 @@ class HttpServer:
             if entry is None or not os.path.exists(path):
                 raise HTTPException(404, "not found")
             return FileResponse(path)
+
+        @api.post("/api/removed/{stored_as}/allow", dependencies=guard)
+        async def allow(stored_as: str):
+            """Say this picture may be shown again -- the only thing that does.
+
+            Not behind ``allow_delete``: that switch is there to stop the
+            network removing pictures, and this puts one back.
+            """
+            name = os.path.basename(str(stored_as or ""))
+            if not name or name != stored_as:
+                raise HTTPException(404, "not found")
+            result = await self.app._release_removed(name, source="http")
+            if not result.get("ok"):
+                raise HTTPException(404, result.get("error", "cannot release it"))
+            return result
 
         @api.post("/api/removed/{stored_as}/restore", dependencies=guard)
         async def restore(stored_as: str):
@@ -1215,11 +1239,21 @@ async def _thumbnail_response(path: str, is_video: bool):
                     headers={"Cache-Control": "public, max-age=86400"})
 
 
-def _removal(entry: dict, folder: str) -> dict:
-    """One journal line, shaped for the page that draws it."""
+def _removal(entry: dict, folder: str, hold: dict | None = None) -> dict:
+    """One journal line, shaped for the page that draws it.
+
+    ``hold`` is the row from the held-out list, when there is one.  It is what
+    lets the page say the difference between "removed, and that was that" and
+    "removed, and something keeps putting it back".
+    """
     stored_as = entry.get("stored_as") or ""
     return {
         "stored_as": stored_as,
+        "held": hold is not None,
+        "came_back": bool(hold and (hold.get("seen_count") or 0)),
+        "seen_count": (hold or {}).get("seen_count") or 0,
+        "seen_path": (hold or {}).get("seen_path") or "",
+        "seen_at": (hold or {}).get("seen_at"),
         "basename": entry.get("basename") or stored_as,
         "folder": entry.get("folder") or "",
         "original_path": entry.get("original_path") or "",

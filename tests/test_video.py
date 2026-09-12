@@ -389,3 +389,40 @@ def test_the_preroll_pull_always_has_a_deadline(monkeypatch):
     assert [name for name, _ in sink.calls] == ["try-pull-preroll"]
     assert sink.calls[0][1] == (2 * FakeGst.SECOND,)
     assert pipeline.states[-1] == FakeGst.State.NULL
+
+
+# --------------------------------------------------------------------------
+# What the board can decode
+# --------------------------------------------------------------------------
+
+PI4 = "Raspberry Pi 4 Model B Rev 1.4"
+PI5 = "Raspberry Pi 5 Model B Rev 1.0"
+
+
+def test_no_note_for_1080p_on_a_pi4():
+    assert video_module._hw_decode_note(1920, 1080, "video/x-h264", model=PI4) is None
+
+
+def test_4k_h264_on_a_pi4_names_the_missing_decoder():
+    note = video_module._hw_decode_note(3840, 2160, "video/x-h264", model=PI4)
+    assert note is not None
+    assert "3840x2160" in note
+    assert "no H.264 decoder" in note
+
+
+def test_4k_hevc_on_a_pi4_blames_the_bandwidth_not_the_decoder():
+    note = video_module._hw_decode_note(3840, 2160, "video/x-h265", model=PI4)
+    assert note is not None
+    assert "memory bandwidth" in note
+
+
+def test_unknown_codec_still_warns_above_1080p():
+    assert video_module._hw_decode_note(2560, 1440, "", model=PI4) is not None
+
+
+def test_a_pi5_gets_no_note_at_4k():
+    assert video_module._hw_decode_note(3840, 2160, "video/x-h264", model=PI5) is None
+
+
+def test_off_a_pi_there_is_nothing_to_say():
+    assert video_module._hw_decode_note(3840, 2160, "video/x-h264", model="") is None

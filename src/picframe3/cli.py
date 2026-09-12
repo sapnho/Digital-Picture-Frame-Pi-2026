@@ -404,6 +404,11 @@ def cmd_doctor(args) -> int:
 
     if video.available():
         check("video playback", True, "GStreamer")
+        model = video.pi_model()
+        if "Raspberry Pi 4" in model or "Raspberry Pi 400" in model:
+            print("     → this board plays video up to 1080p; 4K stutters "
+                  "(no 4K H.264 decoder, and not enough memory bandwidth for "
+                  "a 33 MB frame thirty times a second). 4K wants a Pi 5.")
     else:
         check("video playback", False, "GStreamer bindings missing",
               "sudo apt install python3-gi gstreamer1.0-plugins-good "

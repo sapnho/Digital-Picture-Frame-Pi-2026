@@ -159,15 +159,21 @@ def test_two_requests_at_once_do_not_draw_from_the_playlist_twice():
     assert len(shown) == 2
 
 
-def test_an_unreadable_run_gives_up_instead_of_recursing():
+def test_an_unreadable_run_gives_up_instead_of_recursing(tmp_path):
     """A folder that lost its permissions used to be a RecursionError."""
     from picframe3 import slideshow as slideshow_module
 
     frame = PicFrame(Config())
 
+    # A file that is *there* and will not decode -- which is a different case
+    # from a file that has gone, and the one this test is about.  A missing
+    # path is forgotten and skipped long before the loader sees it.
+    broken = tmp_path / "broken.jpg"
+    broken.write_bytes(b"not a picture")
+
     class _Record:
         id = 1
-        path = "/x/broken.jpg"
+        path = str(broken)
 
         def as_meta(self):
             return self
@@ -197,7 +203,10 @@ def test_an_unreadable_run_gives_up_instead_of_recursing():
     hidden = []
     frame.playlist = _Endless()
     frame.loader = _Loader()
-    frame.library = type("L", (), {"set_hidden": lambda self, i, v: hidden.append(i)})()
+    frame.library = type("L", (), {
+        "set_hidden": lambda self, i, v: hidden.append(i),
+        "forget": lambda self, paths: 0,
+    })()
     frame.slideshow._show_placeholder = lambda: None
 
     asyncio.run(frame._advance())
@@ -279,6 +288,9 @@ def test_the_library_totals_are_counted_at_most_every_few_seconds():
         def stats(self):
             counted.append(1)
             return {"files": 3}
+
+        def hold_summary(self):
+            return {"held": 0, "came_back": 0}
 
     frame.library = _Library()
     for _ in range(20):
@@ -364,3 +376,68 @@ def test_the_deleted_folder_is_not_part_of_the_library():
     cfg.library.deleted_folder = "~/Pictures/.deleted-by-frame"
     frame = PicFrame(cfg)
     assert ".deleted-by-frame" in frame._scan_exclusions()
+
+
+# -- the slideshow follows the screen ---------------------------------------
+
+class _FakeVideo:
+    """Just enough of VideoPlayer to see what the frame asks of it."""
+
+    def __init__(self):
+        self.paused = False
+        self.calls: list[bool] = []
+
+    def pause(self, paused: bool = True) -> None:
+        self.paused = paused
+        self.calls.append(paused)
+
+
+def test_a_film_is_paused_with_the_screen_and_resumed_with_it():
+    """A video used to run on behind a dark panel.
+
+    It would be over -- or well past the part worth seeing -- by the time
+    anyone switched the screen back on, and with sound on it played to an empty
+    room.  The film now stops with the picture and picks up where it left off.
+    """
+    frame = _frame()
+    frame.video = _FakeVideo()
+
+    frame.set_display(False)
+    assert frame.video.paused is True
+
+    frame.set_display(True)
+    assert frame.video.paused is False
+    assert frame.video.calls == [True, False]
+
+
+def test_switching_the_screen_on_does_not_un_pause_the_slideshow():
+    """Two different pauses, and the screen only owns one of them."""
+    frame = _frame()
+    frame.video = _FakeVideo()
+    frame.paused = True                          # somebody pressed pause first
+
+    frame.set_display(False)
+    frame.set_display(True)
+    assert frame.video.paused is True            # still paused, as asked
+
+
+def test_the_picture_gets_a_full_interval_after_the_screen_comes_back():
+    """Not the remainder of an interval that ran out in the dark."""
+    frame = _frame()
+    frame.config.slideshow.interval = 120.0
+
+    frame.set_display(False)
+    frame._next_change_at = time.monotonic() - 60.0      # long overdue
+    frame.set_display(True)
+
+    assert frame._next_change_at - time.monotonic() == pytest.approx(120.0, abs=1.0)
+
+
+def test_the_loop_idles_while_the_screen_is_off():
+    """Nothing is due when the slideshow is on hold, so stop waking for it."""
+    frame = _frame()
+    frame._next_change_at = time.monotonic() - 5.0       # would mean 0.05s spins
+
+    assert frame._sleep_for(time.monotonic()) == pytest.approx(0.05)
+    frame.set_display(False)
+    assert frame._sleep_for(time.monotonic()) == pytest.approx(0.5)

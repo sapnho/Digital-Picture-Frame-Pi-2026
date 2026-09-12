@@ -32,7 +32,8 @@
   <nav class="tabs" role="tablist">
     <button class="tab is-active" data-view="now">Now playing</button>
     <button class="tab" data-view="library">Library</button>
-    <button class="tab" data-view="removed">Removed</button>
+    <button class="tab" data-view="removed">Removed<span id="removed-badge"
+            class="badge" hidden></span></button>
     <button class="tab" data-view="settings">Settings</button>
     <select id="theme" title="Light or dark" aria-label="Theme">
       <option value="auto">Auto</option>
@@ -157,9 +158,12 @@
         <h1>Nothing goes without a record</h1>
         <p class="lede" id="removed-intro">
           Every picture you remove is moved aside and written down here — when
-          it went, where it came from, and what it was. Put one back, or empty
-          the trash to get the disk space: the note stays either way.
+          it went, where it came from, and what it was. A removed picture stays
+          out of the slideshow even if the file turns up again; only
+          <em>Show this again</em> puts it back in. Put one back, or empty the
+          trash to get the disk space: the note stays either way.
         </p>
+        <p class="lede warn" id="came-back-note" hidden></p>
       </div>
     </div>
     <div class="toolbar">

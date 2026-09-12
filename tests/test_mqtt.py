@@ -80,7 +80,13 @@ def _sample_state() -> dict:
                         "journal": "/deleted/removals.jsonl",
                         "last_basename": "IMG_4312.jpg",
                         "last_removed_iso": "2026-09-12T14:03:11+02:00",
-                        "last_folder": "/photos/Normandy"}
+                        "last_folder": "/photos/Normandy",
+                        # The held-out list rides in the same document; see
+                        # Library.hold_summary().
+                        "held": 2, "came_back": 1,
+                        "last_came_back": "IMG_4312.jpg",
+                        "last_came_back_path": "/photos/Normandy/IMG_4312.jpg",
+                        "last_came_back_at": 1789000000.0}
     return state
 
 
@@ -172,7 +178,19 @@ def test_the_removed_sensors_are_announced(bridge):
     """The pi3d frame needed an external watchdog script to count a folder.
     The frame already knows, so it publishes the number itself."""
     names = {object_id for _, object_id, _ in bridge.discovery_entities()}
-    assert {"removed", "last_removed"} <= names
+    assert {"removed", "last_removed", "came_back"} <= names
+
+
+def test_a_removed_picture_that_comes_back_is_visible_in_home_assistant(bridge):
+    """Held out is not the same as swept under the carpet.
+
+    A two-way sync that keeps re-copying a removed photograph would otherwise
+    be invisible: the frame quietly holds it out for ever and nobody can tell
+    the difference between that and the removal simply having worked."""
+    sensor = next(p for _, object_id, p in bridge.discovery_entities()
+                  if object_id == "came_back")
+    assert "came_back" in sensor["value_template"]
+    assert "found_at" in sensor["json_attributes_template"]
 
 
 def test_the_removed_sensor_says_where_the_last_one_came_from(bridge):

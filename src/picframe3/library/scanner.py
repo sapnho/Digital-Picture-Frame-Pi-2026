@@ -14,6 +14,7 @@ from typing import Any
 from ..media import metadata
 from ..media.geocode import Geocoder
 from .db import Library
+from .digest import file_digest
 from .watch import InotifyWatcher
 
 _log = logging.getLogger(__name__)
@@ -33,6 +34,9 @@ class ScanResult:
     updated: int = 0
     removed: int = 0
     skipped: int = 0
+    #: Files recognised as pictures that were removed once and have come back.
+    #: Indexed, but kept out of the playlist until somebody releases them.
+    held: int = 0
     geocoded: int = 0
     seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
@@ -44,6 +48,8 @@ class ScanResult:
     def summary(self) -> str:
         out = (f"{self.scanned} files in {self.seconds:.1f}s "
                f"(+{self.added} new, ~{self.updated} changed, -{self.removed} gone)")
+        if self.held:
+            out += f"; {self.held} held out (removed before)"
         if self.missing_roots:
             out += f"; {len(self.missing_roots)} folder(s) missing"
         return out
@@ -180,7 +186,8 @@ class Scanner:
         result = ScanResult()
         t0 = time.monotonic()
         self._scanning = True
-        batch: list[tuple[Any, os.stat_result, str | None, bool]] = []
+        batch: list[tuple[Any, os.stat_result, str | None, bool, str | None, bool]] = []
+        held_sizes = self.library.held_sizes()
         try:
             for path, st in self.iter_files():
                 result.scanned += 1
@@ -207,7 +214,10 @@ class Scanner:
                                                     cached_only=True)
                     if location:
                         result.geocoded += 1
-                batch.append((meta, st, location, state is None))
+                digest, held = self._check_hold(path, st, held_sizes)
+                if held:
+                    result.held += 1
+                batch.append((meta, st, location, state is None, digest, held))
                 if len(batch) >= BATCH_SIZE:
                     self._write_batch(batch, result)
             self._write_batch(batch, result)
@@ -233,7 +243,40 @@ class Scanner:
         _log.info("scan complete: %s", result.summary())
         return result
 
-    def _write_batch(self, batch: list[tuple[Any, os.stat_result, str | None, bool]],
+    def _check_hold(self, path: str, st: os.stat_result,
+                    held_sizes: set[int]) -> tuple[str | None, bool]:
+        """Is this file a picture that was removed once and has come back?
+
+        Only ever asked about a file that is new or whose bytes have changed --
+        an already-indexed held-out picture is *current*, so the scan skips it
+        long before here and it is never hashed twice.
+
+        The size test in front of the hash is what makes this affordable: the
+        size is already in the ``stat`` the walk did, so a library of eight
+        thousand photographs costs eight thousand integer comparisons, and only
+        a file that really does weigh exactly as much as something in the trash
+        is read and hashed.
+        """
+        if st.st_size not in held_sizes:
+            return None, False
+        digest = file_digest(path)
+        if digest is None:
+            return None, False
+        hold = self.library.hold_for(digest)
+        if hold is None:
+            # Same size, different picture.  Keep the digest anyway: it costs
+            # one column and means a later removal recognises this copy
+            # without reading the file again.
+            return digest, False
+        self.library.note_seen(digest, path)
+        _log.info("%s is a picture that was removed before (as %s); keeping it out "
+                  "of the playlist until you say otherwise",
+                  path, hold["basename"] or hold["stored_as"])
+        return digest, True
+
+    def _write_batch(self,
+                     batch: list[tuple[Any, os.stat_result, str | None, bool,
+                                       str | None, bool]],
                      result: ScanResult) -> None:
         """Index a batch of files in one transaction, then empty it.
 
@@ -248,9 +291,9 @@ class Scanner:
         added = updated = 0
         try:
             with self.library.transaction():
-                for meta, st, location, is_new in batch:
+                for meta, st, location, is_new, digest, held in batch:
                     self.library.upsert(meta, mtime=st.st_mtime, size=st.st_size,
-                                        location=location)
+                                        location=location, digest=digest, held=held)
                     if is_new:
                         added += 1
                     else:
@@ -259,7 +302,7 @@ class Scanner:
             # The transaction rolled back, so none of these were indexed --
             # counting them as written would make the result a lie.
             _log.warning("could not index a batch of %d files: %s", len(batch), exc)
-            result.errors.extend(meta.path for meta, _, _, _ in batch)
+            result.errors.extend(meta.path for meta, *_ in batch)
         else:
             result.added += added
             result.updated += updated
@@ -274,7 +317,9 @@ class Scanner:
         """Reindex a specific set of paths, e.g. after an inotify batch."""
         result = ScanResult()
         t0 = time.monotonic()
-        batch: list[tuple[Any, os.stat_result, str | None, bool]] = []
+        batch: list[tuple[Any, os.stat_result, str | None, bool,
+                          str | None, bool]] = []
+        held_sizes = self.library.held_sizes()
         for path in paths:
             if os.path.isdir(path):
                 continue
@@ -308,7 +353,10 @@ class Scanner:
             if self.geocoder is not None and meta.latitude is not None:
                 location = self.geocoder.lookup(meta.latitude, meta.longitude,
                                                 cached_only=True)
-            batch.append((meta, st, location, state is None))
+            digest, held = self._check_hold(path, st, held_sizes)
+            if held:
+                result.held += 1
+            batch.append((meta, st, location, state is None, digest, held))
         self._write_batch(batch, result)
         result.seconds = time.monotonic() - t0
         return result

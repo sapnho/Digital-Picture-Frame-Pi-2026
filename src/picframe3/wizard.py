@@ -553,6 +553,22 @@ def share_config(share_name: str, folder: str, user: str, *,
         guest_policy,
         "   server min protocol = SMB2",
         "",
+        # Debian ships a `[homes]` section, and its `browseable` flag does not
+        # mean what it looks like it means: the automatic per-user home share
+        # inherits `browseable` from **[global]**, not from `[homes]`, so the
+        # distro's `browseable = no` hides the `[homes]` entry itself while
+        # leaving the generated one visible.  Connect from a Mac as Guest --
+        # which `map to guest = bad user` turns into the `nobody` account --
+        # and Finder lists a share called "nobody" beside the pictures,
+        # pointing at nobody's home directory, `/nonexistent`.  It cannot be
+        # opened, it was never ours to offer, and on a picture frame there are
+        # no home directories worth sharing.  Re-declaring the section merges
+        # into the existing one, so this switches it off without editing a
+        # line another package wrote -- and `picframe3 remove`, which lifts
+        # this block back out, restores the distro's behaviour exactly.
+        "[homes]",
+        "   available = no",
+        "",
         f"[{share_name}]",
         "   comment = picframe3 pictures",
         f"   path = {folder}",

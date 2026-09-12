@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any
 
@@ -114,6 +115,26 @@ class SlideshowController:
                     self._show_placeholder()
                     self.next_change_at = time.monotonic() + EMPTY_RETRY
                     return
+                # Is it still there?  Asked here, immediately before the
+                # picture goes up, and deliberately not left to the decoder
+                # failing: a file that has *gone* is not the same as a file
+                # that will not decode, and the two need opposite answers.
+                # A missing one is forgotten, so it is out of the playlist for
+                # good; an unreadable one is hidden, so it comes back on its
+                # own once it is readable again.
+                #
+                # This also covers the prefetch, which is the narrow window the
+                # old frame lost pictures in: the next photograph is decoded up
+                # to a whole interval before it is shown, and a picture deleted
+                # inside that window would otherwise go on the wall once more
+                # from a copy that is already in memory.
+                vanished = [r for r in group if not os.path.exists(r.path)]
+                if vanished:
+                    for record in vanished:
+                        _log.info("%s is gone; forgetting it", record.path)
+                        self.library.forget([record.path])
+                    self.playlist.refresh()
+                    continue
                 prepared = await self._prepare(group, backwards=backwards)
                 if prepared is not None:
                     self._show(group, prepared, initial=initial)
@@ -160,6 +181,16 @@ class SlideshowController:
         async with self._lock:
             group = self.playlist.jump_to(int(target))
             if not group:
+                return
+            # Same question as in _advance_locked, and for the same reason: the
+            # gallery may be showing a picture that has since gone, and "gone"
+            # is forgotten rather than hidden.
+            vanished = [r for r in group if not os.path.exists(r.path)]
+            if vanished:
+                for record in vanished:
+                    _log.info("%s is gone; forgetting it", record.path)
+                    self.library.forget([record.path])
+                self.playlist.refresh()
                 return
             self.stop_video()
             prepared = await self._prepare(group, backwards=False)

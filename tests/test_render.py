@@ -636,3 +636,46 @@ def test_a_flip_refused_by_a_disabled_crtc_is_a_dropped_frame(monkeypatch):
     finally:
         os.close(read_fd)
         os.close(write_fd)
+
+
+def test_a_frame_that_throws_does_not_cost_a_gbm_buffer(monkeypatch):
+    """The failure that turned a dropped frame into a dead frame.
+
+    Switching the panel off made every page flip fail with EINVAL, which was
+    raised -- and the buffer locked a moment earlier was never handed back.
+    The GBM surface holds three or four, so by the third failure eglSwapBuffers
+    answered EGL_BAD_ALLOC and went on answering it: the screen stayed black
+    until the service was restarted, long after the display had been switched
+    back on.
+    """
+    from picframe3.gfx import backend_kms
+
+    released: list[int] = []
+
+    class FakeGbm:
+        @staticmethod
+        def gbm_surface_lock_front_buffer(surf):
+            return 7
+
+        @staticmethod
+        def gbm_surface_release_buffer(surf, bo):
+            released.append(bo)
+
+    monkeypatch.setattr(backend_kms.gbm, "lib", FakeGbm)
+    monkeypatch.setattr(backend_kms.egl, "swap_buffers", lambda dpy, surf: None)
+
+    be = backend_kms.KmsBackend.__new__(backend_kms.KmsBackend)
+    be._gbm_surf = None
+    be._dpy = be._surf = None
+    be._queued_bos = []
+    be._front_bo = None
+
+    def boom(bo):
+        raise OSError(22, "drmModePageFlip failed")
+
+    be._present = boom
+    for _ in range(3):
+        with pytest.raises(OSError):
+            be.end_frame()
+
+    assert released == [7, 7, 7]             # every one of them came back

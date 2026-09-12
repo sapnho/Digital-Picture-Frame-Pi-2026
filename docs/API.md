@@ -59,6 +59,7 @@ authentication as everything else — point any OpenAPI client at it.
 | GET | `/api/removed/{stored_as}/thumb` | JPEG thumbnail of a removed picture |
 | GET | `/api/removed/{stored_as}/file` | the removed file itself |
 | POST | `/api/removed/{stored_as}/restore` | put it back where it came from, and say where that was |
+| POST | `/api/removed/{stored_as}/allow` | show that picture again: the one thing that clears a hold |
 | POST | `/api/removed/{stored_as}/purge` | delete that file for good; its journal line stays |
 | POST | `/api/removed/empty` | empty the trash: delete every file in it for good |
 | GET | `/api/removed/journal` | the raw journal as `removals.jsonl` (NDJSON) |
@@ -98,6 +99,23 @@ knows there is a file called `IMG_4312.jpg`, while the journal knows it was
 taken in Lisbon in 2019, removed on Tuesday from the web interface, and which
 folder it belongs back in. `{stored_as}` is the name the file was given in the
 deleted folder, as returned by `GET /api/removed`.
+
+A removal is also remembered by the picture's **content**, not only by its
+path. Deleting a row is undone by any copy of the file landing back in the
+folder — which is what a two-way Syncthing folder, a restored backup or the
+same photograph arriving again from a phone actually does — so the frame keeps
+the SHA-256 of every removed picture in a small `holds` table. A file whose
+size matches one of them (the size is free, it comes with the scan's own
+`stat`) is hashed, and if it is the same picture it is indexed but marked
+`held`: out of the playlist, out of the browsing grid, listed on the Removed
+tab as *turned up again — still held out*, and counted by the `came_back`
+sensor in Home Assistant.
+
+Nothing clears a hold but somebody saying so: `POST
+/api/removed/{stored_as}/allow`, the *Show this again* button, or the `release`
+action over MQTT. Putting a picture back from the trash releases it too —
+restoring a picture *is* saying it may be shown again, and without that the
+file would go back to its folder and the next scan would quietly hold it out.
 
 Removing over the network is off unless `http.allow_delete` is set: without it
 `delete` is refused with 403 and a picture can only be removed at the frame

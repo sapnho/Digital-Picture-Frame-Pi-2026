@@ -407,7 +407,11 @@ class Playlist:
 
     # -- query building ----------------------------------------------------
     def _where(self, filters: Filters | None = None) -> tuple[str, list[Any]]:
-        clauses = ["f.hidden = 0"]
+        # ``held`` is the deliberate one: a picture that was removed and has
+        # turned up on disk again stays out of every selection until somebody
+        # releases it.  ``hidden`` is the accidental one -- a file that would
+        # not decode.
+        clauses = ["f.hidden = 0", "f.held = 0"]
         params: list[Any] = []
         f = filters if filters is not None else self.filters
         if f.subfolder:
@@ -658,19 +662,38 @@ class Playlist:
                   self._round - 1, self._round)
 
     def next(self) -> list[Record]:
-        if self._future:
-            ids = self._future.popleft()
-        else:
-            ids = self._advance_group()
-        if not ids:
-            return []
-        if self.current_ids:
-            self._history.append(list(self.current_ids))
-        self.current_ids = ids
-        if self.persist:
-            self.library.mark_round(ids, self._round)
-        self._save_position()
-        return [r for r in (self.library.get(i) for i in ids) if r is not None]
+        """The next group, skipping ids the index no longer knows about.
+
+        The skipping is the point.  An id goes stale whenever a picture leaves
+        the library between two refreshes -- deleted over the share, removed by
+        a parallel rescan, pruned -- and resolving it gives an empty list.
+        Returning that empty list is indistinguishable to the caller from "the
+        library is empty", so one deleted photograph put the *nothing to show*
+        screen on the wall for the retry interval instead of simply moving on
+        to the next picture.
+
+        The bound is the length of the list: a playlist whose every id has gone
+        stale must end, not spin.
+        """
+        for _ in range(len(self._ids) + 1):
+            if self._future:
+                ids = self._future.popleft()
+            else:
+                ids = self._advance_group()
+            if not ids:
+                return []
+            records = [r for r in (self.library.get(i) for i in ids) if r is not None]
+            if not records:
+                _log.debug("skipping %d picture(s) that left the library", len(ids))
+                continue
+            if self.current_ids:
+                self._history.append(list(self.current_ids))
+            self.current_ids = [r.id for r in records]
+            if self.persist:
+                self.library.mark_round(self.current_ids, self._round)
+            self._save_position()
+            return records
+        return []
 
     def previous(self) -> list[Record]:
         """The group before this one, skipping any that no longer resolve.

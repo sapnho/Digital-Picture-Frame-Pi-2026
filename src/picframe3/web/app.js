@@ -473,6 +473,7 @@ async function loadRemoved() {
      nothing — a destructive button that does nothing when pressed teaches
      people to press destructive buttons. */
   const summary = await api("/api/removed/summary");
+  showCameBack(summary.came_back || 0);
   const waiting = summary.count || 0;
   const button = $("#trash-empty");
   button.disabled = waiting === 0;
@@ -487,6 +488,36 @@ async function loadRemoved() {
     ? "Nothing removed matches that."
     : "Nothing has been removed.";
   for (const r of rows) list.appendChild(removalRow(r));
+}
+
+/* A Unix timestamp as the ISO string when_text() reads.  The journal speaks
+   ISO, the held-out list speaks seconds; the page should not care. */
+function isoOf(stamp) {
+  try {
+    return new Date(stamp * 1000).toISOString();
+  } catch {
+    return "";
+  }
+}
+
+/* The count of removed pictures that are back on the disk, on the tab itself
+   and above the list.  Zero hides both: a badge that is always there stops
+   being read. */
+function showCameBack(n) {
+  const badge = $("#removed-badge");
+  if (badge) {
+    badge.hidden = !n;
+    badge.textContent = n || "";
+  }
+  const note = $("#came-back-note");
+  if (note) {
+    note.hidden = !n;
+    note.textContent = n
+      ? `${n} removed picture${n === 1 ? " is" : "s are"} on the disk again. `
+        + "They are held out of the slideshow until you say otherwise — "
+        + "a folder that syncs both ways is the usual reason."
+      : "";
+  }
 }
 
 function removalRow(r) {
@@ -527,6 +558,15 @@ function removalRow(r) {
         ? `<div class="line for-good">File deleted for good ${
             escapeHtml(when_text(r.purged_iso))} — this note is what is left</div>`
         : "") +
+      /* The line that explains a picture you removed and keep not seeing.
+         Without it, a two-way sync that re-copies the file every time looks
+         exactly like the frame having quietly ignored you. */
+      (r.came_back
+        ? `<div class="line came-back">Turned up again${
+            r.seen_at ? ` ${escapeHtml(when_text(isoOf(r.seen_at)))}` : ""} at <span
+            class="from">${escapeHtml(r.seen_path)}</span> — still held out${
+            r.seen_count > 1 ? ` (${r.seen_count}×)` : ""}</div>`
+        : "") +
     `</div>` +
     `<div class="actions"></div>`;
 
@@ -556,6 +596,32 @@ function removalRow(r) {
       loadRemoved();
     };
     row.querySelector(".actions").appendChild(forGood);
+  }
+
+  /* The only thing that lets a removed picture back into the playlist.  It is
+     offered wherever a hold exists -- most usefully on a row that says the
+     picture came back, but also on one that has not, so that "this may be
+     shown again" can be said in advance. */
+  if (r.held) {
+    const allow = document.createElement("button");
+    allow.className = "btn";
+    allow.textContent = "Show this again";
+    allow.title = r.came_back
+      ? `Stop holding ${r.basename} out. It is already on the disk, so it goes `
+        + "back into the slideshow."
+      : `Stop holding ${r.basename} out, so a copy that turns up later is shown.`;
+    allow.onclick = async () => {
+      allow.disabled = true;
+      allow.textContent = "Releasing…";
+      try {
+        await api(`/api/removed/${encodeURIComponent(r.stored_as)}/allow`,
+                  { method: "POST" });
+      } catch (err) {
+        alert(`Could not release it: ${err.message}`);
+      }
+      loadRemoved();
+    };
+    row.querySelector(".actions").appendChild(allow);
   }
 
   if (!r.restored_at && !r.purged_at && r.on_disk) {

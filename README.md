@@ -106,7 +106,9 @@ the Pi and nothing to rebuild when Mesa updates.
 - **Portrait pairing**: two upright photos side by side on a landscape panel
 - Blur-fill, cover, contain, or automatic per-image choice
 - Captions from EXIF / IPTC / XMP, reverse-geocoded place names, and a clock
-- **Video** playback with audio, hardware decoding where the Pi provides it
+- **Video** playback with audio, hardware decoding where the Pi provides it —
+  4K on a Pi 5, up to 1080p on a Pi 4 *(see [which Raspberry
+  Pi](docs/INSTALL.md#which-raspberry-pi))*
 - **HEIC/HEIF** (iPhone) support
 - **Photographs that arrive by themselves** — the setup offers Syncthing
   alongside the file share, installs it, points it at the picture folder and
