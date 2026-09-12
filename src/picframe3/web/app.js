@@ -103,6 +103,19 @@ document.addEventListener("keydown", (e) => {
   if (map[e.key]) { e.preventDefault(); send(map[e.key]); }
 });
 
+/* A thumbnail URL that changes when the picture behind it does.  Ids are
+   SQLite rowids: reindex the library and id 59 is a different photograph, so
+   a URL of `/photo/59/thumb` alone is cached by the browser for a day and
+   then drawn beside the caption of whatever holds that id now.  The file's
+   mtime in the query string is what makes the cached copy safe. */
+function thumbKey(p) {
+  return `${p.id}:${Math.round(p.mtime || 0)}`;
+}
+
+function thumbUrl(p) {
+  return `/api/library/photo/${p.id}/thumb?v=${Math.round(p.mtime || 0)}`;
+}
+
 /* ---------------------------------------------------------------- state */
 function render(next) {
   state = next;
@@ -115,10 +128,13 @@ function render(next) {
   const cur = state.current || {};
   if (liveUrl) {
     // a captured frame is on display; leave it alone until dismissed
-  } else if (cur.id && cur.id !== currentId) {
-    currentId = cur.id;
+  } else if (cur.id && thumbKey(cur) !== currentId) {
+    // Keyed on the file, not on the id: an id is a SQLite rowid and a rescan
+    // hands it to a different picture, which the browser would then answer
+    // from its own cache -- yesterday's photograph under today's caption.
+    currentId = thumbKey(cur);
     const img = $("#preview");
-    img.src = `/api/library/photo/${cur.id}/thumb`;
+    img.src = thumbUrl(cur);
     img.hidden = false;
     $("#preview-empty").hidden = true;
   } else if (!cur.id && !liveUrl) {
@@ -425,7 +441,7 @@ async function loadLibrary() {
     card.className = "card";
     card.title = p.path;
     card.innerHTML =
-      `<img loading="lazy" src="/api/library/photo/${p.id}/thumb" alt="">` +
+      `<img loading="lazy" src="${thumbUrl(p)}" alt="">` +
       (p.is_video ? `<span class="badge">video</span>` : "") +
       `<figcaption>${escapeHtml(p.title || p.basename)}</figcaption>`;
     card.querySelector("img").onload = (e) => e.target.classList.add("ready");
@@ -527,7 +543,8 @@ function removalRow(r) {
 
   const shot = r.on_disk
     ? `<span class="shot"><img loading="lazy" alt=""
-         src="/api/removed/${encodeURIComponent(r.stored_as)}/thumb"></span>`
+         src="/api/removed/${encodeURIComponent(r.stored_as)}/thumb?v=${
+           Math.round(r.removed_at || 0)}"></span>`
     : `<span class="shot"><span class="gone">${
          r.purged_at ? "deleted" : "file gone"}</span></span>`;
 

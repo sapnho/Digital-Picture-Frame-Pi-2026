@@ -729,11 +729,12 @@ class HttpServer:
             return record.as_dict()
 
         @api.get("/api/library/photo/{file_id}/thumb", dependencies=guard)
-        async def thumb(file_id: int):
+        async def thumb(file_id: int, v: str = Query("")):
             record = await _in_thread(self.app.library.get, file_id)
             if record is None:
                 raise HTTPException(404, "not found")
-            return await _thumbnail_response(record.path, bool(record.is_video))
+            return await _thumbnail_response(record.path, bool(record.is_video),
+                                             versioned=bool(v))
 
         @api.get("/api/library/photo/{file_id}/file", dependencies=guard)
         async def original(file_id: int):
@@ -800,11 +801,12 @@ class HttpServer:
             return result
 
         @api.get("/api/removed/{stored_as}/thumb", dependencies=guard)
-        async def removed_thumb(stored_as: str):
+        async def removed_thumb(stored_as: str, v: str = Query("")):
             entry, path = _removed_file(self.app, stored_as)
             if entry is None or not os.path.exists(path):
                 raise HTTPException(404, "not found")
-            return await _thumbnail_response(path, bool(entry.get("is_video")))
+            return await _thumbnail_response(path, bool(entry.get("is_video")),
+                                             versioned=bool(v))
 
         @api.get("/api/removed/{stored_as}/file", dependencies=guard)
         async def removed_file(stored_as: str):
@@ -1181,6 +1183,7 @@ def _summary(record) -> dict:
         "id": record.id,
         "path": record.path,
         "basename": record.basename,
+        "mtime": record.mtime,
         "folder": record.folder,
         "is_video": bool(record.is_video),
         "is_portrait": bool(record.is_portrait),
@@ -1227,16 +1230,25 @@ def _thumbnail(path: str, is_video: bool) -> bytes | None:
     return render_preview(path, is_video, THUMB_SIZE)
 
 
-async def _thumbnail_response(path: str, is_video: bool):
-    """One thumbnail, refused rather than decoded when it is absurdly large."""
+async def _thumbnail_response(path: str, is_video: bool, versioned: bool = False):
+    """One thumbnail, refused rather than decoded when it is absurdly large.
+
+    ``versioned`` says the caller put the file's mtime in the query string, so
+    the URL changes whenever the picture behind it does and the answer can be
+    kept for a day.  Without it the URL is only ``/photo/<id>/thumb`` -- and an
+    id is a SQLite rowid that is handed to a different file after a rescan, so
+    a day-old copy would be shown beside the caption of a different picture.
+    """
     too_big = await _in_thread(_too_many_pixels, path, is_video)
     if too_big:
         raise HTTPException(413, too_big)
     data = await _in_thread(_thumbnail, path, is_video)
     if data is None:
         raise HTTPException(415, "cannot render a thumbnail for this file")
+    cache = ("public, max-age=86400, immutable" if versioned
+             else "no-cache, max-age=0, must-revalidate")
     return Response(data, media_type="image/jpeg",
-                    headers={"Cache-Control": "public, max-age=86400"})
+                    headers={"Cache-Control": cache})
 
 
 def _removal(entry: dict, folder: str, hold: dict | None = None) -> dict:

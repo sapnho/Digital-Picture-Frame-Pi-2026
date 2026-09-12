@@ -51,24 +51,35 @@ def test_a_file_that_is_not_a_photograph_is_no_picture_rather_than_a_crash(tmp_p
 class _StubFrame:
     """Enough of the app for the picture endpoints to answer."""
 
-    def __init__(self, current):
+    def __init__(self, current, library=None):
         from picframe3.config import Config
         from picframe3.events import State
 
         self.config = Config()
         self._state = State(current=current)
+        self.library = library
 
     def state(self):
         return self._state
 
 
-def _client(current):
+class _StubLibrary:
+    """One indexed picture, looked up by the rowid the web page asks for."""
+
+    def __init__(self, record):
+        self._record = record
+
+    def get(self, file_id):
+        return self._record if file_id == self._record.id else None
+
+
+def _client(current, library=None):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
     from picframe3.control.http import HttpServer
 
-    frame = _StubFrame(current)
+    frame = _StubFrame(current, library)
     return TestClient(HttpServer(frame, frame.config.http).api, raise_server_exceptions=False)
 
 
@@ -82,6 +93,32 @@ def test_the_api_serves_the_picture_on_the_frame(tmp_path):
     assert max(Image.open(io.BytesIO(reply.content)).size) == 600
     # The picture behind the URL changes every few minutes.
     assert "no-store" in reply.headers["cache-control"]
+
+
+def test_a_thumbnail_is_only_kept_by_the_browser_when_the_url_names_the_file(tmp_path):
+    """Ids are SQLite rowids and a rescan hands one to a different picture.
+
+    So an unversioned ``/photo/59/thumb`` must not be cached for a day: the
+    browser would draw yesterday's photograph beside today's caption.  With
+    the file's mtime in the query string the URL changes with the picture and
+    the copy is safe to keep.
+    """
+    from types import SimpleNamespace
+
+    path = _write(tmp_path / "indexed.jpg")
+    library = _StubLibrary(SimpleNamespace(id=59, path=path, is_video=False))
+    client = _client({"path": path, "is_video": False}, library)
+
+    bare = client.get("/api/library/photo/59/thumb")
+    assert bare.status_code == 200
+    assert "no-cache" in bare.headers["cache-control"]
+
+    versioned = client.get("/api/library/photo/59/thumb?v=1700922321")
+    assert versioned.status_code == 200
+    assert "max-age=86400" in versioned.headers["cache-control"]
+    assert versioned.content == bare.content
+
+    assert client.get("/api/library/photo/60/thumb").status_code == 404
 
 
 def test_the_api_says_so_when_the_frame_is_showing_nothing(tmp_path):
