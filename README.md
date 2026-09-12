@@ -72,12 +72,7 @@ the Pi and nothing to rebuild when Mesa updates.
 On **Raspberry Pi OS Lite (64-bit)**, Bookworm or Trixie:
 
 ```bash
-# from the source tarball
-tar xzf picframe3-*-source.tar.gz
-bash picframe3/packaging/install.sh
-
-# or, once this is published
-curl -fsSL https://raw.githubusercontent.com/picframe3/picframe3/main/packaging/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sapnho/Digital-Picture-Frame-Pi-2026/main/packaging/install.sh | bash
 ```
 
 That is the whole installation. It fetches the libraries, creates a virtual

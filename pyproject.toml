@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "picframe3"
-version = "3.2.1"
+version = "3.2.2"
 description = "A digital picture frame for current Raspberry Pi OS: OpenGL ES on DRM/KMS, no desktop required"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -50,8 +50,8 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
 picframe3 = "picframe3.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/picframe3/picframe3"
-Issues = "https://github.com/picframe3/picframe3/issues"
+Homepage = "https://github.com/sapnho/Digital-Picture-Frame-Pi-2026"
+Issues = "https://github.com/sapnho/Digital-Picture-Frame-Pi-2026/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/picframe3"]

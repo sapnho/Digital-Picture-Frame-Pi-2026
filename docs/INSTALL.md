@@ -38,27 +38,16 @@ Use **Raspberry Pi Imager**.
 
 ## Step 2 — Install
 
-**From the source tarball** (what to do today — there is no public repository
-yet):
-
 ```bash
-# on your computer, with picframe3-<version>-source.tar.gz downloaded
-scp picframe3-*-source.tar.gz pi@frame.local:~/
-
-# on the Pi
 ssh pi@frame.local
-tar xzf picframe3-*-source.tar.gz
-bash picframe3/packaging/install.sh
+curl -fsSL https://raw.githubusercontent.com/sapnho/Digital-Picture-Frame-Pi-2026/main/packaging/install.sh | bash
 ```
 
-**Once it is published**, the same installer runs straight from the web:
+*(Prefer to read it first? `curl -fsSL … -o install.sh && less install.sh && bash install.sh`.)*
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/picframe3/picframe3/main/packaging/install.sh | bash
-```
-
-Both do exactly the same thing — the script installs from a source tree next to
-it when there is one, and from PyPI otherwise.
+The script works out where to get the source: from a source tree it is sitting
+in (a clone, an unpacked release), or — as here, piped from the web with no
+script on disk — by downloading the repository itself.
 
 The installer fetches the libraries, creates a virtual environment, installs
 picframe3, puts you in the `video`, `render` and `input` groups, tidies the
@@ -252,11 +241,7 @@ Re-run the installer — it upgrades in place and leaves your configuration
 alone:
 
 ```bash
-# from a newer tarball
-tar xzf picframe3-*-source.tar.gz && bash picframe3/packaging/install.sh
-# or, once published
-curl -fsSL https://raw.githubusercontent.com/picframe3/picframe3/main/packaging/install.sh | bash
-
+curl -fsSL https://raw.githubusercontent.com/sapnho/Digital-Picture-Frame-Pi-2026/main/packaging/install.sh | bash
 sudo systemctl restart picframe3@pi
 ```
 

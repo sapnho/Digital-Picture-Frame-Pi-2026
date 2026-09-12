@@ -2,7 +2,7 @@
 #
 # picframe3 installer for Raspberry Pi OS (Bookworm / Trixie, 64-bit).
 #
-#   curl -fsSL https://raw.githubusercontent.com/picframe3/picframe3/main/packaging/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/sapnho/Digital-Picture-Frame-Pi-2026/main/packaging/install.sh | bash
 #
 # Or, from an unpacked source tree:   bash packaging/install.sh
 #
@@ -37,16 +37,43 @@ else
   die "sudo is not installed and you are not root"
 fi
 
-# Where is the source? A checkout next to this script wins over PyPI, so the
-# same installer works for a release, a clone, and an unpacked tarball.
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+REPO="${PICFRAME_REPO:-sapnho/Digital-Picture-Frame-Pi-2026}"
+BRANCH="${PICFRAME_BRANCH:-main}"
+ARCHIVE="${PICFRAME_ARCHIVE:-https://github.com/$REPO/archive/refs/heads/$BRANCH.tar.gz}"
+
+# Where does the source come from? Three cases, in order:
+#
+#   tree      this script sits inside an unpacked source tree (a clone, a
+#             release tarball) -- install that
+#   explicit  PICFRAME_SOURCE names a path or a pip requirement
+#   download  everything else, which crucially includes `curl … | bash`:
+#             piped from the web there IS no script on disk and no source
+#             tree, so fetch the repository itself
+#
+# BASH_SOURCE must be checked for being a real FILE. Piped into bash it is
+# unset, `dirname` of nothing is ".", and a naive check then probes the
+# user's home directory for a pyproject.toml that has nothing to do with us.
+HERE=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 if [ -n "$HERE" ] && [ -f "$HERE/../pyproject.toml" ]; then
+  MODE="tree"
   SOURCE="$(cd "$HERE/.." && pwd)"
   SOURCE_DESC="this source tree ($SOURCE)"
+elif [ -n "${PICFRAME_SOURCE:-}" ]; then
+  MODE="explicit"
+  SOURCE="$PICFRAME_SOURCE"
+  SOURCE_DESC="$SOURCE"
 else
-  SOURCE="${PICFRAME_SOURCE:-picframe3[all]}"
-  SOURCE_DESC="$SOURCE from PyPI"
+  MODE="download"
+  SOURCE=""
+  SOURCE_DESC="$REPO ($BRANCH)"
 fi
+
+WORKDIR=""
+cleanup() { [ -n "$WORKDIR" ] && rm -rf "$WORKDIR"; }
+trap cleanup EXIT
 
 bold "picframe3 installer"
 echo "   installing $SOURCE_DESC"
@@ -98,6 +125,22 @@ ok "$RUN_USER is in video, render and input"
 
 # -------------------------------------------------------------------- 3. venv
 step "3/5  picframe3"
+if [ "$MODE" = "download" ]; then
+  WORKDIR="$(mktemp -d)"
+  echo "   fetching $REPO…"
+  if curl -fsSL "$ARCHIVE" 2>/dev/null | tar xz -C "$WORKDIR" 2>/dev/null && \
+     [ -n "$(find "$WORKDIR" -maxdepth 2 -name pyproject.toml -print -quit)" ]; then
+    SOURCE="$(dirname "$(find "$WORKDIR" -maxdepth 2 -name pyproject.toml -print -quit)")"
+  elif command -v git >/dev/null && \
+       git clone --depth 1 --branch "$BRANCH" "https://github.com/$REPO.git" \
+         "$WORKDIR/src" >/dev/null 2>&1; then
+    SOURCE="$WORKDIR/src"
+  else
+    die "could not download $REPO. Check the network, or download the source and run packaging/install.sh from inside it."
+  fi
+  ok "source downloaded"
+fi
+
 mkdir -p "$(dirname "$VENV")"
 # --system-site-packages so the apt PyGObject (and so GStreamer) is visible.
 # Building PyGObject inside a venv needs a toolchain and several minutes.

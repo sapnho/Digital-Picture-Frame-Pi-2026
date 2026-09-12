@@ -1,6 +1,6 @@
 [Unit]
 Description=picframe3 digital picture frame
-Documentation=https://github.com/picframe3/picframe3
+Documentation=https://github.com/sapnho/Digital-Picture-Frame-Pi-2026
 # The DRM device has to exist before we can take over the screen.
 After=systemd-user-sessions.service network-online.target
 Wants=network-online.target

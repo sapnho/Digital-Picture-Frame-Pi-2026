@@ -374,7 +374,7 @@ def _service_unit(user: str, venv_bin: Path | None) -> str:
     return textwrap.dedent(f"""\
         [Unit]
         Description=picframe3 digital picture frame
-        Documentation=https://github.com/picframe3/picframe3
+        Documentation=https://github.com/sapnho/Digital-Picture-Frame-Pi-2026
         After=systemd-user-sessions.service network-online.target
         Wants=network-online.target
         ConditionPathExistsGlob=/dev/dri/card*
