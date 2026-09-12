@@ -56,3 +56,35 @@ def test_save_and_reload_roundtrip(tmp_path):
 def test_set_rejects_unknown_key():
     with pytest.raises(KeyError):
         Config().set("slideshow.does_not_exist", 1)
+
+
+def test_wizard_finds_a_terminal_when_stdin_is_a_pipe(monkeypatch):
+    """`curl … | bash` makes stdin the script, not a terminal.
+
+    The wizard must still reach the person through /dev/tty, or the
+    recommended install silently takes every default and never asks
+    anything — which is how a frame ends up with no network share.
+    """
+    import io
+    import sys
+
+    from picframe3 import wizard
+
+    monkeypatch.setattr(wizard, "_TERMINAL", None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("piped input\n"))
+    fake_tty = io.StringIO("from the terminal\n")
+    monkeypatch.setattr(wizard, "_TERMINAL", fake_tty)
+
+    assert wizard._tty() is True
+    assert wizard._read("prompt: ") == "from the terminal"
+
+
+def test_wizard_reports_no_terminal_when_there_is_none(monkeypatch):
+    import io
+    import sys
+
+    from picframe3 import wizard
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(wizard, "_TERMINAL", False)
+    assert wizard._tty() is False

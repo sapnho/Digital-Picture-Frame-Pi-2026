@@ -160,10 +160,13 @@ ok "$("$VENV/bin/picframe3" --version) installed, 'picframe3' on your PATH"
 step "4/5  Setting it up"
 if [ -n "${PICFRAME_YES:-}" ]; then
   "$SHIM" --config "$CONFIG" setup --yes --venv-bin "$VENV/bin"
+elif [ -r /dev/tty ]; then
+  # Piped from the web, stdin is this script — so hand the wizard the
+  # terminal explicitly, or it would see no tty and silently take every
+  # default, which is not an install anyone asked for.
+  "$SHIM" --config "$CONFIG" setup --venv-bin "$VENV/bin" < /dev/tty
 else
-  # The wizard handles the picture folder, the network share, the web
-  # interface, Home Assistant, the look, and the systemd service.
-  "$SHIM" --config "$CONFIG" setup --venv-bin "$VENV/bin"
+  "$SHIM" --config "$CONFIG" setup --yes --venv-bin "$VENV/bin"
 fi
 
 # ------------------------------------------------------------------- 5. check

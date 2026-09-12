@@ -47,8 +47,49 @@ RESET = "\033[0m"
 # Prompts
 # --------------------------------------------------------------------------
 
+_TERMINAL: object = None
+
+
+def _terminal():
+    """A stream that reaches the person, even when stdin is a pipe.
+
+    The recommended install is ``curl … | bash``, which makes stdin the script
+    itself: ``sys.stdin.isatty()`` is False although somebody is sitting right
+    there watching.  Opening ``/dev/tty`` reaches the controlling terminal
+    regardless, which is the difference between asking the eight questions and
+    silently taking every default.
+    """
+    global _TERMINAL
+    if _TERMINAL is None:
+        try:
+            # Read-only: "r+" on a character device raises "not seekable",
+            # because Python's buffered random access needs to seek.  The
+            # prompt goes to stdout, which in the curl|bash case is still the
+            # terminal — only stdin was taken by the pipe.
+            _TERMINAL = open("/dev/tty")  # noqa: SIM115 - lives for the whole run
+        except OSError:
+            _TERMINAL = False
+    return _TERMINAL or None
+
+
 def _tty() -> bool:
-    return sys.stdin.isatty() and sys.stdout.isatty()
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return True
+    return _terminal() is not None
+
+
+def _read(prompt: str) -> str:
+    """Read one line from the person, from the terminal rather than stdin."""
+    if sys.stdin.isatty():
+        return input(prompt)
+    stream = _terminal()
+    if stream is None:
+        raise EOFError("no terminal to read from")
+    print(prompt, end="", flush=True)
+    line = stream.readline()
+    if not line:
+        raise EOFError("terminal closed")
+    return line.rstrip("\n")
 
 
 def say(text: str = "") -> None:
@@ -67,9 +108,10 @@ def ask(question: str, default: str = "", *, secret: bool = False) -> str:
     suffix = f" [{default}]" if default else ""
     while True:
         if secret:
+            # getpass already reads /dev/tty on Unix, and echoes nothing.
             value = getpass.getpass(f"{question}{suffix}: ").strip()
         else:
-            value = input(f"{question}{suffix}: ").strip()
+            value = _read(f"{question}{suffix}: ").strip()
         if value:
             return value
         if default or default == "":
@@ -79,7 +121,7 @@ def ask(question: str, default: str = "", *, secret: bool = False) -> str:
 def confirm(question: str, default: bool = True) -> bool:
     suffix = "[Y/n]" if default else "[y/N]"
     while True:
-        answer = input(f"{question} {suffix}: ").strip().lower()
+        answer = _read(f"{question} {suffix}: ").strip().lower()
         if not answer:
             return default
         if answer in ("y", "yes"):
@@ -262,10 +304,57 @@ def setup_samba(config: Config, user: str) -> bool:
     run_root(["systemctl", "restart", "smbd"])
     run_root(["systemctl", "enable", "smbd"])
 
+    advertise_share()
+
     host = socket.gethostname()
     say(f"   {GREEN}✓{RESET} Share ready:")
     say(f"       macOS    smb://{host}.local/{share_name}")
     say(f"       Windows  \\\\{host}\\{share_name}")
+    return True
+
+
+def advertise_share() -> bool:
+    """Announce the share over mDNS so it appears in Finder's sidebar.
+
+    Samba on Debian serves SMB but does not advertise it over Bonjour, and
+    macOS populates its Network list from mDNS.  Without this the share works
+    perfectly and is completely invisible — you have to know to type the
+    address.  The ``_device-info`` record only picks the icon Finder draws.
+    """
+    if shutil.which("avahi-daemon") is None:
+        result = run_root(["apt-get", "install", "-y", "-q", "avahi-daemon"])
+        if result.returncode != 0:
+            say(f"{YELLOW}   ! Could not install avahi-daemon; the share will work "
+                f"but will not appear by itself in Finder.{RESET}")
+            return False
+
+    service = textwrap.dedent("""\
+        <?xml version="1.0" standalone='no'?>
+        <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+        <service-group>
+          <name replace-wildcards="yes">%h</name>
+          <service>
+            <type>_smb._tcp</type>
+            <port>445</port>
+          </service>
+          <service>
+            <type>_device-info._tcp</type>
+            <port>0</port>
+            <txt-record>model=RackMac</txt-record>
+          </service>
+        </service-group>
+        """)
+    tmp = Path("/tmp/picframe3-avahi.service")
+    tmp.write_text(service, encoding="utf-8")
+    run_root(["mkdir", "-p", "/etc/avahi/services"])
+    ok_write = run_root(["cp", str(tmp), "/etc/avahi/services/picframe3.service"]).returncode == 0
+    tmp.unlink(missing_ok=True)
+    if not ok_write:
+        say(f"{YELLOW}   ! Could not write the mDNS announcement.{RESET}")
+        return False
+    run_root(["systemctl", "enable", "avahi-daemon"])
+    run_root(["systemctl", "restart", "avahi-daemon"])
+    say(f"   {GREEN}✓{RESET} announced on the network — it will show up in Finder")
     return True
 
 
