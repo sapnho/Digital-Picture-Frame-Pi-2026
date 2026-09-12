@@ -502,3 +502,137 @@ def test_the_graphics_package_imports_on_a_machine_with_no_mesa():
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr[-2000:]
     assert "fade" in result.stdout
+
+
+def test_waking_the_panel_asks_for_a_modeset_not_just_dpms(monkeypatch):
+    """Switching off is DPMS; switching on is DPMS *and* a fresh modeset.
+
+    With the connector powered down the HDMI link is gone -- the television
+    says "no cable", not "no signal" -- and the DPMS property going back on is
+    not reliably enough to make the set re-acquire it.  The next frame has to
+    re-run drmModeSetCrtc, which is exactly what lit the screen at startup.
+    """
+    from picframe3.gfx import backend_kms
+
+    calls: list[bool] = []
+
+    class FakeDrm:
+        def set_dpms(self, connector_id, on):
+            calls.append(on)
+            return True
+
+    be = backend_kms.KmsBackend.__new__(backend_kms.KmsBackend)
+    be._drm = FakeDrm()
+    be.output = type("O", (), {"connector_id": 32, "crtc_id": 1})()
+    be._powered = True
+    be._modeset_done = True
+
+    assert be.set_power(False) is True
+    assert calls == [False] and be._powered is False
+    assert be._modeset_done is True          # nothing to re-drive while dark
+
+    assert be.set_power(True) is True
+    assert calls == [False, True] and be._powered is True
+    assert be._modeset_done is False         # the next frame lights it up again
+
+
+def test_a_connector_without_dpms_still_gets_its_frames(monkeypatch):
+    """The honest "no" must not also stop the picture.
+
+    `set_power` returning False is how the app knows to fall back to the
+    backlight or to the shader.  If the backend had marked itself unpowered on
+    the way out, that fallback would draw a black frame that is never
+    presented -- and the last picture would stay on the wall for ever.
+    """
+    from picframe3.gfx import backend_kms
+
+    class FakeDrm:
+        def set_dpms(self, connector_id, on):
+            return False                      # no DPMS property on this connector
+
+    be = backend_kms.KmsBackend.__new__(backend_kms.KmsBackend)
+    be._drm = FakeDrm()
+    be.output = type("O", (), {"connector_id": 32, "crtc_id": 1})()
+    be._powered = True
+    be._modeset_done = True
+
+    assert be.set_power(False) is False
+    assert be._powered is True
+
+
+def test_nothing_is_presented_while_the_panel_is_off(monkeypatch):
+    """A disabled CRTC refuses every flip, so the frame is dropped early.
+
+    The buffer goes straight back to GBM -- the pool holds three or four -- and
+    the kernel is never asked, which is what kept an off-period from filling
+    the journal with one refusal per frame.
+    """
+    from picframe3.gfx import backend_kms
+
+    released: list[int] = []
+    touched: list[str] = []
+
+    class FakeGbm:
+        @staticmethod
+        def gbm_surface_lock_front_buffer(surf):
+            return 4242
+
+        @staticmethod
+        def gbm_surface_release_buffer(surf, bo):
+            released.append(bo)
+
+    class FakeDrm:
+        def __getattr__(self, name):          # pragma: no cover - must not run
+            touched.append(name)
+            raise AssertionError("the DRM device was used with the panel off")
+
+    monkeypatch.setattr(backend_kms.gbm, "lib", FakeGbm)
+    monkeypatch.setattr(backend_kms.egl, "swap_buffers", lambda dpy, surf: None)
+
+    be = backend_kms.KmsBackend.__new__(backend_kms.KmsBackend)
+    be._drm = FakeDrm()
+    be._gbm_surf = None
+    be._dpy = be._surf = None
+    be._powered = False
+    be._modeset_done = True
+    be._queued_bos = []
+    be._front_bo = None
+    be._fb_cache = {}
+
+    be.end_frame()
+
+    assert released == [4242] and touched == []
+    assert be._queued_bos == [] and be._fb_cache == {}
+
+
+def test_a_flip_refused_by_a_disabled_crtc_is_a_dropped_frame(monkeypatch):
+    """EINVAL from a CRTC that has just been switched off is not a fault.
+
+    The display can go dark between drawing a frame and presenting it -- the
+    off-schedule, a button, Home Assistant.  Raising there cost the render loop
+    a traceback per frame for the whole of the off-period.
+    """
+    import os
+
+    from picframe3.gfx import drm
+
+    dev = drm.DrmDevice.__new__(drm.DrmDevice)
+    read_fd, write_fd = os.pipe()
+    dev.fd = read_fd
+    dev._flip_pending = False
+    dev._flip_since = 0.0
+    dev.flip_deadline = 1.0
+
+    class FakeLib:
+        @staticmethod
+        def drmModePageFlip(fd, crtc_id, fb_id, flags, data):
+            return -22                        # EINVAL: the CRTC is not active
+
+    monkeypatch.setattr(drm, "lib", FakeLib)
+    try:
+        result = dev.page_flip(1, 2, timeout=0.01)
+        assert not result.queued and result.completions == 0
+        assert not dev.flip_pending
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)

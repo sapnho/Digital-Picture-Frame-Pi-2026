@@ -147,6 +147,9 @@ class KmsBackend(Backend):
         #: display engine is still reading from.
         self._queued_bos: list[int] = []
         self._modeset_done = False
+        #: False while the connector is switched off.  A disabled CRTC refuses
+        #: every page flip, so there is nothing to present until it is back.
+        self._powered = True
         self._drm.save_crtc(self.output.crtc_id)
         _log.info(
             "KMS backend on %s: %s %dx%d@%.2fHz (%s)",
@@ -168,13 +171,36 @@ class KmsBackend(Backend):
         if not bo:
             _log.error("gbm_surface_lock_front_buffer returned NULL; dropping frame")
             return
+
+        if not self._powered:
+            # The CRTC is disabled, so the kernel would refuse this flip -- and
+            # a frame that cannot be shown is not worth a framebuffer, a queue
+            # entry or a log line.  The buffer goes straight back; the picture
+            # is drawn again by the modeset that wakes the panel.
+            gbm.lib.gbm_surface_release_buffer(self._gbm_surf, bo)
+            return
+
         fb_id = self._framebuffer_for(bo)
 
         if not self._modeset_done:
-            # The very first frame needs a modeset to light the output up;
-            # drmModeSetCrtc is synchronous, so the buffer is on screen by the
-            # time it returns and counts as a confirmed presentation.
-            self._drm.set_crtc(self.output, fb_id)
+            # The first frame -- and the first one after the panel was woken --
+            # needs a modeset to light the output up; drmModeSetCrtc is
+            # synchronous, so the buffer is on screen by the time it returns
+            # and counts as a confirmed presentation.
+            if self._drm.flip_pending:
+                # A flip queued just before the panel went dark never completes
+                # on a disabled CRTC, and drmModeSetCrtc answers EBUSY while
+                # one is still in the air.
+                self._drm.wait_flip(0.2)
+            try:
+                self._drm.set_crtc(self.output, fb_id)
+            except OSError:
+                # Leaving _modeset_done False means the next frame tries again,
+                # which is what a panel still waking up needs; raising here
+                # would only cost the render loop a frame and a traceback.
+                _log.warning("modeset failed; retrying on the next frame", exc_info=True)
+                gbm.lib.gbm_surface_release_buffer(self._gbm_surf, bo)
+                return
             self._modeset_done = True
             self._queued_bos.append(bo)
             self._flip_completed()
@@ -303,7 +329,31 @@ class KmsBackend(Backend):
 
     # -- power -------------------------------------------------------------
     def set_power(self, on: bool) -> bool:
-        return self._drm.set_dpms(self.output.connector_id, on)
+        """Switch the panel off and -- the harder half -- back on again.
+
+        Switching off is what DPMS is for: the connector is powered down and
+        the HDMI link goes with it, which is why the television reports *no
+        cable* rather than *no signal*.  Coming back is not symmetrical.  With
+        the link gone the set has to re-acquire it, and on vc4 the DPMS
+        property alone frequently does not produce that: the property reads
+        back as on, the CRTC is active again, and the panel keeps showing "no
+        cable" because nothing re-drove the mode.
+
+        So waking up asks for both.  DPMS goes on, and the next frame is made
+        to re-run ``drmModeSetCrtc`` -- the same call that lit the screen at
+        startup, and the one legacy path that reprograms the whole CRTC and
+        re-establishes the link.  It costs one modeset per wake-up.
+        """
+        ok = self._drm.set_dpms(self.output.connector_id, on)
+        if not ok:
+            # No DPMS property on this connector.  Say so honestly, so the
+            # caller can fall back to the backlight or to the shader -- and
+            # leave _powered alone, or a frame would never be presented again.
+            return False
+        self._powered = bool(on)
+        if on:
+            self._modeset_done = False
+        return True
 
     def get_power(self) -> bool | None:
         return self._drm.get_dpms(self.output.connector_id)

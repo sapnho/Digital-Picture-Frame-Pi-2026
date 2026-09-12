@@ -603,6 +603,13 @@ class DrmDevice:
         if rc != 0:
             if -rc in (16, 11):  # EBUSY / EAGAIN -- a flip is still pending
                 return FlipResult(queued=False, completions=collected)
+            if -rc in (22, 19, 6):  # EINVAL / ENODEV / ENXIO -- CRTC is off
+                # The display was switched off between drawing this frame and
+                # presenting it.  That is a dropped frame, not a fault: raising
+                # here filled the journal with tracebacks for the whole of an
+                # off-period.
+                _log.debug("page flip refused with errno %d; CRTC is off", -rc)
+                return FlipResult(queued=False, completions=collected)
             raise OSError(-rc, "drmModePageFlip failed")
         self._flip_pending = True
         self._flip_since = time.monotonic()
