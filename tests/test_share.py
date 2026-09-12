@@ -62,3 +62,47 @@ def test_share_name_and_path_are_honoured():
     assert "[Fotos]" in text
     assert "   path = /mnt/photos" in text
     assert "   force user = frame" in text
+
+
+# --- password prompts -------------------------------------------------------
+# Hidden input makes a failed paste indistinguishable from a successful one.
+# These pin the escape hatches.
+
+def test_a_received_password_is_returned_and_acknowledged(capsys):
+    from unittest import mock
+
+    from picframe3 import wizard
+
+    with mock.patch("getpass.getpass", return_value="  hunter2-secret  "):
+        assert wizard.ask_secret("Password") == "hunter2-secret"
+    assert "14 characters received" in capsys.readouterr().out
+
+
+def test_empty_hidden_reads_fall_back_to_a_visible_prompt():
+    from unittest import mock
+
+    from picframe3 import wizard
+
+    with mock.patch("getpass.getpass", return_value=""), \
+         mock.patch.object(wizard, "_read", return_value="typed instead"):
+        assert wizard.ask_secret("Password") == "typed instead"
+
+
+def test_an_unusable_getpass_does_not_strand_the_wizard():
+    from unittest import mock
+
+    from picframe3 import wizard
+
+    with mock.patch("getpass.getpass", side_effect=OSError("no tty")), \
+         mock.patch.object(wizard, "_read", return_value="fallback"):
+        assert wizard.ask_secret("Password") == "fallback"
+
+
+def test_nothing_anywhere_returns_empty_rather_than_raising():
+    from unittest import mock
+
+    from picframe3 import wizard
+
+    with mock.patch("getpass.getpass", side_effect=EOFError), \
+         mock.patch.object(wizard, "_read", side_effect=EOFError):
+        assert wizard.ask_secret("Password") == ""

@@ -105,17 +105,43 @@ def note(text: str) -> None:
 
 
 def ask(question: str, default: str = "", *, secret: bool = False) -> str:
+    if secret:
+        return ask_secret(question)
     suffix = f" [{default}]" if default else ""
     while True:
-        if secret:
-            # getpass already reads /dev/tty on Unix, and echoes nothing.
-            value = getpass.getpass(f"{question}{suffix}: ").strip()
-        else:
-            value = _read(f"{question}{suffix}: ").strip()
+        value = _read(f"{question}{suffix}: ").strip()
         if value:
             return value
         if default or default == "":
             return default
+
+
+def ask_secret(question: str, *, attempts: int = 2) -> str:
+    """Read a password, and say how much of one arrived.
+
+    Hidden input is the right default -- somebody may be looking over your
+    shoulder -- but it means a paste that landed and a paste that did not look
+    exactly the same, which is how a wrong broker password gets saved and then
+    blamed on the broker. So the character count is echoed back, and if the
+    hidden read comes up empty (some terminals refuse to paste into a no-echo
+    prompt at all) it falls back to a visible one rather than looping.
+    """
+    for _ in range(attempts):
+        try:
+            value = getpass.getpass(f"{question}: ").strip()
+        except (EOFError, OSError):
+            break
+        if value:
+            say(f"     {DIM}{len(value)} characters received{RESET}")
+            return value
+        say("     Nothing arrived. Paste again, or press Return to type it "
+            "where you can see it.")
+    say(f"{YELLOW}     Switching to a visible prompt — it will be shown on "
+        f"screen.{RESET}")
+    try:
+        return _read(f"{question} (visible): ").strip()
+    except EOFError:
+        return ""
 
 
 def confirm(question: str, default: bool = True) -> bool:
