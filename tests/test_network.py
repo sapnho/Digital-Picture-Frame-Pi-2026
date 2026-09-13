@@ -238,3 +238,111 @@ async def test_no_default_route_is_unmeasurable_and_never_repaired(watch, monkey
         await watch.check_once()
     assert watch.commands == []
     assert watch.status == network.UNMEASURABLE
+
+
+# -- what the radio already knows ------------------------------------------
+
+PROC_WIRELESS = (
+    "Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE\n"
+    " face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22\n"
+    " wlan0: 0000   58.  -52.  -256        0      0      0      0      0        0\n"
+)
+
+IW_LINK = """Connected to 3c:a6:2f:11:22:33 (on wlan0)
+\tSSID: Fnaten
+\tfreq: 5180
+\tRX: 812345 bytes (4321 packets)
+\tTX: 91234 bytes (876 packets)
+\tsignal: -52 dBm
+\trx bitrate: 234.0 MBit/s VHT-MCS 9 80MHz short GI VHT-NSS 2
+\ttx bitrate: 195.0 MBit/s VHT-MCS 8 80MHz short GI VHT-NSS 2
+"""
+
+
+def _fake_proc(tmp_path, monkeypatch, text=PROC_WIRELESS):
+    stats = tmp_path / "wireless"
+    stats.write_text(text)
+    monkeypatch.setattr("builtins.open", lambda path, **kw: stats.open(**kw)
+                        if path == "/proc/net/wireless" else open(path, **kw))
+
+
+def test_the_signal_is_read_from_proc(tmp_path, monkeypatch):
+    _fake_proc(tmp_path, monkeypatch)
+    assert network.signal_level("wlan0") == (-52.0, 58.0)
+
+
+def test_another_interface_is_not_mistaken_for_this_one(tmp_path, monkeypatch):
+    _fake_proc(tmp_path, monkeypatch)
+    assert network.signal_level("wlan1") is None
+
+
+def test_a_wired_frame_has_no_signal_to_read(tmp_path, monkeypatch):
+    """Not an error and not a zero: a cable has no dBm."""
+    _fake_proc(tmp_path, monkeypatch, "Inter-| sta-|   Quality\n face | tus |\n")
+    assert network.signal_level("eth0") is None
+
+
+def test_a_garbled_line_reports_nothing_rather_than_inventing_a_reading(
+        tmp_path, monkeypatch):
+    _fake_proc(tmp_path, monkeypatch, PROC_WIRELESS.replace("-52.", "n/a"))
+    assert network.signal_level("wlan0") is None
+
+
+@pytest.mark.parametrize("dbm,percent", [(-40, 100), (-50, 100), (-75, 50),
+                                         (-100, 0), (-120, 0)])
+def test_dbm_becomes_the_percentage_every_router_page_shows(dbm, percent):
+    assert network.signal_percent(dbm) == percent
+
+
+def test_the_bitrates_come_out_of_iw(tmp_path, monkeypatch):
+    found = network._parse_iw_link(IW_LINK)
+    assert found["tx_mbit"] == 195.0
+    assert found["rx_mbit"] == 234.0
+    assert found["frequency_mhz"] == 5180.0
+    assert found["ssid"] == "Fnaten"
+
+
+def test_iw_saying_nothing_useful_is_not_an_error():
+    assert network._parse_iw_link("Not connected.") == {}
+
+
+@pytest.mark.asyncio
+async def test_a_frame_without_iw_still_reports_its_signal(tmp_path, monkeypatch):
+    """The missing binary is the ``ping`` case again: what can be measured is
+    reported, what cannot is absent rather than nought."""
+    _fake_proc(tmp_path, monkeypatch)
+    monkeypatch.setattr(network, "is_wireless", lambda iface: True)
+    monkeypatch.setattr(network, "_output", _never_installed)
+    details = await network.link_details("wlan0")
+    assert details["signal_dbm"] == -52
+    assert details["link_kind"] == "wifi"
+    assert "link_mbit" not in details
+
+
+@pytest.mark.asyncio
+async def test_speed_signal_and_band_reach_the_snapshot(tmp_path, monkeypatch):
+    _fake_proc(tmp_path, monkeypatch)
+    monkeypatch.setattr(network, "is_wireless", lambda iface: True)
+
+    async def iw(*argv, **kw):
+        return IW_LINK
+
+    monkeypatch.setattr(network, "_output", iw)
+    details = await network.link_details("wlan0")
+    assert details["link_mbit"] == 195.0
+    assert details["band"] == "5 GHz"
+    assert details["signal_percent"] == 96
+
+
+@pytest.mark.asyncio
+async def test_no_interface_means_no_reading_and_no_subprocess(monkeypatch):
+    monkeypatch.setattr(network, "_output", _never_called)
+    assert await network.link_details("") == {}
+
+
+async def _never_installed(*argv, **kw):
+    return None
+
+
+async def _never_called(*argv, **kw):
+    raise AssertionError("nothing should have been run")

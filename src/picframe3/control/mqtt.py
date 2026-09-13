@@ -456,19 +456,24 @@ class MqttBridge:
                        ("sensor", "memory"), ("sensor", "disk_free"),
                        ("binary_sensor", "undervoltage"))
 
-    #: The two entities that exist only while the network watcher is on.
-    NETWORK_ENTITIES = (("binary_sensor", "network"), ("sensor", "network_repairs"))
+    #: The entities that exist only while the network watcher is on.
+    NETWORK_ENTITIES = (("binary_sensor", "network"), ("sensor", "network_repairs"),
+                        ("sensor", "network_link_speed"))
 
     def _network_entities(self, base: dict[str, Any], uid: str
                           ) -> list[tuple[str, str, dict[str, Any]]]:
-        """Whether the frame can reach the house, and how often it has mended itself.
+        """Whether the frame can reach the house, how fast, and how often it has mended itself.
 
-        Both are diagnostics rather than something to look at every day.  The
+        All three are diagnostics rather than something to look at every day.  The
         connectivity sensor is the honest one: it can only ever be *off* in
         Home Assistant retrospectively, because a frame that cannot reach the
         gateway cannot reach the broker either.  What it is really for is the
         moment afterwards -- the frame comes back, says it was away, and the
-        repair counter says whether it needed help getting there.
+        repair counter says whether it needed help getting there.  The link
+        speed is the one that is useful *before* any of that: a frame drifting
+        down from 195 to 24 Mbit/s has been moved, or something new is sitting
+        between it and the access point, and it says so weeks before the
+        connectivity sensor ever blinks.
         """
         if not self.app.config.network.enabled:
             return []
@@ -498,6 +503,22 @@ class MqttBridge:
                     "{{ value_json.network.repairs | default(0, true) }}",
                 "state_class": "total_increasing",
                 "icon": "mdi:wifi-sync",
+                "entity_category": "diagnostic",
+            }),
+            ("sensor", "network_link_speed", {
+                **base,
+                "name": "Network link speed",
+                "unique_id": f"picframe3_{uid}_network_link_speed",
+                # Empty rather than zero where there is no reading -- a frame
+                # on a machine without ``iw``, or one that has just started,
+                # has no speed to report, and a nought written into the history
+                # is a dropout that never happened.
+                "value_template":
+                    "{{ value_json.network.link_mbit | default('', true) }}",
+                "unit_of_measurement": "Mbit/s",
+                "device_class": "data_rate",
+                "state_class": "measurement",
+                "icon": "mdi:wifi-arrow-up-down",
                 "entity_category": "diagnostic",
             }),
         ]
