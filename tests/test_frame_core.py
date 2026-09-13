@@ -213,6 +213,63 @@ def test_an_unreadable_run_gives_up_instead_of_recursing(tmp_path):
     assert len(hidden) == slideshow_module.MAX_SKIPPED
 
 
+def test_a_picture_past_the_decode_limit_is_not_hidden(tmp_path):
+    """A setting refused it, so raising the setting has to bring it back.
+
+    Hiding is for a file that will not decode, and ``hidden`` is cleared only
+    when a file's bytes change -- so hiding this one would mean the picture
+    stayed gone after the limit went up, with nothing to say why.
+    """
+    from picframe3.media.prepare import TooLargeToDecode
+
+    frame = PicFrame(Config())
+    scan = tmp_path / "scan.png"
+    scan.write_bytes(b"pretend this is 200 megapixels")
+
+    class _Record:
+        id = 7
+        path = str(scan)
+
+        def as_meta(self):
+            return self
+
+    class _Once:
+        def __init__(self):
+            self.calls = 0
+
+        def next(self):
+            self.calls += 1
+            return [_Record()]
+
+        def previous(self):
+            return self.next()
+
+        def refresh(self):
+            pass
+
+    class _Loader:
+        def prefetched_for(self, metas):
+            return False
+
+        def cancel_prefetch(self):
+            pass
+
+        async def load(self, metas):
+            raise TooLargeToDecode(str(scan), (16000, 12000), 64_000_000)
+
+    hidden = []
+    frame.playlist = _Once()
+    frame.loader = _Loader()
+    frame.library = type("L", (), {
+        "set_hidden": lambda self, i, v: hidden.append(i),
+        "forget": lambda self, paths: 0,
+    })()
+    frame.slideshow._show_placeholder = lambda: None
+
+    asyncio.run(frame._advance())
+    assert hidden == [], "an oversized picture was hidden and cannot come back"
+
+
 # -- screenshots -----------------------------------------------------------
 
 def test_two_screenshot_requests_share_one_capture():

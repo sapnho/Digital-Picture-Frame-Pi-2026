@@ -41,6 +41,7 @@ from typing import Any
 from .gfx import Slide, Texture
 from .library.db import Record
 from .media import no_files_screen
+from .media.prepare import TooLargeToDecode
 
 _log = logging.getLogger(__name__)
 
@@ -135,7 +136,16 @@ class SlideshowController:
                         self.library.forget([record.path])
                     self.playlist.refresh()
                     continue
-                prepared = await self._prepare(group, backwards=backwards)
+                try:
+                    prepared = await self._prepare(group, backwards=backwards)
+                except TooLargeToDecode as too_big:
+                    # Deliberately not hidden and deliberately not counted as a
+                    # failure: nothing is wrong with the picture, the frame was
+                    # told not to spend that much memory on one.  Raising
+                    # viewer.max_decode_megapixels has to be enough to bring it
+                    # back, and hiding it would not be.
+                    _log.warning("%s (viewer.max_decode_megapixels)", too_big)
+                    continue
                 if prepared is not None:
                     self._show(group, prepared, initial=initial)
                     return
@@ -193,7 +203,13 @@ class SlideshowController:
                 self.playlist.refresh()
                 return
             self.stop_video()
-            prepared = await self._prepare(group, backwards=False)
+            try:
+                prepared = await self._prepare(group, backwards=False)
+            except TooLargeToDecode as too_big:
+                # As in _advance_locked: a setting said no, so the picture
+                # stays in the library and comes back when the setting changes.
+                _log.warning("%s (viewer.max_decode_megapixels)", too_big)
+                return
             if prepared is None:
                 _log.warning("cannot show %s", group[0].path)
                 self.library.set_hidden(group[0].id, True)

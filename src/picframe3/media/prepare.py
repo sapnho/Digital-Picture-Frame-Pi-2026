@@ -17,6 +17,7 @@ from pathlib import Path
 from PIL import Image, ImageFile, ImageFilter, ImageOps
 
 from . import mat as mat_module
+from . import shrink as shrink_module
 from .metadata import PhotoMeta
 
 _log = logging.getLogger(__name__)
@@ -27,6 +28,31 @@ FIT_MODES = ("cover", "contain", "blur", "mat", "auto")
 
 #: What ``auto`` may choose between for a picture that does not match the panel.
 AUTO_FITS = ("mat", "blur", "contain", "cover")
+
+#: Largest picture the slideshow will decode, in pixels, when nothing says
+#: otherwise.  A 4K panel is 8.3 megapixels; this is the same number the web
+#: interface already refuses to decode past, so the frame has one answer to
+#: "how big a picture will you open" rather than two.
+DEFAULT_MAX_DECODE_PIXELS = 64_000_000
+
+
+class TooLargeToDecode(Exception):
+    """A picture refused by ``max_decode_pixels``.
+
+    Its own exception rather than the plain ``None`` an unreadable file
+    returns, because the slideshow owes the two opposite answers.  A file that
+    will not decode is hidden, so the frame stops offering it; this one is
+    perfectly good and is being refused by a setting, and hiding it would mean
+    that raising the setting did not bring it back -- ``hidden`` is cleared
+    only when a file's bytes change.
+    """
+
+    def __init__(self, path: str, size: tuple[int, int], max_pixels: int):
+        self.path, self.size, self.max_pixels = path, size, max_pixels
+        super().__init__(
+            f"{path} is {size[0]}\u00d7{size[1]}, past the "
+            f"{max_pixels / 1_000_000:g} megapixel decode limit"
+        )
 
 
 @dataclass
@@ -42,6 +68,12 @@ class PrepareOptions:
     upscale_limit: float = 2.5        # never enlarge a small image more than this
     #: What ``fit="auto"`` may do with a picture that does not match the panel.
     fit_choices: tuple[str, ...] = ("mat",)
+    #: Largest picture to decode, in pixels, measured after any DCT scaling.
+    #: 0 turns the limit off.  See :func:`open_oriented`.
+    max_decode_pixels: int = DEFAULT_MAX_DECODE_PIXELS
+    #: Keep a panel-sized copy of a picture past that limit and show it,
+    #: instead of leaving the picture out of the slideshow.
+    shrink_oversized: bool = True
 
     def __post_init__(self) -> None:
         if self.mat_style is None:
@@ -65,11 +97,60 @@ def _register_extra_formats() -> None:
 _register_extra_formats()
 
 
-def open_oriented(path: str) -> Image.Image | None:
-    """Open an image and bake in its EXIF orientation."""
+def _within(size: tuple[int, int], max_pixels: int) -> tuple[int, int]:
+    """*size* scaled down until it fits in *max_pixels*, keeping its shape."""
+    pixels = max(1, size[0] * size[1])
+    if max_pixels <= 0 or pixels <= max_pixels:
+        return size
+    scale = (max_pixels / pixels) ** 0.5
+    return (max(1, int(size[0] * scale)), max(1, int(size[1] * scale)))
+
+
+def open_oriented(path: str, *, target: tuple[int, int] | None = None,
+                  max_pixels: int = 0, shrink: bool = True) -> Image.Image | None:
+    """Open an image at a sensible size, with its EXIF orientation baked in.
+
+    ``target`` is the largest size this slide can need.  A JPEG or a HEIF is
+    then decoded straight to the smallest DCT scale that still covers it, which
+    on a 45 megapixel phone photograph is most of a second saved and a few
+    hundred megabytes never allocated.  Nothing is lost -- the picture is
+    resampled down to the panel a few lines later anyway -- and ``draft`` never
+    enlarges, so a small picture is untouched and the upscale guard below still
+    sees its real size.
+
+    ``max_pixels`` is the ceiling after that, and it is there for the formats
+    with no such shortcut.  A PNG, a TIFF or a BMP is decoded whole or not at
+    all: a 200 megapixel flatbed scan dropped into the watched folder is 600 MB
+    of RGB on a machine with 4 GB and a 4K texture already resident.  Past the
+    ceiling the picture is opened once in a child process and a panel-sized
+    copy is kept -- see :mod:`picframe3.media.shrink` -- so the photograph is
+    still shown and nothing is moved or deleted.  Only when that copy cannot be
+    made, or ``shrink`` is off, is the picture refused; the alternative to
+    refusing it is the whole frame, because the kernel does not kill the scan,
+    it kills us.  0 turns the ceiling off.
+    """
     try:
         img = Image.open(path)
+        if target:
+            # A documented no-op on every format that cannot do it, so the
+            # formats that can are the only ones that notice.
+            img.draft("RGB", target)
+        if max_pixels > 0 and img.width * img.height > max_pixels:
+            size = (img.width, img.height)
+            img.close()
+            copy = None
+            if shrink:
+                copy = shrink_module.cached_copy(
+                    path, size, target or _within(size, max_pixels))
+            if copy is None:
+                raise TooLargeToDecode(path, size, max_pixels)
+            # The copy is already panel-sized and its orientation is baked in,
+            # so it needs neither the draft above nor anything below it beyond
+            # the usual mode conversion.
+            img = Image.open(copy)
         img.load()
+    except TooLargeToDecode:
+        raise
     except Exception as exc:
         _log.warning("cannot open %s: %s", path, exc)
         return None
@@ -162,21 +243,26 @@ def prepare(
 
     ``metas`` holds one photo, or two when portrait pairing is active.
     """
-    loaded: list[Image.Image] = list(images) if images else []
-    if not loaded:
-        for m in metas:
-            img = open_oriented(m.path)
-            if img is None:
-                return None
-            loaded.append(img)
-    if not loaded:
-        return None
-
+    # Worked out before anything is opened, because it is what the decoder is
+    # told to aim for: every path below wants the picture at the panel's size
+    # or smaller, so there is no reason to unpack it any larger.
     sw, sh = screen_size
     if opts.kenburns_headroom > 1.0:
         sw = int(sw * opts.kenburns_headroom)
         sh = int(sh * opts.kenburns_headroom)
     target = (sw, sh)
+
+    loaded: list[Image.Image] = list(images) if images else []
+    if not loaded:
+        for m in metas:
+            img = open_oriented(m.path, target=target,
+                                max_pixels=opts.max_decode_pixels,
+                                shrink=opts.shrink_oversized)
+            if img is None:
+                return None
+            loaded.append(img)
+    if not loaded:
+        return None
 
     style = opts.mat_style
     fit = opts.fit
@@ -245,7 +331,7 @@ def no_files_screen(screen_size: tuple[int, int], source: str = "", *,
     wanted = str(source or "").strip()
     if wanted.lower() not in NO_FILES_OFF:
         path = Path(wanted).expanduser() if wanted else NO_FILES_FILE
-        image = open_oriented(str(path))
+        image = open_oriented(str(path), target=screen_size)
         if image is not None:
             try:
                 return _fit_contain(image.convert("RGB"), screen_size, (0, 0, 0))

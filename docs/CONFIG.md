@@ -66,6 +66,8 @@ How a picture is composed on screen, and what is written over it.
 | `blur_zoom` | number | `1.06` | How far the blurred backdrop is enlarged, so its edges are off screen. *(advanced)* |
 | `blur_dim` | number | `0.55` | 0 = black edges, 1 = the blurred copy at full strength. |
 | `upscale_limit` | number | `2.5` | Beyond this the frame blur-fills rather than enlarging a small picture. |
+| `max_decode_megapixels` | number | `64.0` | The largest picture the frame will open. A photograph from a camera or a phone is scaled down while it is decoded and never reaches this; a huge PNG or TIFF scan cannot be, and would take the frame down with it, so past this size it is skipped and the log says so. 0 turns the limit off. *(advanced)* |
+| `shrink_oversized` | boolean | `True` | What happens to a picture past that size. On, the frame opens it once in a separate process and keeps a screen-sized copy in its cache, so the photograph is shown from then on; the original is never moved, changed or deleted. Off leaves such a picture out of the slideshow. *(advanced)* |
 | `mat_style` | string | `'single'` | Tick several and each picture gets one of them. `polaroid` deliberately sits the print high with a deep lower margin; if pictures look badly centred, this style is usually why. |
 | `mat_tolerance` | number | `0.01` | How different the picture and screen shapes must be before `auto` mats. `-1` always mats. |
 | `mat_outer_color` | list[int] | None | `None` | Red, green, blue, 0–255. Empty derives the colour from the photograph. |

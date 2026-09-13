@@ -1,3 +1,6 @@
+import pathlib
+
+import pytest
 from PIL import Image
 
 from picframe3.media import mat, prepare
@@ -171,6 +174,184 @@ def test_unreadable_file_returns_none(tmp_path):
     broken.write_bytes(b"not a jpeg")
     assert prepare.prepare([PhotoMeta(path=str(broken))], (640, 480),
                            prepare.PrepareOptions()) is None
+
+
+def test_a_big_jpeg_is_decoded_small_rather_than_whole(tmp_path):
+    """The decoder is told the panel size, so it never unpacks the full file.
+
+    This is where the time goes on a Pi: a 45 megapixel phone photograph
+    decoded whole takes over a second and a few hundred megabytes, and every
+    one of those pixels is thrown away by the resample on the next line.
+    """
+    path = tmp_path / "big.jpg"
+    _photo(4000, 3000).save(path)
+    img = prepare.open_oriented(str(path), target=(500, 375))
+    assert img is not None
+    assert img.width < 4000, "the file was decoded at full size"
+    assert img.width >= 500 and img.height >= 375, "decoded smaller than the panel"
+
+
+def test_a_scan_past_the_decode_limit_is_refused(tmp_path):
+    """PNG has no scaling shortcut, so the only defence is not to open it."""
+    path = tmp_path / "scan.png"
+    _photo(1200, 900).save(path)
+    with pytest.raises(prepare.TooLargeToDecode):
+        prepare.open_oriented(str(path), max_pixels=100_000, shrink=False)
+    assert prepare.open_oriented(str(path), max_pixels=0) is not None
+
+
+def test_the_limit_is_measured_after_the_decode_is_scaled_down(tmp_path):
+    """A big JPEG is fine precisely because it never reaches full size.
+
+    Measuring the file instead of the decode would refuse every panorama on
+    the frame while letting the PNG that actually costs the memory through.
+    """
+    path = tmp_path / "big.jpg"
+    _photo(4000, 3000).save(path)                      # 12 MP on disk
+    with pytest.raises(prepare.TooLargeToDecode):
+        prepare.open_oriented(str(path), max_pixels=2_000_000, shrink=False)
+    img = prepare.open_oriented(str(path), target=(640, 480), max_pixels=2_000_000)
+    assert img is not None and img.width * img.height <= 2_000_000
+
+
+def test_the_refusal_says_which_picture_and_how_big(tmp_path):
+    """A picture that silently never appears is the worst version of this."""
+    path = tmp_path / "scan.png"
+    _photo(1200, 900).save(path)
+    with pytest.raises(prepare.TooLargeToDecode) as caught:
+        prepare.open_oriented(str(path), max_pixels=100_000, shrink=False)
+    assert "scan.png" in str(caught.value)
+    assert "1200" in str(caught.value) and "900" in str(caught.value)
+    assert caught.value.size == (1200, 900)
+
+
+def test_prepare_refuses_an_oversized_picture_instead_of_decoding_it(tmp_path):
+    path = tmp_path / "scan.png"
+    _photo(1200, 900).save(path)
+    meta = PhotoMeta(path=str(path), width=1200, height=900)
+    with pytest.raises(prepare.TooLargeToDecode):
+        prepare.prepare([meta], (640, 480),
+                        prepare.PrepareOptions(max_decode_pixels=100_000,
+                                               shrink_oversized=False))
+    assert prepare.prepare([meta], (640, 480),
+                           prepare.PrepareOptions(max_decode_pixels=0)) is not None
+
+
+# -- pictures too large to open the ordinary way ---------------------------
+
+@pytest.fixture
+def shrink_cache(tmp_path, monkeypatch):
+    """Keep the reduced copies out of the real cache during a test."""
+    from picframe3.media import shrink
+
+    folder = tmp_path / "cache"
+    monkeypatch.setattr(shrink, "CACHE_DIR", folder)
+    return folder
+
+
+def test_an_oversized_picture_is_shown_from_a_smaller_copy(tmp_path, shrink_cache):
+    """The point of the whole exercise: the photograph still goes on the wall."""
+    path = tmp_path / "scan.png"
+    _photo(1200, 900).save(path)
+
+    img = prepare.open_oriented(str(path), target=(300, 225), max_pixels=100_000)
+
+    assert img is not None, "the picture was refused instead of being shrunk"
+    assert img.width <= 300 and img.height <= 225
+    assert list(shrink_cache.glob("*.jpg")), "no copy was kept"
+
+
+def test_a_whole_slide_is_built_from_the_smaller_copy(tmp_path, shrink_cache):
+    """End to end: past the limit, and still a screen-sized picture to show."""
+    path = tmp_path / "scan.png"
+    _photo(1200, 900).save(path)
+    meta = PhotoMeta(path=str(path), width=1200, height=900)
+
+    out = prepare.prepare([meta], (640, 480),
+                          prepare.PrepareOptions(max_decode_pixels=100_000))
+
+    assert out is not None and out.size == (640, 480)
+
+
+def test_the_copy_is_kept_out_of_the_pictures_folder(tmp_path, shrink_cache):
+    """Beside the original it would be a file Syncthing carries to every device."""
+    folder = tmp_path / "Pictures"
+    folder.mkdir()
+    path = folder / "scan.png"
+    _photo(1200, 900).save(path)
+
+    prepare.open_oriented(str(path), target=(300, 225), max_pixels=100_000)
+
+    assert [f.name for f in folder.iterdir()] == ["scan.png"]
+
+
+def _never_decodes(monkeypatch, why: str) -> None:
+    """Make a second decode a test failure rather than a silent cost."""
+    import subprocess
+
+    def _refuse(*args, **kwargs):
+        raise AssertionError(why)
+
+    monkeypatch.setattr(subprocess, "run", _refuse)
+
+
+def test_the_copy_is_made_once_and_then_reused(tmp_path, shrink_cache, monkeypatch):
+    """A second decode of the same picture is the cost this is here to avoid."""
+    from picframe3.media import shrink
+
+    path = tmp_path / "scan.png"
+    _photo(1200, 900).save(path)
+    first = shrink.cached_copy(str(path), (1200, 900), (300, 225))
+    assert first is not None
+    stamp = pathlib.Path(first).stat().st_mtime_ns
+
+    _never_decodes(monkeypatch, "the child process ran a second time")
+    again = shrink.cached_copy(str(path), (1200, 900), (300, 225))
+
+    assert again == first
+    assert pathlib.Path(again).stat().st_mtime_ns == stamp
+
+
+def test_a_picture_too_large_even_to_open_once_is_refused(tmp_path, shrink_cache,
+                                                         monkeypatch):
+    """There is no size of Raspberry Pi that makes a gigapixel scan sensible."""
+    from picframe3.media import shrink
+
+    path = tmp_path / "huge.png"
+    _photo(60, 40).save(path)                      # the header is what matters
+    monkeypatch.setattr(shrink, "MEMORY_CEILING", 1)
+
+    assert shrink.cached_copy(str(path), (40_000, 30_000), (300, 225)) is None
+    assert list(shrink_cache.glob("*.failed")), "nothing recorded the refusal"
+
+
+def test_a_shrink_that_failed_is_not_tried_again(tmp_path, shrink_cache, monkeypatch):
+    """Otherwise the frame stalls on the same picture every time round."""
+    from picframe3.media import shrink
+
+    path = tmp_path / "scan.png"
+    _photo(1200, 900).save(path)
+    shrink_cache.mkdir(parents=True)
+    marker = shrink_cache / (shrink._key(str(path), (1200, 900), (300, 225))
+                             + shrink.FAILED_SUFFIX)
+    marker.touch()
+
+    _never_decodes(monkeypatch, "a known-bad picture was decoded again")
+    assert shrink.cached_copy(str(path), (1200, 900), (300, 225)) is None
+
+
+def test_a_replaced_file_is_shrunk_again(tmp_path, shrink_cache):
+    """Syncthing replaces pictures in place; the copy has to follow."""
+    from picframe3.media import shrink
+
+    path = tmp_path / "scan.png"
+    _photo(1200, 900, (10, 20, 30)).save(path)
+    first = shrink.cached_copy(str(path), (1200, 900), (300, 225))
+
+    _photo(1200, 900, (200, 100, 50)).save(path)   # same name, new bytes
+    second = shrink.cached_copy(str(path), (1200, 900), (300, 225))
+
+    assert first != second, "the old copy was served for a new picture"
 
 
 def test_placeholder_is_drawn():

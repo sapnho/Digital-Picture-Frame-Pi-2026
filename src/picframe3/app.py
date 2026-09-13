@@ -253,6 +253,8 @@ class PicFrame:
             blur_zoom=v.blur_zoom,
             blur_dim=v.blur_dim,
             upscale_limit=v.upscale_limit,
+            max_decode_pixels=int(max(0.0, v.max_decode_megapixels) * 1_000_000),
+            shrink_oversized=v.shrink_oversized,
             mat_style=MatStyle(
                 style=v.mat_style,
                 outer_color=tuple(v.mat_outer_color) if v.mat_outer_color else None,

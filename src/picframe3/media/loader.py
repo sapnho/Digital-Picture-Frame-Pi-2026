@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from PIL import Image
 
 from .metadata import PhotoMeta
-from .prepare import PrepareOptions, prepare
+from .prepare import PrepareOptions, TooLargeToDecode, prepare
 
 _log = logging.getLogger(__name__)
 
@@ -116,6 +116,11 @@ class SlideLoader:
             return await pending
         except asyncio.CancelledError:  # pragma: no cover
             return None
+        except TooLargeToDecode:
+            # Not a failed preparation: a setting refused this picture, and the
+            # slideshow has its own answer for that.  Swallowing it here would
+            # send the caller back to load() to be told the same thing twice.
+            raise
         except Exception as exc:
             _log.warning("slide preparation failed: %s", exc)
             return None

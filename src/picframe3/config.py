@@ -94,6 +94,16 @@ class ViewerConfig:
     #: Never enlarge a small picture by more than this; beyond it the frame
     #: falls back to a blur-fill rather than showing a soft, stretched image.
     upscale_limit: float = 2.5
+    #: Largest picture the frame will decode, in megapixels.  A JPEG or a HEIF
+    #: is scaled down as it is decoded and almost never reaches this; it is the
+    #: formats that cannot -- PNG, TIFF, BMP -- where a single huge scan would
+    #: otherwise take the whole frame down with it.  0 turns the limit off.
+    max_decode_megapixels: float = 64.0
+    #: What happens to a picture past that limit: on, the frame opens it once
+    #: in a child process and keeps a panel-sized copy, so the photograph is
+    #: shown from then on and the original is never touched again.  Off leaves
+    #: it out of the slideshow instead.
+    shrink_oversized: bool = True
     mat_style: str = "single"             # or "random", or "" for all
     mat_tolerance: float = 0.01
     mat_outer_color: list[int] | None = None
