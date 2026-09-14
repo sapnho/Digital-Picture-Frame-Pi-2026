@@ -214,8 +214,14 @@ def test_the_release_button_is_only_offered_where_it_changes_something():
     assert "Stop holding it out" in JS
 
 
-def test_a_held_row_says_that_it_is_held():
-    """A button whose subject is invisible is a button nobody can read."""
-    assert 'class="line held"' in JS
-    assert "Held out — a copy of this picture" in JS
+def test_only_a_picture_that_really_came_back_says_so():
+    """Every removal is held out, so a line saying it on every row says nothing.
+
+    It was tried and it read as noise -- a sentence the eye learns to skip,
+    drowning the one row where a file really had turned up again.  The rule is
+    stated once, at the top of the tab, and the row speaks only when there is
+    something to report.
+    """
+    assert "Held out — a copy of this picture" not in JS
+    assert 'class="line came-back"' in JS
     assert "Show this again" not in HTML

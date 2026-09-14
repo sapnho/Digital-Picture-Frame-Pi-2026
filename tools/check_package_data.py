@@ -35,6 +35,14 @@ REQUIRED = (
     "web/index.html",
     "web/app.js",
     "web/style.css",
+    "web/favicon.ico",                # the tab icon, older browsers
+    "web/favicon.svg",                # the tab icon, current browsers
+    "web/apple-touch-icon.png",       # iOS home screen
+    "web/favicon-192x192.png",        # Android home screen
+    "web/favicon-512x512.png",
+    "web/icon-maskable-512x512.png",  # Android, cropped to the launcher's shape
+    "web/icon-maskable.svg",
+    "web/manifest.webmanifest",       # names the app and points at the icons
 )
 
 

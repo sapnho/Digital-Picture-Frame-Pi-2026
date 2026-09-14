@@ -21,6 +21,7 @@ import functools
 import ipaddress
 import json
 import logging
+import mimetypes
 import os
 import secrets
 import socket
@@ -57,6 +58,11 @@ try:
     HAVE_FASTAPI = True
 except ImportError:  # pragma: no cover - optional dependency
     HAVE_FASTAPI = False
+
+# Debian ships no mapping for .webmanifest, and StaticFiles falls back to
+# text/plain, which Chrome refuses to parse.  Registering it here costs
+# nothing and keeps "add to home screen" working on the phone.
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 WEB_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 THUMB_SIZE = (480, 480)

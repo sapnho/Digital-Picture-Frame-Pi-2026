@@ -577,19 +577,17 @@ function removalRow(r) {
         : "") +
       /* The line that explains a picture you removed and keep not seeing.
          Without it, a two-way sync that re-copies the file every time looks
-         exactly like the frame having quietly ignored you -- and on a row that
-         has *not* come back, the plain version is what makes the promise
-         visible at all.  Drawn for every held row, because the button beside
-         it acts on this and nothing else. */
+         exactly like the frame having quietly ignored you.  Only when it has
+         actually happened: every removal is held out, so saying so on every
+         row is a sentence the eye learns to skip, and it drowns the one row
+         where something really did come back.  The rule itself is stated once,
+         at the top of the tab. */
       (r.came_back
         ? `<div class="line came-back">Turned up again${
             r.seen_at ? ` ${escapeHtml(when_text(isoOf(r.seen_at)))}` : ""} at <span
             class="from">${escapeHtml(r.seen_path)}</span> — still held out${
             r.seen_count > 1 ? ` (${r.seen_count}×)` : ""}</div>`
-        : r.held
-          ? `<div class="line held">Held out — a copy of this picture that `
-            + `turns up again, under any name, stays out of the slideshow</div>`
-          : "") +
+        : "") +
     `</div>` +
     `<div class="actions"></div>`;
 

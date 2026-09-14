@@ -205,6 +205,7 @@ image file, which is also how the renderer is tested in CI.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the pieces fit together
 - [docs/MIGRATION.md](docs/MIGRATION.md) — moving from picframe
 - [docs/API.md](docs/API.md) — REST, SSE and MQTT surfaces
+- [docs/ICONS.md](docs/ICONS.md) — the interface's icon, and how to regenerate it
 
 ---
 
