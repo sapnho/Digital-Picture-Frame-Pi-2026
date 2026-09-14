@@ -660,6 +660,13 @@ pre { white-space: pre-wrap; font-size: 12.5px; }
    muted colour and would otherwise win, which is the bug that once swallowed
    the restored line's green. */
 .removal .what .line.came-back { color: var(--warn); }
+/* These two are sentences rather than a path or a title, and `.line` clips
+   with an ellipsis -- which on a narrow frame swallowed the half that says
+   what happens next. */
+.removal .what .line.came-back,
+.removal .what .line.held {
+  white-space: normal; overflow: visible; text-overflow: clip;
+}
 .lede.warn { color: var(--warn); }
 
 .tab .badge {

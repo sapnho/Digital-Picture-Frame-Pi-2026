@@ -184,3 +184,38 @@ def test_the_destructive_buttons_ask_first():
 def test_the_removed_tab_no_longer_claims_nothing_is_ever_deleted():
     """It can delete now.  A page that says otherwise is a page that lies."""
     assert "Nothing is ever deleted" not in HTML
+
+
+# -- the Removed tab says what it is doing ---------------------------------
+
+JS = (WEB / "app.js").read_text(encoding="utf-8")
+
+
+def test_yesterday_evening_is_not_called_today():
+    """Elapsed milliseconds divided by 86 400 000 is not a calendar day.
+
+    Something removed yesterday at 19:24 read "Removed today at 19:24" for the
+    whole of the following morning -- on the one page whose entire purpose is
+    to say when a thing happened.
+    """
+    assert "(Date.now() - then) / 86400000" not in JS
+    assert "setHours(0, 0, 0, 0)" in JS
+
+
+def test_the_release_button_is_only_offered_where_it_changes_something():
+    """It used to sit on every held row and read as a second "Put it back".
+
+    A hold is released by it, and the only picture a release can put back on
+    the wall is one whose file is on the disk again; for anything still in the
+    trash, "Put it back" is the whole answer and releases the hold as well.
+    """
+    assert "Show this again" not in JS, "the name that sounded like Put it back"
+    assert "if (r.came_back) {" in JS
+    assert "Stop holding it out" in JS
+
+
+def test_a_held_row_says_that_it_is_held():
+    """A button whose subject is invisible is a button nobody can read."""
+    assert 'class="line held"' in JS
+    assert "Held out — a copy of this picture" in JS
+    assert "Show this again" not in HTML

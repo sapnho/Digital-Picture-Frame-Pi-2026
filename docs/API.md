@@ -112,8 +112,9 @@ tab as *turned up again — still held out*, and counted by the `came_back`
 sensor in Home Assistant.
 
 Nothing clears a hold but somebody saying so: `POST
-/api/removed/{stored_as}/allow`, the *Show this again* button, or the `release`
-action over MQTT. Putting a picture back from the trash releases it too —
+/api/removed/{stored_as}/allow`, the *Stop holding it out* button (offered on
+a row whose file has turned up again, which is the only row where releasing
+changes anything), or the `release` action over MQTT. Putting a picture back from the trash releases it too —
 restoring a picture *is* saying it may be shown again, and without that the
 file would go back to its folder and the next scan would quietly hold it out.
 

@@ -232,6 +232,44 @@ class RemovalLog:
             return []
         return done
 
+    def set_digests(self, digests: dict[str, str]) -> list[str]:
+        """Write the fingerprint into lines that were recorded without one.
+
+        A line written before the held-out list existed has no ``digest``, and
+        without one the removal cannot be recognised when the file comes back:
+        it is remembered by path, and a path is exactly what a sync, a restored
+        backup or a second copy under another name does not preserve.  The
+        bytes are still sitting in the trash, though, so the fingerprint can be
+        taken afterwards and put where it belongs.
+
+        A batch and a single rewrite, for the same reason as
+        :meth:`mark_purged`.  Lines that already have a digest, and lines that
+        have been restored or purged, are left alone.  Returns the names
+        actually filled in.
+        """
+        wanted = {str(k): str(v) for k, v in (digests or {}).items() if k and v}
+        if not wanted or not os.path.exists(self.path):
+            return []
+        done: list[str] = []
+        try:
+            os.makedirs(self.folder, exist_ok=True)
+            with self._locked():
+                self._invalidate()      # do not trust a cache read before the lock
+                entries = self.entries(include_restored=True, include_purged=True)
+                for entry in entries:
+                    name = str(entry.get("stored_as") or "")
+                    if (name in wanted and not entry.get("digest")
+                            and not entry.get("restored_at")
+                            and not entry.get("purged_at")):
+                        entry["digest"] = wanted[name]
+                        done.append(name)
+                if done:
+                    self._rewrite(entries)
+        except OSError as exc:
+            _log.error("cannot update the removal journal at %s: %s", self.path, exc)
+            return []
+        return done
+
     def _rewrite(self, entries: list[dict[str, Any]]) -> None:
         """Replace the journal with *entries*.  Call it holding the lock."""
         os.makedirs(self.folder, exist_ok=True)

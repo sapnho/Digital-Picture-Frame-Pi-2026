@@ -476,6 +476,81 @@ def test_home_assistant_can_release_one_too():
     assert Action.RELEASE not in MQTT_REFUSED
 
 
+# -- removals recorded before the frame took a fingerprint ------------------
+#
+# The state a real frame was found in: three removals from yesterday's version
+# with no digest and no hold, one from today's with both -- so the Removed tab
+# offered the release button on exactly one row out of four and explained the
+# difference nowhere.  The bytes are still in the trash, so this is repairable
+# rather than merely confessable.
+
+def _forget_the_fingerprint(frame, stored_as):
+    """Rewind one journal line and its hold to what an older version wrote."""
+    entries = frame.removals.entries(include_restored=True, include_purged=True)
+    for entry in entries:
+        if entry.get("stored_as") == stored_as:
+            frame.library.release(entry.pop("digest", ""))
+    frame.removals._rewrite(entries)
+
+
+@pytest.mark.asyncio
+async def test_an_older_removal_is_recognised_from_the_trash(frame, photo_dir):
+    path = str(photo_dir / "2024" / "exif.jpg")
+    frame.current = [frame.library.by_path(path)]
+    await frame._delete_current(source="http")
+    stored_as = frame.removals.latest()["stored_as"]
+    _forget_the_fingerprint(frame, stored_as)
+    assert frame.library.hold_summary()["held"] == 0
+    assert not frame.removals.find(stored_as).get("digest")
+
+    assert frame._backfill_digests() == 1
+    assert frame.removals.find(stored_as)["digest"] == file_digest(
+        os.path.join(frame.removals.folder, stored_as))
+    assert frame.library.hold_summary()["held"] == 1
+    # And not again on the next start: the line has its digest now.
+    assert frame._backfill_digests() == 0
+
+
+@pytest.mark.asyncio
+async def test_backfilling_takes_a_copy_already_indexed_off_the_wall(
+        frame, photo_dir):
+    """The scan would never find that copy.
+
+    It asks about a file that is new or whose bytes have changed, and a copy
+    that has been sitting in the library all along is neither -- so holding it
+    has to happen here or it never happens.
+    """
+    path = str(photo_dir / "2024" / "exif.jpg")
+    frame.current = [frame.library.by_path(path)]
+    await frame._delete_current(source="http")
+    stored_as = frame.removals.latest()["stored_as"]
+    _forget_the_fingerprint(frame, stored_as)
+
+    copy = photo_dir / "2023" / "it-came-back.jpg"
+    shutil.copy2(os.path.join(frame.removals.folder, stored_as), copy)
+    frame.scanner.scan()
+    assert not frame.library.by_path(str(copy)).held, "nothing held it yet"
+
+    frame._backfill_digests()
+    assert frame.library.by_path(str(copy)).held
+    assert str(copy) not in [r.path for r in _playlist_records(frame.library)]
+
+
+@pytest.mark.asyncio
+async def test_a_line_that_was_put_back_is_left_alone(frame, photo_dir):
+    """Filling in a fingerprint must not re-hold something already restored."""
+    path = str(photo_dir / "2024" / "exif.jpg")
+    frame.current = [frame.library.by_path(path)]
+    await frame._delete_current(source="http")
+    stored_as = frame.removals.latest()["stored_as"]
+    _forget_the_fingerprint(frame, stored_as)
+    await frame._restore_removed(stored_as)
+
+    assert frame._backfill_digests() == 0
+    assert frame.library.hold_summary()["held"] == 0
+    assert frame.removals.set_digests({stored_as: "0" * 64}) == []
+
+
 def _playlist_records(library):
     playlist = Playlist(library, persist=False)
     return [r for r in (library.get(i) for i in playlist._ids) if r is not None]

@@ -1236,6 +1236,59 @@ class PicFrame:
             held += 1
         return held
 
+    def _backfill_digests(self) -> int:
+        """Recognise removals that were recorded before the frame took a
+        fingerprint.  Runs once at start, in a thread.
+
+        A picture removed by an older version has no digest in its journal
+        line and no row in the held-out list.  Nothing keeps a copy of it out
+        of the playlist, and the Removed tab cannot even say so -- there is
+        nothing to say it about.  The bytes are still in the trash, which is
+        the only reason this can be repaired at all rather than merely
+        confessed.
+
+        Only lines in the trash, only lines with no digest: on a frame whose
+        journal was always written by this version it reads nothing at all.
+        """
+        if self.removals is None or self.library is None:
+            return 0
+        pending = [e for e in self.removals.in_trash() if not e.get("digest")]
+        if not pending:
+            return 0
+        folder = os.path.expanduser(self.config.library.deleted_folder)
+        found: dict[str, str] = {}
+        for entry in pending:
+            stored_as = str(entry.get("stored_as") or "")
+            if not stored_as:
+                continue
+            path = os.path.join(folder, stored_as)
+            digest = file_digest(path)
+            if not digest:
+                # Gone from the folder, or unreadable.  Nothing to repair, and
+                # nothing worth a warning: the journal line still explains the
+                # removal, which is what it is for.
+                continue
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = int(entry.get("size") or 0)
+            found[stored_as] = digest
+            self.library.hold(digest, size=size,
+                              path=str(entry.get("original_path") or path),
+                              stored_as=stored_as)
+            # A copy sitting in the library already has to come off the wall
+            # here, because the scan will never look at it: it asks about a
+            # file that is new or whose bytes have changed, and a copy that
+            # has been indexed all along is neither.
+            self._hold_existing_copies(digest, size)
+        if found:
+            self.removals.set_digests(found)
+            _log.info("%d earlier removal(s) can now be recognised by content "
+                      "and are held out of the playlist", len(found))
+            self.invalidate_stats()
+            self._dirty = True
+        return len(found)
+
     def _release_hold_for(self, entry: dict[str, Any]) -> bool:
         """Clear the hold belonging to one journal line, however it is keyed.
 
@@ -1466,6 +1519,14 @@ class PicFrame:
     # ------------------------------------------------------------------
     async def _maintenance_loop(self) -> None:
         cfg = self.config
+        # Before the first scan, not after: a removal that only now gets its
+        # fingerprint has to be in the held-out list by the time the scan
+        # decides what belongs in the playlist.
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._backfill_digests)
+        except Exception as exc:        # bookkeeping never stops the frame
+            _log.warning("could not recognise earlier removals: %s", exc)
         if cfg.library.scan_on_start:
             asyncio.create_task(self._rescan(initial=True))
         if cfg.library.watch and self.scanner is not None:

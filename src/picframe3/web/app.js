@@ -577,13 +577,19 @@ function removalRow(r) {
         : "") +
       /* The line that explains a picture you removed and keep not seeing.
          Without it, a two-way sync that re-copies the file every time looks
-         exactly like the frame having quietly ignored you. */
+         exactly like the frame having quietly ignored you -- and on a row that
+         has *not* come back, the plain version is what makes the promise
+         visible at all.  Drawn for every held row, because the button beside
+         it acts on this and nothing else. */
       (r.came_back
         ? `<div class="line came-back">Turned up again${
             r.seen_at ? ` ${escapeHtml(when_text(isoOf(r.seen_at)))}` : ""} at <span
             class="from">${escapeHtml(r.seen_path)}</span> — still held out${
             r.seen_count > 1 ? ` (${r.seen_count}×)` : ""}</div>`
-        : "") +
+        : r.held
+          ? `<div class="line held">Held out — a copy of this picture that `
+            + `turns up again, under any name, stays out of the slideshow</div>`
+          : "") +
     `</div>` +
     `<div class="actions"></div>`;
 
@@ -615,18 +621,20 @@ function removalRow(r) {
     row.querySelector(".actions").appendChild(forGood);
   }
 
-  /* The only thing that lets a removed picture back into the playlist.  It is
-     offered wherever a hold exists -- most usefully on a row that says the
-     picture came back, but also on one that has not, so that "this may be
-     shown again" can be said in advance. */
-  if (r.held) {
+  /* The only thing that lets a removed picture back into the playlist -- and
+     offered only on a row where it changes something, which means a row whose
+     file has turned up on the disk again.  It used to sit on every held row,
+     where it read as a second, quieter "Put it back" and did nothing visible
+     when pressed: the file was still in the trash, and the trash is not
+     indexed.  Two buttons that sound alike and do different things is what
+     made this tab hard to read.  For a picture still in the trash, "Put it
+     back" is the whole answer -- it releases the hold as well. */
+  if (r.came_back) {
     const allow = document.createElement("button");
     allow.className = "btn";
-    allow.textContent = "Show this again";
-    allow.title = r.came_back
-      ? `Stop holding ${r.basename} out. It is already on the disk, so it goes `
-        + "back into the slideshow."
-      : `Stop holding ${r.basename} out, so a copy that turns up later is shown.`;
+    allow.textContent = "Stop holding it out";
+    allow.title = `Let ${r.basename} into the slideshow again. The copy at `
+      + `${r.seen_path} is on the disk, so it is shown from now on.`;
     allow.onclick = async () => {
       allow.disabled = true;
       allow.textContent = "Releasing…";
@@ -708,7 +716,15 @@ function when_text(iso) {
   if (!iso) return "";
   const then = new Date(iso);
   if (isNaN(then)) return iso;
-  const days = Math.floor((Date.now() - then) / 86400000);
+  /* Calendar days, not 24-hour blocks.  Dividing the elapsed milliseconds
+     called yesterday evening "today at 19:24" for the whole of the following
+     morning -- the small lie that makes a journal useless, because the one
+     thing a reader wants from it is which day a thing happened on. */
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const thenDay = new Date(then);
+  thenDay.setHours(0, 0, 0, 0);
+  const days = Math.round((midnight - thenDay) / 86400000);
   const clock = then.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   if (days <= 0) return `today at ${clock}`;
   if (days === 1) return `yesterday at ${clock}`;
