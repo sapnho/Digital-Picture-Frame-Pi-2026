@@ -498,3 +498,17 @@ def test_the_loop_idles_while_the_screen_is_off():
     assert frame._sleep_for(time.monotonic()) == pytest.approx(0.05)
     frame.set_display(False)
     assert frame._sleep_for(time.monotonic()) == pytest.approx(0.5)
+
+
+def test_an_order_changed_at_runtime_is_remembered_for_the_next_start(tmp_path):
+    from picframe3.library.db import Library
+    from picframe3.library.playlist import ORDER_STATE_KEY, Playlist, starting_order
+
+    frame = PicFrame(Config())
+    frame.library = Library(str(tmp_path / "index.db"))
+    frame.playlist = Playlist(frame.library, persist=False)
+    frame.playlist.set_order("date_asc")
+    frame.remember_order()              # what applying slideshow.order does
+    remembered = frame.library.get_state(ORDER_STATE_KEY)
+    assert starting_order(Config().slideshow.order, remembered) == "date_asc"
+

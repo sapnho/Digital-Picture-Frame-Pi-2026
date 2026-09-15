@@ -21,7 +21,7 @@ from .gfx.textstyle import TextStyle
 from .health import Health
 from .library.db import Library, Record
 from .library.digest import file_digest
-from .library.playlist import ANY_OTHER, Filters, Playlist
+from .library.playlist import ANY_OTHER, ORDER_STATE_KEY, Filters, Playlist, starting_order
 from .library.removed import JOURNAL_NAME, RemovalLog
 from .library.scanner import Scanner
 from .media import PrepareOptions, SlideLoader
@@ -89,6 +89,10 @@ class PicFrame:
         #: anything has been changed but not yet written to the config file.
         self._restart_needed: set[str] = set()
         self._config_dirty = False
+        #: The playlist order the config *file* says, as opposed to the one in
+        #: memory.  Kept so a remembered choice can tell whether the file has
+        #: been edited since (see ``playlist.starting_order``).
+        self._file_order = config.slideshow.order
         #: Set by the restart command; the CLI reads it after the loop ends.
         self.restart_requested = False
         #: Set by the shutdown command.  The CLI powers the Pi off once the
@@ -232,7 +236,12 @@ class PicFrame:
         filters.include_videos = cfg.library.include_videos
         self.playlist = Playlist(
             self.library,
-            order=cfg.slideshow.order if cfg.slideshow.shuffle else "name",
+            # ``slideshow.shuffle`` is not consulted: it is a picframe leftover,
+            # and a migrated ``shuffle: false`` quietly turned every restart
+            # into an alphabetical slideshow.  ``order`` alone decides, and an
+            # order picked on the running frame survives the restart.
+            order=starting_order(self._file_order,
+                                 self.library.get_state(ORDER_STATE_KEY)),
             filters=filters,
             recent_days=cfg.slideshow.recent_days,
             reshuffle_after=cfg.slideshow.reshuffle_after,
@@ -1097,6 +1106,7 @@ class PicFrame:
             return
         before = self.config.as_dict()
         self.config = fresh
+        self._file_order = fresh.slideshow.order
         changed = settings_module.changed_keys(before, fresh.as_dict())
         self._restart_needed = settings_module.restart_required(changed)
         self.applier.apply_all(changed)
@@ -1718,8 +1728,21 @@ class PicFrame:
         """Write the running configuration to disk and clear the dirty flag."""
         target = self.config.save(path) if path else self.config.save()
         self._config_dirty = False
+        self._file_order = self.config.slideshow.order
+        self.remember_order()
         _log.info("configuration written to %s", target or self.config.source_path)
         return target or self.config.source_path or ""
+
+    def remember_order(self) -> None:
+        """Keep the playlist order across a restart, even if never saved."""
+        if not self.playlist or not self.library:
+            return
+        try:
+            self.library.set_state(ORDER_STATE_KEY, {
+                "order": self.playlist.order, "configured": self._file_order,
+            })
+        except Exception:                   # pragma: no cover - index unwritable
+            _log.exception("could not remember the playlist order")
 
     def request_stop(self) -> None:
         self._stop.set()

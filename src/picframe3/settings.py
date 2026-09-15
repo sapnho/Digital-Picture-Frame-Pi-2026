@@ -98,6 +98,7 @@ class ConfigApplier:
         frame.playlist.recent_days = cfg.recent_days
         if key.endswith("order"):
             frame.playlist.set_order(cfg.order)
+            frame.remember_order()
         if key.endswith("paused"):
             # The settings page has a Paused switch; without this it moved and
             # nothing happened, then moved back on its own at the next refresh.

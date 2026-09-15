@@ -138,6 +138,13 @@ def migrate(old_path: str, *, new_path: str | None = None) -> tuple[Config, list
         except (KeyError, ValueError, TypeError) as exc:
             notes.append(f"could not carry over {old_key} ({exc})")
 
+    # picframe3 no longer reads ``slideshow.shuffle``; ``order`` decides.  An
+    # explicit ``shuffle: false`` in the old file was a real choice, so it is
+    # carried over as the order it meant rather than dropped.
+    if _get(old, "model.shuffle") in (False, "false", "no", "off"):
+        config.set("slideshow.order", "name")
+        notes.append("model.shuffle was off; slideshow.order set to name")
+
     blend = _get(old, "viewer.blend_type")
     if blend:
         config.set("slideshow.transition", BLEND_TO_TRANSITION.get(blend, "fade"))

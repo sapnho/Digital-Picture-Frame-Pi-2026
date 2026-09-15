@@ -39,6 +39,30 @@ _log = logging.getLogger(__name__)
 ORDER_MODES = ("shuffle", "random", "date_desc", "date_asc", "name", "folder",
                "recent", "least_played")
 
+#: Where a sort order chosen on the running frame is remembered.
+ORDER_STATE_KEY = "playlist_order"
+
+
+def starting_order(configured: str, remembered: Any) -> str:
+    """The order a frame should start in.
+
+    Choosing an order from the web page or Home Assistant applies it at once
+    but does not write the config file, so a restart used to put the frame
+    straight back to whatever the file said.  The choice is remembered in the
+    index together with the order the *file* said at the time, and wins at
+    start-up for as long as the file still says that.  Once somebody edits the
+    file (or presses Save, which writes the choice into it) the file is the
+    newer word and is obeyed.  With nothing set anywhere the answer is
+    ``shuffle``.
+    """
+    configured = configured if configured in ORDER_MODES else "shuffle"
+    if isinstance(remembered, dict):
+        order = remembered.get("order")
+        if order in ORDER_MODES and remembered.get("configured") == configured:
+            return order
+    return configured
+
+
 #: What a dropdown says when it is not narrowing anything down.  Home
 #: Assistant's select entity has no empty option, so the word has to be a real
 #: one; ``ANY_OTHER`` is what it shows when the filter was set from somewhere

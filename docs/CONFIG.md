@@ -41,11 +41,11 @@ Pacing and sequencing: how long each picture stays, how it changes, what comes n
 | `interval` | number | `180.0` | Seconds each picture stays on screen. |
 | `transition` | string | `'fade'` | Any name from `picframe3 transitions`, or `random`. |
 | `transition_time` | number | `2.5` | Seconds the change from one picture to the next takes. |
-| `order` | string | `'shuffle'` | `shuffle` gives every picture exactly one turn per round, in a fresh random order each round, and keeps the round in the index — so reboots, rescans and newly copied photographs cannot rob the pictures still waiting. `random` has no memory and may repeat. |
+| `order` | string | `'shuffle'` | `shuffle` gives every picture exactly one turn per round, in a fresh random order each round, and keeps the round in the index — so reboots, rescans and newly copied photographs cannot rob the pictures still waiting. `random` has no memory and may repeat. An order picked on the running frame is kept through a restart even if it was never saved, until this file says something different. |
 | `recent_days` | integer | `7` | Pictures newer than this are shown first in each shuffle round. |
 | `reshuffle_after` | integer | `1` | Complete passes over the library before the order is shuffled again. |
 | `portrait_pairs` | boolean | `False` | Two upright photographs side by side on a landscape screen, each with its own caption. |
-| `shuffle` | boolean | `True` | Kept only so a migrated picframe configuration still loads. `order` is what decides. *(advanced)* |
+| `shuffle` | boolean | `True` | Kept only so a migrated picframe configuration still loads. It is ignored: `order` alone decides. *(advanced)* |
 | `paused` | boolean | `False` | Whether the frame starts paused. *(advanced)* |
 | `video_loop` | boolean | `False` | Repeat a short video until the picture interval is up, instead of moving on when it ends. |
 | `video_mute` | boolean | `True` | Videos are silent by default; a frame on a shelf that suddenly talks is startling. |

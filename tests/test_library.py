@@ -380,3 +380,28 @@ def test_the_exif_date_format_is_understood():
         2026, 9, 12, 23, 59, 59).timestamp()
     assert parse_date("2026:09:12 08:30:00") == datetime(
         2026, 9, 12, 8, 30).timestamp()
+
+
+# -- the order a frame starts in -------------------------------------------
+
+def test_with_nothing_set_the_frame_shuffles():
+    from picframe3.config import Config
+    from picframe3.library.playlist import starting_order
+
+    assert starting_order(Config().slideshow.order, None) == "shuffle"
+    assert starting_order("nonsense", None) == "shuffle"
+
+
+def test_an_order_picked_on_the_frame_survives_a_restart():
+    from picframe3.library.playlist import starting_order
+
+    remembered = {"order": "date_desc", "configured": "shuffle"}
+    assert starting_order("shuffle", remembered) == "date_desc"
+
+
+def test_an_edited_config_file_beats_the_remembered_order():
+    from picframe3.library.playlist import starting_order
+
+    remembered = {"order": "date_desc", "configured": "shuffle"}
+    assert starting_order("name", remembered) == "name"
+    assert starting_order("shuffle", {"order": "bogus", "configured": "shuffle"}) == "shuffle"
