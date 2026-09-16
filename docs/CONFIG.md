@@ -90,7 +90,7 @@ How a picture is composed on screen, and what is written over it.
 | `text_scrim` | number | `0.5` | Darkening behind the caption so it stays legible over a bright picture. 0–1. |
 | `text_separator` | string | `'  ·  '` | Written between the caption elements. |
 | `date_format` | string | `'%-d %B %Y'` | strftime: `%-d %B %Y` is "7 September 2026", `%d.%m.%Y` is "07.09.2026". |
-| `locale` | string | *(empty)* | Which language month and day names come out in: `de_DE.UTF-8`, `fr_FR.UTF-8`. Empty uses the system's own, which under systemd is usually English whatever the Pi is set to. The locale has to be generated on the Pi — `doctor` says whether it is. |
+| `locale` | string | *(empty)* | Which language month and day names come out in: `de_DE.UTF-8`, `fr_FR.UTF-8`. Empty uses the system's own, which under systemd is usually English whatever the Pi is set to. A language has to be built on the Pi before it works, and only the one chosen here is built: the installer does it, or `picframe3 setup --yes` after choosing a new one here. `doctor` says whether it is. Only the dates change — the system, the installer and this page stay in English. |
 | `show_clock` | boolean | `False` | A large clock over the picture. |
 | `clock_format` | string | `'%H:%M'` | strftime: `%H:%M` or `%-I:%M %p`. |
 | `clock_size` | integer | `120` | Type size, in pixels at 1080p. |

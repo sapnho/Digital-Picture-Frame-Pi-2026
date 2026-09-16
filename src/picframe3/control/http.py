@@ -564,7 +564,15 @@ class HttpServer:
             folders = await _in_thread(self.app.library.folders)
             options = [{"name": path, "label": f"{path}  ({count})"}
                        for path, count in folders]
-            return schema(self.app.config, extra_options={"folders": options})
+            # And the date languages this Pi has actually built, each with a
+            # sample in the frame's own date format.
+            from .. import locales
+
+            viewer = self.app.config.viewer
+            languages = await _in_thread(locales.options, viewer.locale,
+                                         viewer.date_format)
+            return schema(self.app.config,
+                          extra_options={"folders": options, "locales": languages})
 
         @api.patch("/api/config", dependencies=guard)
         async def patch_config(body: dict, persist: bool = Query(False)):

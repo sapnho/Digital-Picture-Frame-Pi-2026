@@ -417,6 +417,13 @@ enough on its own, because Raspberry Pi OS Lite runs no seat manager.
 `picframe3 doctor` opens a device node and says so. Run `picframe3 setup`, then
 reboot.
 
+**Dates are in English although `viewer.locale` is set** — the language has
+to be built on the Pi before the frame can use it, and only the language you
+chose is built. The installer does that; after choosing a different one in the
+settings, run `picframe3 setup --yes` (it keeps your answers) and restart the
+frame. `picframe3 doctor` shows a sample date when it works. Only the dates
+change: the system, the installer and the web interface stay in English.
+
 **Place names never appear** — they need `geo.enabled` *and* `geo.contact`
 (an email address, which OpenStreetMap's terms require). They fill in a few at
 a time while the frame runs; `picframe3 scan` resolves the whole library at

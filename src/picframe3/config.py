@@ -546,8 +546,8 @@ def set_time_locale(name: str) -> bool:
             continue
     _log.warning(
         "locale %r is not available on this system, so dates stay in the "
-        "default language; generate it with 'sudo dpkg-reconfigure locales' "
-        "(or add it to /etc/locale.gen and run 'sudo locale-gen')", name,
+        "default language; build it with 'picframe3 setup --yes' (or add it "
+        "to /etc/locale.gen and run 'sudo locale-gen')", name,
     )
     return False
 

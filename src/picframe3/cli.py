@@ -304,7 +304,8 @@ def cmd_doctor(args) -> int:
             ok &= check(
                 "date language", False,
                 f"{wanted_locale} is not generated on this system",
-                "sudo dpkg-reconfigure locales   (tick it, then restart the frame)",
+                "picframe3 setup --yes   (builds it and keeps your settings), "
+                "then restart the frame",
             )
 
     # -- graphics

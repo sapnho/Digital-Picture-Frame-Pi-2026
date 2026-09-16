@@ -777,6 +777,77 @@ def install_udev_rules() -> bool:
     return True
 
 
+def install_date_languages(config: Config) -> bool:
+    """Build the languages the frame can write its dates in.
+
+    ``viewer.locale`` only works for a locale the system has generated, and a
+    fresh Raspberry Pi OS Lite generates one.  This switches on the configured
+    language (and any in ``PICFRAME_LOCALES``) in /etc/locale.gen and runs
+    ``locale-gen`` -- without a question, nothing the owner did not ask for,
+    and only when something is actually missing, so an update that changes
+    nothing costs nothing.
+
+    The system's own language is left alone: ``LANG`` and /etc/default/locale
+    are not touched, so the installer, apt and SSH stay in English.  A failure
+    is a note rather than an error -- the frame runs, in English.
+    """
+    from . import locales
+
+    names = locales.wanted(config.viewer.locale,
+                           os.environ.get(locales.ENV_EXTRA, ""))
+    if not names:
+        return True                        # no language asked for; nothing to build
+
+    locale_gen = Path(locales.LOCALE_GEN)
+    sbin_path = os.pathsep.join([os.environ.get("PATH", ""), "/usr/sbin", "/sbin"])
+    if not locale_gen.exists() or shutil.which("locale-gen", path=sbin_path) is None:
+        say(f"{YELLOW}   ! No locale-gen here (the 'locales' package), so dates "
+            f"stay in the system's language.{RESET}")
+        return False
+
+    try:
+        current = locale_gen.read_text(encoding="utf-8")
+    except OSError as exc:
+        say(f"{YELLOW}   ! Could not read {locale_gen}: {exc}{RESET}")
+        return False
+    try:
+        supported = Path(locales.SUPPORTED).read_text(encoding="utf-8")
+    except OSError:
+        supported = ""
+
+    plan = locales.plan(current, supported, names)
+    for name in plan.unknown:
+        say(f"{YELLOW}   ! {name} is not a language this system can build; "
+            f"skipped{RESET}")
+
+    built = locales.available()
+    missing = [n for n in plan.ready if not locales.is_built(n, built)]
+    if plan.changed and not write_as_root(plan.text, str(locale_gen)):
+        say(f"{YELLOW}   ! Could not write {locale_gen}; dates stay in the "
+            f"system's language.{RESET}")
+        return False
+    if missing:
+        say(f"   building {len(missing)} date language"
+            f"{'' if len(missing) == 1 else 's'} — a few seconds each on a Pi…")
+        result = run_root(["locale-gen"])
+        if result.returncode != 0:
+            say(f"{YELLOW}   ! locale-gen failed: "
+                f"{(result.stderr or result.stdout).strip()[:160]}{RESET}")
+            return False
+        built = locales.available()
+
+    ready = [n for n in plan.ready if locales.is_built(n, built)]
+    if ready:
+        noun = "date language" if len(ready) == 1 else "date languages"
+        say(f"   {GREEN}✓{RESET} {noun}  {', '.join(locales.short(n) for n in ready)}")
+    wanted_here = (config.viewer.locale or "").strip()
+    if wanted_here and not locales.is_built(wanted_here, built):
+        say(f"{YELLOW}   ! {wanted_here} is still not available, so dates stay "
+            f"in English.{RESET}")
+        return False
+    return True
+
+
 def install_network_rule(user: str) -> bool:
     """Let the frame reconnect its own Wi-Fi, and nothing else.
 
@@ -1004,6 +1075,7 @@ def run(config_path: str | None = None, *, venv_bin: str | None = None,
         # people who run the wizard interactively.
         install_udev_rules()
         install_sync_support(user)
+        install_date_languages(config)
         if shutil.which("systemctl") and Path("/run/systemd/system").exists():
             if write_service_unit(user, Path(venv_bin) if venv_bin else None):
                 run_root(["systemctl", "enable", SERVICE_NAME.format(user=user)])
@@ -1029,6 +1101,7 @@ def run(config_path: str | None = None, *, venv_bin: str | None = None,
 
     groups_ready = fix_groups(user)
     tidy_boot()
+    install_date_languages(config)
     service = install_service(user, Path(venv_bin) if venv_bin else None)
 
     # ---------------------------------------------------------------- finish

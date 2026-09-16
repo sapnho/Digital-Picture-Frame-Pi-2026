@@ -13,6 +13,10 @@
 #
 #   PICFRAME_YES=1    take every default; never ask (unattended installs)
 #   PICFRAME_SETUP=1  on an update, ask the setup questions again anyway
+#   PICFRAME_LOCALES="sv_SE da_DK"
+#                     date languages to build besides the one in the config
+#                     (nothing else is built). Only the frame's dates use
+#                     them; the system and this installer stay English.
 
 set -euo pipefail
 
@@ -137,6 +141,7 @@ OPTIONAL_PACKAGES=(
   gir1.2-gst-plugins-base-1.0
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good
   gstreamer1.0-libav gstreamer1.0-alsa      # …and video playback
+  locales                                   # dates in the owner's language
 )
 PACKAGES=("${REQUIRED_PACKAGES[@]}" "${OPTIONAL_PACKAGES[@]}")
 if command -v apt-get >/dev/null; then
@@ -257,7 +262,7 @@ if [ "$UPDATE" -eq 1 ] && [ -z "${PICFRAME_SETUP:-}" ]; then
   # here reads the existing config, writes it straight back, and refreshes the
   # systemd unit so a renamed option or a moved venv takes effect.
   "$SHIM" --config "$CONFIG" setup --yes --venv-bin "$VENV/bin" >/dev/null
-  ok "$CONFIG untouched; service unit and system rules refreshed"
+  ok "$CONFIG untouched; service unit, system rules and date languages refreshed"
   echo "   Run 'picframe3 setup' to change any of your answers."
 elif [ -n "${PICFRAME_YES:-}" ]; then
   step "4/6  Setting it up"

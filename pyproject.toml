@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "picframe3"
-version = "3.13.1"
+version = "3.14.0"
 description = "A digital picture frame for current Raspberry Pi OS: OpenGL ES on DRM/KMS, no desktop required"
 readme = "README.md"
 requires-python = ">=3.11"

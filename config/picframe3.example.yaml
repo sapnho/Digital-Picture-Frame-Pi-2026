@@ -158,8 +158,11 @@ viewer:
   date_format: '%-d %B %Y'
   # Which language month and day names come out in: de_DE.UTF-8,
   # fr_FR.UTF-8. Empty uses the system's own, which under systemd is usually
-  # English whatever the Pi is set to. The locale has to be generated on the
-  # Pi — doctor says whether it is.
+  # English whatever the Pi is set to. A language has to be built on the Pi
+  # before it works, and only the one chosen here is built: the installer
+  # does it, or picframe3 setup --yes after choosing a new one here. doctor
+  # says whether it is. Only the dates change — the system, the installer
+  # and this page stay in English.
   locale: ''
   show_clock: false       # A large clock over the picture.
   clock_format: '%H:%M'   # strftime: %H:%M or %-I:%M %p.

@@ -117,7 +117,7 @@ NOTES = {
     "viewer.text_margin_y": "Gap above and below the caption inside its band.",
     "viewer.text_scrim": "Darkening behind the caption so it stays legible over a bright picture. 0–1.",
     "viewer.date_format": "strftime: `%-d %B %Y` is \"7 September 2026\", `%d.%m.%Y` is \"07.09.2026\".",
-    "viewer.locale": "Which language month and day names come out in: `de_DE.UTF-8`, `fr_FR.UTF-8`. Empty uses the system's own, which under systemd is usually English whatever the Pi is set to. The locale has to be generated on the Pi — `doctor` says whether it is.",
+    "viewer.locale": "Which language month and day names come out in: `de_DE.UTF-8`, `fr_FR.UTF-8`. Empty uses the system's own, which under systemd is usually English whatever the Pi is set to. A language has to be built on the Pi before it works, and only the one chosen here is built: the installer does it, or `picframe3 setup --yes` after choosing a new one here. `doctor` says whether it is. Only the dates change — the system, the installer and this page stay in English.",
     "viewer.show_clock": "A large clock over the picture.",
     "viewer.clock_format": "strftime: `%H:%M` or `%-I:%M %p`.",
     "viewer.clock_size": "Type size, in pixels at 1080p.",
@@ -519,6 +519,7 @@ DYNAMIC: dict[str, str] = {
     "library.subfolder": "folders",
     "display.rotate": "rotate",
     "sync.folder_type": "sync-directions",
+    "viewer.locale": "locales",
 }
 
 #: Fields nobody should meet before the ones that matter.
@@ -635,6 +636,9 @@ def _options() -> dict[str, list[dict[str, str]]]:
         "address-keys": [{"name": key, "label": f"{key} — {group.lower()}"}
                          for group, keys in NOMINATIM_KEYS for key in keys],
         "folders": [],
+        # Filled in by the web server, which asks the system what is built;
+        # empty here so a schema built without it still draws a menu.
+        "locales": [],
     }
 
 
@@ -970,7 +974,7 @@ def schema(config, extra_options: dict[str, Any] | None = None) -> dict[str, Any
                 kind = "select"
             widget = DYNAMIC.get(dotted)
             if widget in ("transition", "separator", "geo-detail", "rotate",
-                          "sync-directions"):
+                          "sync-directions", "locales"):
                 kind = "select"
             elif widget in ("transitions", "fits", "caption-fields"):
                 kind = "pick"
@@ -1018,4 +1022,11 @@ def schema(config, extra_options: dict[str, Any] | None = None) -> dict[str, Any
         })
     options = _options()
     options.update(extra_options or {})
+    if not options.get("locales"):
+        # The web server builds this off the event loop and passes it in; any
+        # other caller gets the same menu built here.
+        from . import locales
+
+        options["locales"] = locales.options(config.viewer.locale,
+                                             config.viewer.date_format)
     return {"sections": sections, "options": options, "jobs": jobs(config)}
