@@ -76,7 +76,7 @@ NOTES = {
     "slideshow.transition": "Any name from `picframe3 transitions`, or `random`.",
     "slideshow.transition_time": "Seconds the change from one picture to the next takes.",
     "slideshow.transition_choices": "Which transitions `transition: random` may draw from. None ticked means the standard pool.",
-    "slideshow.order": "`shuffle` gives every picture exactly one turn per round, in a fresh random order each round, and keeps the round in the index — so reboots, rescans and newly copied photographs cannot rob the pictures still waiting. `random` has no memory and may repeat. An order picked on the running frame is kept through a restart even if it was never saved, until this file says something different.",
+    "slideshow.order": "`shuffle` gives every picture exactly one turn per round, in a fresh random order each round, and keeps the round in the index — so reboots, rescans and newly copied photographs cannot rob the pictures still waiting. `random` has no memory and may repeat. The order last picked on the web page or in Home Assistant is kept through a restart, even if it was never saved; this value is where a new frame starts, and editing it by hand overrides the remembered choice.",
     "slideshow.recent_days": "Pictures newer than this are shown first in each shuffle round.",
     "slideshow.reshuffle_after": "Complete passes over the library before the order is shuffled again.",
     "slideshow.portrait_pairs": "Two upright photographs side by side on a landscape screen, each with its own caption.",

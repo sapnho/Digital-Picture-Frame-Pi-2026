@@ -512,3 +512,47 @@ def test_an_order_changed_at_runtime_is_remembered_for_the_next_start(tmp_path):
     remembered = frame.library.get_state(ORDER_STATE_KEY)
     assert starting_order(Config().slideshow.order, remembered) == "date_asc"
 
+
+class _OrderOnlyApplier:
+    """Applies just the playlist order, as ``ConfigApplier._on_slideshow`` does."""
+
+    def __init__(self, frame):
+        self.frame = frame
+
+    def apply(self, key):
+        self.apply_all([key])
+
+    def apply_all(self, keys):
+        if "slideshow.order" in keys:
+            self.frame.playlist.set_order(self.frame.config.slideshow.order)
+            self.frame.remember_order()
+
+
+def _frame_with_a_config_file(tmp_path):
+    from picframe3.library.db import Library
+    from picframe3.library.playlist import Playlist
+
+    path = Config().save(str(tmp_path / "c.yaml"))       # order: shuffle
+    frame = PicFrame(Config.from_file(path))
+    frame.library = Library(str(tmp_path / "index.db"))
+    frame.playlist = Playlist(frame.library, persist=False)
+    frame.applier = _OrderOnlyApplier(frame)
+    return frame, path
+
+
+def test_a_reload_keeps_the_order_last_picked_on_the_frame(tmp_path):
+    frame, _ = _frame_with_a_config_file(tmp_path)
+    frame._apply_setting("slideshow.order", "least_played")   # e.g. from HA
+    frame._reload_config()
+    assert frame.playlist.order == "least_played"
+    assert frame.config.slideshow.order == "least_played"
+
+
+def test_a_reload_obeys_an_order_edited_in_the_file(tmp_path):
+    frame, path = _frame_with_a_config_file(tmp_path)
+    frame._apply_setting("slideshow.order", "least_played")
+    edited = Config.from_file(path)
+    edited.slideshow.order = "name"
+    edited.save(path)
+    frame._reload_config()
+    assert frame.playlist.order == "name"

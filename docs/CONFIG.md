@@ -41,7 +41,7 @@ Pacing and sequencing: how long each picture stays, how it changes, what comes n
 | `interval` | number | `180.0` | Seconds each picture stays on screen. |
 | `transition` | string | `'fade'` | Any name from `picframe3 transitions`, or `random`. |
 | `transition_time` | number | `2.5` | Seconds the change from one picture to the next takes. |
-| `order` | string | `'shuffle'` | `shuffle` gives every picture exactly one turn per round, in a fresh random order each round, and keeps the round in the index — so reboots, rescans and newly copied photographs cannot rob the pictures still waiting. `random` has no memory and may repeat. An order picked on the running frame is kept through a restart even if it was never saved, until this file says something different. |
+| `order` | string | `'shuffle'` | `shuffle` gives every picture exactly one turn per round, in a fresh random order each round, and keeps the round in the index — so reboots, rescans and newly copied photographs cannot rob the pictures still waiting. `random` has no memory and may repeat. The order last picked on the web page or in Home Assistant is kept through a restart, even if it was never saved; this value is where a new frame starts, and editing it by hand overrides the remembered choice. |
 | `recent_days` | integer | `7` | Pictures newer than this are shown first in each shuffle round. |
 | `reshuffle_after` | integer | `1` | Complete passes over the library before the order is shuffled again. |
 | `portrait_pairs` | boolean | `False` | Two upright photographs side by side on a landscape screen, each with its own caption. |

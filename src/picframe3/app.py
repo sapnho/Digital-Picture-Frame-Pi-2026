@@ -247,6 +247,11 @@ class PicFrame:
             reshuffle_after=cfg.slideshow.reshuffle_after,
             portrait_pairs=cfg.slideshow.portrait_pairs,
         )
+        # The last order somebody picked is the order in force, so the running
+        # configuration says so too.  Without this the settings page and the
+        # next Save showed the file's older value while the frame played the
+        # remembered one -- which looks exactly like the choice being lost.
+        cfg.slideshow.order = self.playlist.order
         self.loader = SlideLoader(
             (self.backend.width, self.backend.height), self._prepare_options()
         )
@@ -1105,8 +1110,14 @@ class PicFrame:
             _log.error("cannot reload config: %s", exc)
             return
         before = self.config.as_dict()
+        file_order = fresh.slideshow.order
+        if self.playlist and file_order == self._file_order:
+            # The file's order has not been touched since it was last read or
+            # written, so a reload is no reason to throw away the order last
+            # picked on the web page or in Home Assistant.
+            fresh.slideshow.order = self.playlist.order
         self.config = fresh
-        self._file_order = fresh.slideshow.order
+        self._file_order = file_order
         changed = settings_module.changed_keys(before, fresh.as_dict())
         self._restart_needed = settings_module.restart_required(changed)
         self.applier.apply_all(changed)

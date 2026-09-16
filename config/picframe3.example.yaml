@@ -57,9 +57,10 @@ slideshow:
   # shuffle gives every picture exactly one turn per round, in a fresh
   # random order each round, and keeps the round in the index — so reboots,
   # rescans and newly copied photographs cannot rob the pictures still
-  # waiting. random has no memory and may repeat. An order picked on the
-  # running frame is kept through a restart even if it was never saved,
-  # until this file says something different.
+  # waiting. random has no memory and may repeat. The order last picked on
+  # the web page or in Home Assistant is kept through a restart, even if it
+  # was never saved; this value is where a new frame starts, and editing it
+  # by hand overrides the remembered choice.
   order: shuffle
   recent_days: 7          # Pictures newer than this are shown first in each shuffle round.
   reshuffle_after: 1      # Complete passes over the library before the order is shuffled again.
