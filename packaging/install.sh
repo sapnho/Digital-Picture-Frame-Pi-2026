@@ -204,7 +204,7 @@ fi
 step "3/6  picframe3"
 if [ "$MODE" = "download" ]; then
   WORKDIR="$(mktemp -d)"
-  echo "   fetching $REPO…"
+  echo "   fetching ${REPO}…"
   if curl -fsSL "$ARCHIVE" 2>/dev/null | tar xz -C "$WORKDIR" 2>/dev/null && \
      [ -n "$(find "$WORKDIR" -maxdepth 2 -name pyproject.toml -print -quit)" ]; then
     SOURCE="$(dirname "$(find "$WORKDIR" -maxdepth 2 -name pyproject.toml -print -quit)")"
