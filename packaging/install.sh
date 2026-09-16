@@ -105,6 +105,12 @@ else
   echo "   installing $SOURCE_DESC"
 fi
 echo "   for user   $RUN_USER"
+echo
+# The first minutes print almost nothing: apt refreshes its package lists and
+# installs quietly, and on a fresh Pi that alone can take several minutes. A
+# user reported exactly that silence as "did it freeze?", so say it up front.
+echo "   Initializing — the whole install can take several minutes on a Pi."
+echo "   Some steps stay quiet for a while; that is normal, nothing has frozen."
 
 # ---------------------------------------------------------------- 1. packages
 step "1/6  System packages"
@@ -134,6 +140,8 @@ OPTIONAL_PACKAGES=(
 )
 PACKAGES=("${REQUIRED_PACKAGES[@]}" "${OPTIONAL_PACKAGES[@]}")
 if command -v apt-get >/dev/null; then
+  echo "   refreshing the package lists and installing system packages…"
+  echo "   (this can take a few minutes with no further output)"
   $SUDO apt-get update -qq
   if $SUDO apt-get install -y --no-install-recommends "${PACKAGES[@]}" >/dev/null 2>&1; then
     ok "${#PACKAGES[@]} packages present"
