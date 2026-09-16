@@ -62,12 +62,34 @@ short series of questions:
 5. Home Assistant                       optional MQTT
 6. How it should look                   interval, transition, mats,
                                         Ken Burns, clock, night-time off
-7. Place names                          optional GPS → place names
-8. Starting automatically               the systemd service
+7. Date and time language               month and day names in your language
+8. Place names                          optional GPS → place names
+9. Starting automatically               the systemd service
 ```
 
 Every question has a default in brackets — holding Return down is a valid way
 to use it. Nothing is destructive, and `picframe3 setup` re-runs it any time.
+
+**Changing one thing later.** Once the frame is set up, `picframe3 setup` does
+not ask everything again. It lists the parts with what is set now and asks
+which one to change:
+
+```
+    1  Picture folder                       ~/Pictures
+    2  Getting photographs onto the frame   Syncthing
+    3  Web interface                        on, port 9000
+    4  Home Assistant                       homeassistant.local as “Picture Frame”
+    5  How it should look                   12 s · fade · screen off 23:00–07:00
+    6  Date and time language               Deutsch (de_DE)
+    7  Place names                          off
+    8  Everything, one question after another
+```
+
+Type `6` (or several, like `2,6`) and only those questions come. Every default
+is the current value, so Return keeps what is there. If something changed, the
+setup saves it, builds a new date language if one was chosen, and offers to
+restart the frame. To skip the list, name the part: `picframe3 setup dates`
+(also `pictures`, `copying`, `web`, `mqtt`, `look`, `geo`, `all`).
 
 **Then reboot**, so the group membership takes effect:
 
@@ -419,9 +441,9 @@ reboot.
 
 **Dates are in English although `viewer.locale` is set** — the language has
 to be built on the Pi before the frame can use it, and only the language you
-chose is built. The installer does that; after choosing a different one in the
-settings, run `picframe3 setup --yes` (it keeps your answers) and restart the
-frame. `picframe3 doctor` shows a sample date when it works. Only the dates
+chose is built. The installer does that, and so does `picframe3 setup dates`;
+after choosing a different one in the settings page instead, run
+`picframe3 setup --yes` (it keeps your answers) and restart the frame. `picframe3 doctor` shows a sample date when it works. Only the dates
 change: the system, the installer and the web interface stay in English.
 
 **Place names never appear** — they need `geo.enabled` *and* `geo.contact`

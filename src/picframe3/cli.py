@@ -778,7 +778,8 @@ def cmd_setup(args) -> int:
     setup_logging(args.log_level or "WARNING", "", False)
     from .wizard import run as run_wizard
 
-    return run_wizard(args.config, venv_bin=args.venv_bin, assume_yes=args.yes)
+    return run_wizard(args.config, venv_bin=args.venv_bin, assume_yes=args.yes,
+                      sections=args.sections)
 
 
 #: Where `picframe3 setup` and the installer put the shim on PATH.
@@ -989,7 +990,10 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--transition", default="fade")
     demo.set_defaults(func=cmd_demo)
 
-    wiz = sub.add_parser("setup", help="interactive first-run setup")
+    wiz = sub.add_parser("setup", help="interactive setup; run again to change one part")
+    wiz.add_argument("sections", nargs="*", metavar="PART",
+                     help="go straight to one part: pictures, copying, web, mqtt, "
+                          "look, dates, geo (or all). Without it, setup asks.")
     wiz.add_argument("--yes", action="store_true",
                      help="take every default without asking")
     wiz.add_argument("--venv-bin", help="bin/ directory of the virtual environment, "

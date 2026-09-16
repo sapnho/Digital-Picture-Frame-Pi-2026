@@ -9,6 +9,10 @@ session.  What is left is a handful of questions.
 
 Everything the wizard does is idempotent and re-runnable, and every answer has
 a default that works, so holding down Return is a valid way to use it.
+
+Run a second time it does not walk through everything again: it shows what is
+set, asks which part to change, and asks only about that.  Every default is
+the current value, so a question answered with Return changes nothing.
 """
 
 from __future__ import annotations
@@ -106,6 +110,20 @@ def say(text: str = "") -> None:
 
 def heading(text: str) -> None:
     print(f"\n{BOLD}{text}{RESET}")
+
+
+#: The number the next step heading gets, or ``None`` when only some steps
+#: are being run -- "7. Date and time language" on its own reads like six
+#: steps were skipped.
+_STEP: list[int | None] = [None]
+
+
+def step(title: str) -> None:
+    if _STEP[0] is None:
+        heading(title)
+        return
+    _STEP[0] += 1
+    heading(f"{_STEP[0]}. {title}")
 
 
 def note(text: str) -> None:
@@ -269,7 +287,7 @@ def missing_groups(user: str) -> list[str]:
 
 def check_hardware() -> bool:
     """Report what the frame will be running on, and warn about known limits."""
-    heading("1. This machine")
+    step("This machine")
     model = pi_model()
     release = os_release()
     say(f"   {model or 'unknown hardware'}")
@@ -307,7 +325,7 @@ def check_hardware() -> bool:
 
 
 def choose_pictures(config: Config) -> None:
-    heading("2. Where your pictures are")
+    step("Where your pictures are")
     default = config.library.picture_folders[0] if config.library.picture_folders else "~/Pictures"
     folder = ask("   Picture folder", default)
     path = Path(folder).expanduser()
@@ -345,9 +363,29 @@ def copying_choice(answer: str) -> tuple[bool, bool]:
     return COPYING_CHOICES.get(str(answer or "").strip().lower(), (True, False))
 
 
+def samba_configured() -> bool:
+    """Whether setup has already written its share into smb.conf."""
+    try:
+        return SAMBA_BEGIN in Path(SAMBA_CONF).read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def _copying_default(config: Config) -> str:
+    """The answer that keeps things as they are, ``"1"`` on a fresh frame."""
+    sync, share = config.sync.enabled, samba_configured()
+    if sync and share:
+        return "3"
+    if share:
+        return "2"
+    if sync or not os.path.exists(config.source_path or ""):
+        return "1"
+    return "4"
+
+
 def setup_copying(config: Config, user: str) -> tuple[bool, bool]:
     """Step 3: how photographs get onto the frame.  Both ways are offered."""
-    heading("3. Getting photographs onto the frame")
+    step("Getting photographs onto the frame")
     note("Two ways, and you can have both. Syncthing keeps a folder on your "
          "phone, your Mac or a NAS in step with the frame by itself \u2014 a "
          "photograph taken this afternoon is on the wall this afternoon, from "
@@ -360,7 +398,7 @@ def setup_copying(config: Config, user: str) -> tuple[bool, bool]:
     say("     3  Both")
     say("     4  Neither; I will copy the files on myself")
     say("")
-    want_sync, want_share = copying_choice(ask("   Which", "1"))
+    want_sync, want_share = copying_choice(ask("   Which", _copying_default(config)))
     synced = setup_syncthing(config, user) if want_sync else False
     shared = setup_samba(config, user) if want_share else False
     return synced, shared
@@ -645,7 +683,7 @@ def advertise_share() -> bool:
 
 
 def setup_web(config: Config) -> None:
-    heading("4. Controlling the frame from your phone")
+    step("Controlling the frame from your phone")
     config.http.enabled = confirm("   Enable the web interface?", default=True)
     if not config.http.enabled:
         return
@@ -654,29 +692,38 @@ def setup_web(config: Config) -> None:
         config.http.port = int(port)
     except ValueError:
         pass
-    if confirm("   Require a username and password for it?", default=False):
-        config.http.auth_user = ask("   Username", "frame")
-        config.http.auth_password = ask("   Password", secret=True)
+    if confirm("   Require a username and password for it?",
+               default=bool(config.http.auth_user)):
+        config.http.auth_user = ask("   Username", config.http.auth_user or "frame")
+        if not (config.http.auth_password
+                and confirm("   Keep the current password?", default=True)):
+            config.http.auth_password = ask("   Password", secret=True)
+    else:
+        config.http.auth_user = config.http.auth_password = ""
     say(f"   {GREEN}✓{RESET} http://{socket.gethostname()}.local:{config.http.port}/")
 
 
 def setup_mqtt(config: Config) -> None:
-    heading("5. Home Assistant")
+    step("Home Assistant")
     note("If you run Home Assistant, the frame can appear there automatically as a "
          "light, a pause switch, buttons and sensors — no YAML on that side.")
-    config.mqtt.enabled = confirm("   Connect to an MQTT broker?", default=False)
+    config.mqtt.enabled = confirm("   Connect to an MQTT broker?",
+                                  default=config.mqtt.enabled)
     if not config.mqtt.enabled:
         return
     config.mqtt.host = ask("   Broker host", config.mqtt.host or "homeassistant.local")
     config.mqtt.port = int(ask("   Port", str(config.mqtt.port)) or config.mqtt.port)
     config.mqtt.username = ask("   Username", config.mqtt.username)
-    if config.mqtt.username:
+    if config.mqtt.username and not (
+            config.mqtt.password
+            and confirm("   Keep the current password?", default=True)):
         config.mqtt.password = ask("   Password", secret=True)
-    config.mqtt.device_name = ask("   Name to show in Home Assistant", "Picture Frame")
+    config.mqtt.device_name = ask("   Name to show in Home Assistant",
+                                  config.mqtt.device_name or "Picture Frame")
 
 
 def setup_look(config: Config) -> None:
-    heading("6. How it should look")
+    step("How it should look")
     seconds = ask("   Seconds per picture", str(int(config.slideshow.interval)))
     try:
         config.slideshow.interval = float(seconds)
@@ -688,25 +735,113 @@ def setup_look(config: Config) -> None:
     say(f"   Transitions: {', '.join(transitions.names())}")
     config.slideshow.transition = ask("   Transition (or 'random')",
                                       config.slideshow.transition)
-    config.viewer.fit = "auto" if confirm(
-        "   Frame portrait photos in a mat instead of cropping them?", default=True
-    ) else "cover"
-    config.slideshow.kenburns = confirm("   Slow pan and zoom (Ken Burns)?", default=False)
-    config.viewer.show_clock = confirm("   Show a clock?", default=False)
+    if confirm("   Frame portrait photos in a mat instead of cropping them?",
+               default=config.viewer.fit != "cover"):
+        if config.viewer.fit == "cover":
+            config.viewer.fit = "auto"
+    else:
+        config.viewer.fit = "cover"
+    config.slideshow.kenburns = confirm("   Slow pan and zoom (Ken Burns)?",
+                                        default=config.slideshow.kenburns)
+    config.viewer.show_clock = confirm("   Show a clock?",
+                                       default=config.viewer.show_clock)
 
-    if confirm("   Turn the screen off overnight?", default=True):
-        off = ask("   Off from", "23:00")
-        on = ask("   Back on at", "07:00")
+    fresh = not os.path.exists(config.source_path or "")
+    off, on = night_off(config.power.schedule)
+    if confirm("   Turn the screen off overnight?",
+               default=fresh or bool(config.power.schedule)):
+        off = ask("   Off from", off)
+        on = ask("   Back on at", on)
         config.power.schedule = {"all": [f"{off}-{on}"]}
+    else:
+        config.power.schedule = {}
+
+
+def night_off(schedule: dict) -> tuple[str, str]:
+    """The first ``"23:00-07:00"`` range in a schedule, as ``("23:00", "07:00")``."""
+    for ranges in (schedule or {}).values():
+        for text in ranges if isinstance(ranges, list) else [ranges]:
+            start, sep, end = str(text).partition("-")
+            if sep and start.strip() and end.strip():
+                return start.strip(), end.strip()
+    return "23:00", "07:00"
+
+
+def date_language_choices(config: Config,
+                          built: list[str] | None = None) -> list[tuple[str, str]]:
+    """``[(locale, label), …]`` for the date-language question.
+
+    The same list as the settings page, except that a language that is not
+    built yet is not a dead end here: setup builds it straight afterwards.
+    """
+    from . import locales
+
+    items = locales.options(config.viewer.locale, config.viewer.date_format, built)
+    out = []
+    for item in items:
+        label = item["label"]
+        if "not built yet" in label:
+            label = label.split(" — not built yet", 1)[0] + " — will be installed"
+        out.append((item["name"], label))
+    return out
+
+
+def date_language_answer(answer: str, choices: list[tuple[str, str]],
+                         current: str) -> str | None:
+    """A number from the list, a locale such as ``sv_SE``, or Return for no change.
+
+    ``None`` means the answer was neither, so the question is asked again.
+    """
+    from . import locales
+
+    answer = (answer or "").strip()
+    if not answer:
+        return current
+    if answer.isdigit():
+        index = int(answer) - 1
+        return choices[index][0] if 0 <= index < len(choices) else None
+    if answer.lower() in ("system", "default", "none", "-"):
+        return ""
+    if locales._NAME.match(answer.replace("-", "_")):
+        return locales.canonical(answer)
+    return None
+
+
+def setup_dates(config: Config) -> None:
+    step("Date and time language")
+    note("The language month and day names are written in, in the caption and "
+         "the clock. The frame's own messages and this setup stay in English.")
+    choices = date_language_choices(config)
+    current = (config.viewer.locale or "").strip()
+    from . import locales
+
+    default = "1"
+    say("")
+    for index, (name, label) in enumerate(choices, 1):
+        here = (name == current) or (current and name
+                                     and locales.key(name) == locales.key(current))
+        if here or (not current and not name):
+            default = str(index)
+        say(f"    {index:>2}  {label}{'   ← now' if here and current else ''}")
+    say("")
+    note("Another language: type its code, for example sv_SE or pl_PL.")
+    while True:
+        chosen = date_language_answer(ask("   Which", default), choices, current)
+        if chosen is not None:
+            break
+        say("   Type a number from the list, or a code like sv_SE.")
+    config.viewer.locale = chosen
+    say(f"   {GREEN}✓{RESET} {locales.label(chosen) if chosen else 'system default'}")
 
 
 def setup_geo(config: Config) -> None:
-    heading("7. Place names")
+    step("Place names")
     note("Photographs with GPS coordinates can show where they were taken. The "
          "lookup uses OpenStreetMap, whose terms ask for a contact address so "
          "they can get in touch if something misbehaves. Nothing but the "
          "coordinates is sent.")
-    if not confirm("   Turn place names on?", default=False):
+    if not confirm("   Turn place names on?", default=config.geo.enabled):
+        config.geo.enabled = False
         return
     config.geo.enabled = True
     config.geo.contact = ask("   Your email address", config.geo.contact)
@@ -716,7 +851,7 @@ def setup_geo(config: Config) -> None:
 
 
 def install_service(user: str, venv_bin: Path | None) -> bool:
-    heading("8. Starting automatically")
+    step("Starting automatically")
     if shutil.which("systemctl") is None:
         say(f"{YELLOW}   ! systemd not found; start the frame with 'picframe3 run'.{RESET}")
         return False
@@ -1046,11 +1181,151 @@ def fix_groups(user: str) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Changing one thing
+# --------------------------------------------------------------------------
+
+#: The parts of the setup that can be run on their own, in the order the full
+#: walk asks them.  Each has names it can be picked by, besides its number.
+SECTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("pictures", "Picture folder", ("folder", "library")),
+    ("copying", "Getting photographs onto the frame",
+     ("syncthing", "sync", "share", "samba")),
+    ("web", "Web interface", ("http", "phone")),
+    ("mqtt", "Home Assistant", ("ha", "homeassistant", "home-assistant")),
+    ("look", "How it should look", ("slideshow", "clock", "schedule")),
+    ("dates", "Date and time language", ("date", "language", "locale", "time")),
+    ("geo", "Place names", ("places", "place", "gps")),
+)
+
+
+def section_summaries(config: Config, *, share: bool | None = None) -> dict[str, str]:
+    """One line per section saying what is set now."""
+    from . import locales
+
+    share = samba_configured() if share is None else share
+    copying = [w for w, on in (("Syncthing", config.sync.enabled),
+                               ("file share", share)) if on]
+    web = (f"on, port {config.http.port}"
+           + (", with a password" if config.http.auth_user else "")
+           if config.http.enabled else "off")
+    mqtt = (f"{config.mqtt.host or '?'} as \u201c{config.mqtt.device_name}\u201d"
+            if config.mqtt.enabled else "off")
+    look = [f"{config.slideshow.interval:g} s", config.slideshow.transition]
+    if config.slideshow.kenburns:
+        look.append("Ken Burns")
+    if config.viewer.show_clock:
+        look.append("clock")
+    if config.power.schedule:
+        off, on = night_off(config.power.schedule)
+        look.append(f"screen off {off}\u2013{on}")
+    locale = (config.viewer.locale or "").strip()
+    geo = (f"on ({config.geo.contact})" if config.geo.enabled else "off")
+    return {
+        "pictures": ", ".join(config.library.picture_folders) or "~/Pictures",
+        "copying": " and ".join(copying) or "copied on by hand",
+        "web": web,
+        "mqtt": mqtt,
+        "look": " \u00b7 ".join(look),
+        "dates": locales.label(locale, sample=False) if locale else "system default",
+        "geo": geo,
+    }
+
+
+def parse_sections(answer: str | list[str]) -> list[str] | None:
+    """``"6"``, ``"1, 5"``, ``"dates"`` or ``"all"`` -> section keys, in walk order.
+
+    ``[]`` is "nothing", ``["all"]`` the full walk, ``None`` an answer that
+    names nothing we know -- asked again rather than guessed, because guessing
+    here means asking about the wrong thing.
+    """
+    words = answer if isinstance(answer, list) else [answer]
+    tokens = [t for w in words for t in str(w or "").replace(",", " ").lower().split()]
+    if not tokens:
+        return []
+    picked: set[str] = set()
+    for token in tokens:
+        if token in ("all", "everything", "alles"):
+            return ["all"]
+        if token.isdigit() and 1 <= int(token) <= len(SECTIONS):
+            picked.add(SECTIONS[int(token) - 1][0])
+            continue
+        match = [key for key, _title, names in SECTIONS
+                 if token == key or token in names]
+        if not match:
+            return None
+        picked.update(match)
+    return [key for key, _title, _names in SECTIONS if key in picked]
+
+
+def choose_sections(config: Config) -> list[str]:
+    summaries = section_summaries(config)
+    heading("What would you like to change?")
+    say("")
+    for index, (key, title, _names) in enumerate(SECTIONS, 1):
+        say(f"    {index}  {title:<36} {DIM}{summaries[key]}{RESET}")
+    say(f"    {len(SECTIONS) + 1}  Everything, one question after another")
+    say("")
+    note("Type a number, or several like 2,6. Return leaves everything as it is.")
+    while True:
+        answer = ask("   Change")
+        if answer.strip() == str(len(SECTIONS) + 1):
+            return ["all"]
+        picked = parse_sections(answer)
+        if picked is not None:
+            return picked
+        say(f"   Type a number from 1 to {len(SECTIONS) + 1}.")
+
+
+def restart_frame(user: str) -> None:
+    """Restart the running frame so it reads the file it is not watching."""
+    name = SERVICE_NAME.format(user=user)
+    if shutil.which("systemctl") is None:
+        return
+    active = subprocess.run(["systemctl", "is-active", "--quiet", name],
+                            capture_output=True, check=False).returncode == 0
+    if not active:
+        return
+    if not confirm("   Restart the frame now so it uses the change?", default=True):
+        say(f"   It picks it up at the next start:  sudo systemctl restart {name}")
+        return
+    result = run_root(["systemctl", "restart", name])
+    if result.returncode == 0:
+        say(f"   {GREEN}✓{RESET} frame restarted")
+    else:
+        say(f"{YELLOW}   ! Could not restart it: "
+            f"{(result.stderr or result.stdout).strip()[:160]}{RESET}")
+
+
+def run_sections(config: Config, target: str, user: str, sections: list[str]) -> int:
+    steps = {
+        "pictures": lambda: choose_pictures(config),
+        "copying": lambda: setup_copying(config, user),
+        "web": lambda: setup_web(config),
+        "mqtt": lambda: setup_mqtt(config),
+        "look": lambda: setup_look(config),
+        "dates": lambda: setup_dates(config),
+        "geo": lambda: setup_geo(config),
+    }
+    before = config.as_dict()
+    for key in sections:
+        steps[key]()
+    if config.as_dict() == before:
+        say("\n   Nothing changed.")
+        return 0
+    config.save(target)
+    say(f"\n   {GREEN}✓{RESET} saved to {target}")
+    if "dates" in sections:
+        install_date_languages(config)
+    restart_frame(user)
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
 
 def run(config_path: str | None = None, *, venv_bin: str | None = None,
-        assume_yes: bool = False) -> int:
+        assume_yes: bool = False, sections: list[str] | None = None) -> int:
     user = os.environ.get("SUDO_USER") or getpass.getuser()
     target = os.path.expanduser(config_path or DEFAULT_CONFIG_PATHS[0])
 
@@ -1058,6 +1333,15 @@ def run(config_path: str | None = None, *, venv_bin: str | None = None,
     note("Every question has a sensible default in brackets; press Return to take "
          "it. You can run 'picframe3 setup' again at any time, and nothing here "
          "is destructive.")
+
+    wanted: list[str] | None = None
+    if sections:
+        wanted = parse_sections(sections)
+        if wanted is None:
+            names = ", ".join(key for key, _t, _n in SECTIONS)
+            say(f"{YELLOW}Unknown part {' '.join(sections)!r}. "
+                f"Pick from: {names}, or all.{RESET}")
+            return 2
 
     if not _tty() or assume_yes:
         say("\nTaking every default (no interactive terminal, or --yes).")
@@ -1083,17 +1367,31 @@ def run(config_path: str | None = None, *, venv_bin: str | None = None,
         say("   Run 'picframe3 setup' on a terminal to change any of this.")
         return 0
 
-    hardware_ok = check_hardware()
-
-    config = Config.load(target) if os.path.exists(target) else Config()
     if os.path.exists(target):
+        config = Config.load(target)
+        if wanted is None:
+            wanted = choose_sections(config)
+        if not wanted:
+            say("\n   Nothing changed.")
+            return 0
+        if wanted != ["all"]:
+            _STEP[0] = None
+            return run_sections(config, target, user, wanted)
         note(f"Starting from your existing {target}.")
+    else:
+        config = Config()
+        if wanted and wanted != ["all"]:
+            note("There is no configuration yet, so this is the whole setup.")
+
+    _STEP[0] = 0
+    hardware_ok = check_hardware()
 
     choose_pictures(config)
     synced, shared = setup_copying(config, user)
     setup_web(config)
     setup_mqtt(config)
     setup_look(config)
+    setup_dates(config)
     setup_geo(config)
 
     config.save(target)
