@@ -1015,6 +1015,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A Pi in a non-UTF-8 locale -- a Spanish install gives Python a latin-1
+    # stdout -- cannot encode the dashes and check marks the wizard prints,
+    # and setup died with a UnicodeEncodeError before asking its first
+    # question.  The text is ours, so the streams get told what it is.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "func", None):

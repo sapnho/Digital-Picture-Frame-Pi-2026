@@ -20,6 +20,11 @@
 
 set -euo pipefail
 
+# picframe3's own output is UTF-8.  On a Pi whose locale is not (a Spanish
+# install hands Python a latin-1 stdout), printing a dash aborted setup with
+# a UnicodeEncodeError, so say so once here for every Python we start.
+export PYTHONIOENCODING=utf-8
+
 VENV="${PICFRAME_VENV:-$HOME/.local/share/picframe3/venv}"
 CONFIG="${PICFRAME_CONFIG:-$HOME/.config/picframe3/config.yaml}"
 SHIM="/usr/local/bin/picframe3"
