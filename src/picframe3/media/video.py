@@ -57,6 +57,18 @@ def available() -> bool:
     return _gst_ready
 
 
+#: Turns the picture the way the file says it should be shown.  A phone films
+#: in the sensor's landscape orientation and records the turn as a flag (the
+#: display matrix in the MP4/MOV header) instead of turning the pixels; the
+#: demuxer passes that on as an ``image-orientation`` tag, and a player has to
+#: act on it -- which is what VLC on a PC does.  ``video-direction=auto`` makes
+#: videoflip follow the tag, and for a file without one it is a passthrough
+#: that costs nothing.  It sits *before* videoscale, so the scaler letterboxes
+#: the upright picture: a portrait clip gets bars left and right on a landscape
+#: panel, not a sideways film filling the screen.
+_ORIENT = "videoflip video-direction=auto"
+
+
 def _uri(path: str) -> str:
     from urllib.parse import quote
 
@@ -119,6 +131,15 @@ def _hw_decode_note(width: int, height: int, codec: str = "",
 # Probing
 # --------------------------------------------------------------------------
 
+#: GStreamer's ``image-orientation`` tag as the EXIF orientation number the
+#: library stores for photographs; 5 to 8 are the ones that swap width and
+#: height, which is what decides whether a clip counts as portrait.
+_ORIENTATION_TAG = {
+    "rotate-0": 1, "flip-rotate-0": 2, "rotate-180": 3, "flip-rotate-180": 4,
+    "flip-rotate-270": 5, "rotate-90": 6, "flip-rotate-90": 7, "rotate-270": 8,
+}
+
+
 def probe(path: str, timeout: float = 5.0) -> dict | None:
     """Dimensions, duration and rotation, without decoding the whole file."""
     if not available():
@@ -151,9 +172,7 @@ def probe(path: str, timeout: float = 5.0) -> dict | None:
         if tags is not None:
             ok, value = tags.get_string("image-orientation")
             if ok:
-                out["orientation"] = {
-                    "rotate-0": 1, "rotate-180": 3, "rotate-90": 6, "rotate-270": 8,
-                }.get(value, 1)
+                out["orientation"] = _ORIENTATION_TAG.get(value, 1)
             ok, dt = tags.get_date_time("datetime")
             if ok and dt is not None:
                 try:
@@ -175,7 +194,7 @@ def poster_frame(path: str, size: tuple[int, int], position: float = 0.1,
 
     w, h = size
     desc = (
-        f'uridecodebin uri="{_uri(path)}" ! videoconvert ! videoscale '
+        f'uridecodebin uri="{_uri(path)}" ! videoconvert ! {_ORIENT} ! videoscale '
         f"! video/x-raw,format=RGB,width={w},height={h},pixel-aspect-ratio=1/1 "
         f"! appsink name=sink max-buffers=1 drop=false sync=false"
     )
@@ -292,10 +311,12 @@ class VideoPlayer:
         w, h = self.size
         # videoscale with add-borders keeps the aspect ratio and pads, so the
         # texture handed to the renderer is always exactly screen sized and no
-        # special case for video is needed anywhere else.
+        # special case for video is needed anywhere else.  The turn for a clip
+        # filmed upright happens before it (see _ORIENT), so the renderer never
+        # learns that a video was rotated either.
         borders = "false" if self.fit == "cover" else "true"
         sink_desc = (
-            f"videoconvert ! videoscale add-borders={borders} "
+            f"videoconvert ! {_ORIENT} ! videoscale add-borders={borders} "
             f"! video/x-raw,format=RGBA,width={w},height={h},pixel-aspect-ratio=1/1 "
             f"! appsink name=sink max-buffers=2 drop=true sync=true"
         )

@@ -426,3 +426,89 @@ def test_a_pi5_gets_no_note_at_4k():
 
 def test_off_a_pi_there_is_nothing_to_say():
     assert video_module._hw_decode_note(3840, 2160, "video/x-h264", model="") is None
+
+
+# --------------------------------------------------------------------------
+# Clips filmed upright
+# --------------------------------------------------------------------------
+#
+# A phone records a portrait clip as landscape pixels plus a flag that says
+# "turn me a quarter".  VLC on a PC honours the flag; a pipeline without a
+# videoflip in it does not, and the clip plays lying on its side.
+
+def test_the_player_turns_the_picture_before_scaling_it(monkeypatch):
+    descs = []
+
+    def parse_bin(desc, ghost):
+        descs.append(desc)
+        return FakeBin(FakeAppsink())
+
+    monkeypatch.setattr(video_module, "_gst_ready", True)
+    monkeypatch.setattr(video_module, "Gst", FakeGst)
+    monkeypatch.setattr(FakeGst, "parse_bin_from_description", staticmethod(parse_bin))
+    p = video_module.VideoPlayer((16, 9))
+    try:
+        assert p.play("/x/upright.mp4")
+    finally:
+        p.stop()
+    (desc,) = descs
+    assert "videoflip video-direction=auto" in desc
+    # Before the scaler, so the bars go left and right of the upright picture.
+    assert desc.index("videoflip") < desc.index("videoscale")
+
+
+def test_the_poster_frame_is_turned_too(monkeypatch):
+    sink = FakePosterSink(sample=None)
+    gst, pipeline = _poster_gst(monkeypatch, sink, "success")
+    descs = []
+    gst.parse_launch = lambda desc: descs.append(desc) or pipeline
+
+    video_module.poster_frame("/x/upright.mp4", (32, 24), timeout=1.0)
+    (desc,) = descs
+    assert "videoflip video-direction=auto" in desc
+    assert desc.index("videoflip") < desc.index("videoscale")
+
+
+@pytest.mark.parametrize("tag, exif", [
+    ("rotate-0", 1), ("rotate-90", 6), ("rotate-180", 3), ("rotate-270", 8),
+    ("flip-rotate-0", 2), ("flip-rotate-180", 4),
+    ("flip-rotate-90", 7), ("flip-rotate-270", 5),
+])
+def test_every_orientation_tag_has_an_exif_number(tag, exif):
+    assert video_module._ORIENTATION_TAG[tag] == exif
+
+
+def _real_clip(tmp_path, rotation):
+    """A 64x36 landscape clip whose header says to turn it ``rotation`` degrees."""
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
+    plain = tmp_path / "plain.mp4"
+    clip = tmp_path / "clip.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "testsrc=size=64x36:rate=10:duration=1",
+                    "-pix_fmt", "yuv420p", str(plain)], check=True)
+    done = subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                           "-display_rotation", str(rotation), "-i", str(plain),
+                           "-c", "copy", str(clip)])
+    if done.returncode != 0:
+        pytest.skip("this ffmpeg cannot write a display matrix")
+    return str(clip)
+
+
+def test_a_clip_filmed_upright_comes_out_upright(tmp_path):
+    """Real GStreamer, when there is one: the poster stands up and is pillarboxed."""
+    if not video_module.available():
+        pytest.skip("GStreamer is not installed")
+    clip = _real_clip(tmp_path, -90)        # what an iPhone writes for portrait
+
+    info = video_module.probe(clip)
+    assert info["orientation"] in (6, 8)
+
+    image = video_module.poster_frame(clip, (160, 90))
+    assert image is not None
+    left, top, right, bottom = image.convert("L").point(
+        lambda v: 255 if v > 20 else 0).getbbox()
+    assert right - left < bottom - top, "the clip still lies on its side"
